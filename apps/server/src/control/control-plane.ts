@@ -1,0 +1,747 @@
+// ControlPlane — the orchestrator (§3). Decides how the contest is played.
+// Polls → syncs challenges → prepares → triages → schedules → supervises
+// workers → verifies/submits → reacts to hints/feedback/recovery.
+import type { RioLogger, RuntimeConfig } from "@rio/shared";
+import type { Repositories } from "@rio/database";
+import { SOLVER_CATEGORIES, type Challenge, type SolverType, type ModelRef } from "@rio/domain";
+import type { ContestAdapter } from "@rio/contest";
+import { Poller, ApiRateLimiter, DiskManager } from "@rio/contest";
+import { WorkspaceManager } from "@rio/tool-runtime";
+import { systemPromptFor } from "@rio/solver";
+import { ResourceSemaphore, computePriorityScore } from "@rio/scheduler";
+import { StateMachine } from "../state-machine.js";
+import { EventBus } from "./bus.js";
+import { WorkerPool, type WorkerMessage } from "./worker-pool.js";
+import { PreparationService } from "./preparation.js";
+import { SubmissionManager } from "./submission.js";
+import { HintManager } from "./hints.js";
+import { ReflectionService } from "./reflection.js";
+import { RecoveryManager } from "./recovery.js";
+import { ModelRegistry } from "./registry.js";
+import { createHash } from "node:crypto";
+
+export interface ControlPlaneDeps {
+  repos: Repositories;
+  adapter: ContestAdapter;
+  config: RuntimeConfig;
+  logger: RioLogger;
+  bus: EventBus;
+  workspacesRoot: string;
+  sessionsRoot: string;
+  agentRuntime: "mock" | "pi";
+  stateMachine: StateMachine;
+  preparation: PreparationService;
+  submission: SubmissionManager;
+  hints: HintManager;
+  reflection: ReflectionService;
+  registry: ModelRegistry;
+  recovery: RecoveryManager;
+}
+
+export class ControlPlane {  private poller: Poller;
+  private disk: DiskManager;
+  private workspace: WorkspaceManager;
+  private limiter = new ApiRateLimiter();
+  private llmSlots: ResourceSemaphore;
+  private llmHeld = new Map<string, () => void>();
+  private workerPool: WorkerPool;
+  private schedulerTimer: NodeJS.Timeout | null = null;
+  private hintTimer: NodeJS.Timeout | null = null;
+  private watchdogTimer: NodeJS.Timeout | null = null;
+  private preparing = new Set<string>();
+  private stopped = false;
+  private intentionallyStopped = new Set<string>();
+  private reflectCooldown = new Map<string, number>();
+
+  constructor(private deps: ControlPlaneDeps) {
+    this.disk = new DiskManager(deps.workspacesRoot, {
+      globalWorkspaceLimitGb: deps.config.storage.globalWorkspaceLimitGb,
+      reserveDiskGb: deps.config.storage.reserveDiskGb,
+      perChallengeSoftLimitGb: deps.config.storage.perChallengeSoftLimitGb,
+      maxConcurrentDownloads: deps.config.storage.maxConcurrentDownloads,
+    });
+    this.workspace = new WorkspaceManager(deps.workspacesRoot);
+    this.llmSlots = new ResourceSemaphore({ LLM: deps.config.resources.llm });
+    this.poller = new Poller({
+      initialMs: deps.config.contest.poll.initialMs,
+      maxMs: deps.config.contest.poll.maxMs,
+      backoffFactor: deps.config.contest.poll.backoffFactor,
+      cooldownAfterChangeMs: deps.config.contest.poll.cooldownAfterChangeMs,
+      logger: deps.logger,
+    });
+    this.workerPool = new WorkerPool(
+      deps.repos,
+      deps.logger,
+      {
+        onMessage: (challengeId, msg) => void this.onWorkerMessage(challengeId, msg),
+        onWorkerLost: (challengeId) => this.onWorkerLost(challengeId),
+        onWorkerExit: (challengeId, code) => this.onWorkerExit(challengeId, code),
+      },
+      { pingIntervalMs: deps.config.watchdog.heartbeatMs, leaseTtlMs: deps.config.watchdog.leaseTtlMs },
+    );
+  }
+
+  async start(): Promise<void> {
+    const { adapter, logger } = this.deps;
+    await adapter.authenticate();
+    const caps = await adapter.getCapabilities();
+    logger.info({ event: "contest_connected", adapter: adapter.kind, caps }, "contest adapter ready");
+
+    // single-shot adapter (local mode) → poll once
+    if (!caps.polling) {
+      try {
+        await this.pollOnce();
+      } catch (e) {
+        logger.error({ err: String(e), event: "poll_once_failed" });
+      }
+    } else {
+      this.poller.start(() => this.pollOnce());
+    }
+
+    await this.deps.recovery.start();
+
+    this.schedulerTimer = setInterval(() => void this.schedulerTick(), 2500);
+    this.schedulerTimer.unref();
+    this.hintTimer = setInterval(() => void this.deps.hints.tick(), 15_000);
+    this.hintTimer.unref();
+    this.watchdogTimer = setInterval(() => this.watchdogTick(), 30_000);
+    this.watchdogTimer.unref();
+
+    logger.info({ event: "control_plane_started" }, "control plane started");
+  }
+
+  // -------------------------------------------------------------------------
+  // Polling
+  // -------------------------------------------------------------------------
+
+  async pollOnce(): Promise<{ changed: boolean }> {
+    const { adapter, repos, logger, bus } = this.deps;
+    await this.limiter.acquire("POLL");
+    // apply mock scenario schedules
+    const mockAdapter = this.deps.adapter as unknown as { applySchedule?: () => Promise<void> } | undefined;
+    if (mockAdapter && typeof mockAdapter.applySchedule === "function") {
+      await mockAdapter.applySchedule();
+    }
+    const list = await adapter.listChallenges();
+    let changed = false;
+    for (const r of list) {
+      const existing = repos.challenges.getByRemoteId(r.remoteId);
+      const canonical = JSON.stringify({
+        title: r.title,
+        description: r.description,
+        category: r.category,
+        score: r.score,
+        solveCount: r.solveCount,
+      });
+      const hash = createHash("sha256").update(canonical).digest("hex");
+      if (!existing) {
+        const id = `ch_${r.remoteId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+        repos.challenges.create({
+          id,
+          remoteId: r.remoteId,
+          title: r.title,
+          description: r.description,
+          category: normalizeCategory(r.category),
+          subcategory: null,
+          score: r.score,
+          solveCount: r.solveCount,
+          lifecycleStatus: "DISCOVERED",
+          startStatus: "NOT_STARTED",
+          hintStatus: "LOCKED",
+          progressStatus: "UNKNOWN",
+          priority: 0,
+          lastPriorityScore: null,
+          difficultyEstimate: null,
+          currentSolverType: null,
+          currentSessionId: null,
+          wrongSubmissionCount: 0,
+          solverRestartCount: 0,
+          pausedReason: null,
+          parkedReason: null,
+          blockedReason: null,
+          contentHash: hash,
+          discoveredAt: Date.now(),
+          updatedAt: Date.now(),
+          startedAt: null,
+          solverStartedAt: null,
+          wallClockSolveMs: 0,
+          activeSolveMs: 0,
+          remoteCreatedAt: r.createdAt,
+          remoteUpdatedAt: r.updatedAt,
+        });
+        repos.events.append("CHALLENGE_DISCOVERED", id, { remoteId: r.remoteId, title: r.title, category: r.category });
+        bus.publish({ type: "CHALLENGE_DISCOVERED", challengeId: id, payload: { remoteId: r.remoteId, title: r.title } });
+        logger.info({ event: "challenge_discovered", challengeId: id, title: r.title });
+        changed = true;
+      } else if (existing.contentHash !== hash) {
+        repos.challenges.update(existing.id, {
+          title: r.title,
+          description: r.description,
+          category: normalizeCategory(r.category),
+          score: r.score,
+          solveCount: r.solveCount,
+          contentHash: hash,
+        });
+        repos.challenges.recordRevision({
+          id: `rev_${Math.random().toString(36).slice(2, 12)}`,
+          challengeId: existing.id,
+          contentHash: hash,
+          title: r.title,
+          description: r.description,
+          category: r.category,
+          score: r.score,
+          attachmentMetasJson: "[]",
+        });
+        bus.publish({ type: "CHALLENGE_UPDATED", challengeId: existing.id, payload: { title: r.title } });
+        this.injectUpdate(existing.id, existing.description, r.description);
+        logger.info({ event: "challenge_updated", challengeId: existing.id });
+        changed = true;
+      }
+    }
+    return { changed };
+  }
+
+  private injectUpdate(challengeId: string, oldDesc: string, newDesc: string): void {
+    if (this.workerPool.has(challengeId)) {
+      const msg = `OFFICIAL CHALLENGE UPDATE
+
+The challenge metadata changed.
+
+Previous description:
+<${oldDesc}>
+
+New description:
+<${newDesc}>
+
+Re-evaluate assumptions affected by this change.`;
+      this.workerPool.inject(challengeId, msg);
+    }
+    this.deps.preparation.refreshChallengeFile(challengeId);
+  }
+
+  // -------------------------------------------------------------------------
+  // Scheduler
+  // -------------------------------------------------------------------------
+
+  private async schedulerTick(): Promise<void> {
+    const { repos } = this.deps;
+    try {
+      // 1. DISCOVERED → prepare (queue with triage concurrency)
+      const discovered = repos.challenges.listByStatus("DISCOVERED");
+      for (const c of discovered.slice(0, this.deps.config.workers.triageConcurrency)) {
+        if (this.preparing.has(c.id)) continue;
+        if (!SOLVER_CATEGORIES.includes(c.category)) {
+          repos.challenges.update(c.id, { blockedReason: "UNSUPPORTED_CATEGORY" });
+          this.deps.stateMachine.transition(c.id, "UNSUPPORTED", { payload: { category: c.category } });
+          continue;
+        }
+        this.preparing.add(c.id);
+        void this.#prepare(c.id);
+      }
+
+      // 2. READY → QUEUED
+      for (const c of repos.challenges.listByStatus("READY")) {
+        this.deps.stateMachine.transition(c.id, "QUEUE");
+      }
+
+      // 3. scores
+      const queued = repos.challenges.listByStatus("QUEUED");
+      for (const c of queued) {
+        const score = computePriorityScore(
+          {
+            challengeId: c.id,
+            category: c.category,
+            manualPriority: c.priority,
+            score: c.score,
+            solveCount: c.solveCount,
+            difficulty: c.difficultyEstimate,
+            attempts: c.solverRestartCount,
+            progress: c.progressStatus,
+            elapsedActiveMs: c.activeSolveMs,
+            hintStatus: c.hintStatus,
+            requiredResources: { resourceClass: "NORMAL", resourceTypes: ["LLM"] },
+            discoveredAt: c.discoveredAt,
+          },
+          undefined,
+          Date.now(),
+        );
+        repos.challenges.update(c.id, { lastPriorityScore: score + c.priority });
+      }
+
+      // 4. schedule workers
+      const active = this.workerPool.activeCount();
+      const capacity = this.deps.config.workers.solverConcurrency - active;
+      if (capacity > 0) {
+        const sorted = [...queued].sort((a, b) => (b.lastPriorityScore ?? 0) - (a.lastPriorityScore ?? 0));
+        for (const c of sorted.slice(0, capacity)) {
+          if (c.pausedReason || c.blockedReason === "MANUAL_REVIEW_REQUIRED") continue;
+          const slot = this.llmSlots.tryAcquire(["LLM"]);
+          if (!slot) break;
+          this.llmHeld.set(c.id, slot);
+          try {
+            await this.#startSolver(c);
+          } catch (e) {
+            this.deps.logger.error({ event: "schedule_failed", challengeId: c.id, err: String(e) });
+            slot();
+            this.llmHeld.delete(c.id);
+            this.deps.stateMachine.transition(c.id, "SOLVER_ERROR", { payload: { reason: String(e) } });
+          }
+        }
+      }
+    } catch (e) {
+      this.deps.logger.error({ event: "scheduler_error", err: String(e) });
+    }
+  }
+
+  async #prepare(challengeId: string): Promise<void> {
+    try {
+      const c = this.deps.repos.challenges.get(challengeId);
+      if (!c) return;
+      await this.deps.preparation.prepare(c);
+    } catch (e) {
+      this.deps.logger.error({ event: "prepare_failed", challengeId, err: String(e) });
+      const c = this.deps.repos.challenges.get(challengeId);
+      if (c && c.lifecycleStatus === "PREPARING") {
+        this.deps.stateMachine.transition(challengeId, "PREPARE_FAILED", { payload: { reason: String(e) } });
+      }
+    } finally {
+      this.preparing.delete(challengeId);
+    }
+  }
+
+  async #startSolver(challenge: Challenge): Promise<void> {
+    const { repos, adapter, bus } = this.deps;
+    void adapter;
+
+    // start challenge per policy
+    if (this.deps.config.challenge.startPolicy === "ON_SOLVER_ASSIGNMENT" && challenge.startStatus === "NOT_STARTED") {
+      repos.challenges.update(challenge.id, { startStatus: "STARTING" });
+      if (adapter.startChallenge && challenge.remoteId && challenge.remoteId !== "local") {
+        try {
+          await adapter.startChallenge(challenge.remoteId);
+          repos.challenges.update(challenge.id, { startStatus: "STARTED", startedAt: Date.now() });
+          bus.publish({ type: "CHALLENGE_STARTED", challengeId: challenge.id, payload: {} });
+        } catch (e) {
+          repos.challenges.update(challenge.id, { startStatus: "FAILED" });
+          throw new Error(`startChallenge failed: ${e}`);
+        }
+      } else {
+        repos.challenges.update(challenge.id, { startStatus: "STARTED", startedAt: Date.now() });
+      }
+    }
+
+    // session (reuse preserved session if it has a pi file; else new)
+    let session = repos.sessions.activeForChallenge(challenge.id);
+    const latest = repos.sessions.latestForChallenge(challenge.id);
+    if (!session && latest && latest.piSessionFile && (latest.status === "ENDED" || latest.status === "ERROR")) {
+      session = latest;
+      repos.sessions.update(session.id, { status: "ACTIVE" });
+    }
+    if (!session) {
+      session = repos.sessions.create({
+        challengeId: challenge.id,
+        solverType: challenge.category === "CRYPTO" ? "CRYPTO" : "MISC",
+        piSessionId: null,
+        piSessionFile: null,
+        providerId: null,
+        modelId: null,
+        status: "ACTIVE",
+        startedAt: Date.now(),
+        lastActiveAt: Date.now(),
+        endedAt: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        toolCalls: 0,
+      });
+    }
+
+    const layout = this.workspace.ensure(challenge.id);
+    const modelRef = this.#resolveModelRef();
+    const solverType: SolverType = challenge.category === "CRYPTO" ? "CRYPTO" : "MISC";
+
+    const res = this.deps.stateMachine.transition(challenge.id, "SCHEDULE", { solverType, sessionId: session.id });
+    if (!res.allowed) throw new Error(`cannot schedule ${challenge.id} (${challenge.lifecycleStatus})`);
+
+    await this.workerPool.startWorker({
+      challengeId: challenge.id,
+      sessionId: session.id,
+      solverType,
+      workspaceRoot: layout.root,
+      sessionDir: this.deps.sessionsRoot,
+      systemPrompt: systemPromptFor(solverType),
+      initialMessage: "Begin solving the challenge described in challenge.txt. Keep the control plane informed via report_progress.",
+      modelRef,
+    });
+    repos.sessions.update(session.id, { modelId: modelRef?.modelId ?? null, providerId: modelRef?.providerId ?? null });
+    bus.publish({ type: "SOLVER_ASSIGNED", challengeId: challenge.id, payload: { sessionId: session.id, solverType, workerId: this.workerPool.get(challenge.id)?.workerId } });
+    bus.publish({ type: "SOLVER_STARTED", challengeId: challenge.id, payload: { sessionId: session.id } });
+    this.deps.logger.info({ event: "solver_started", challengeId: challenge.id, sessionId: session.id, solverType });
+  }
+
+  #resolveModelRef(): ModelRef | null {
+    const primary = this.deps.repos.models.primary();
+    if (primary) return { providerId: primary.providerId, modelId: primary.modelName };
+    return null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Worker message routing
+  // -------------------------------------------------------------------------
+
+  private async onWorkerMessage(challengeId: string, msg: WorkerMessage): Promise<void> {
+    const { repos, bus, logger } = this.deps;
+    try {
+      const challenge = repos.challenges.get(challengeId);
+      if (!challenge) return;
+      const sessionId = (msg.sessionId as string | undefined) ?? null;
+
+      switch (msg.type) {
+      case "progress": {
+        const rec = repos.progress.append({
+          challengeId,
+          sessionId,
+          summary: String(msg.summary ?? ""),
+          hypotheses: (msg.hypotheses as string[]) ?? [],
+          confirmedFacts: (msg.confirmedFacts as string[]) ?? [],
+          rejectedHypotheses: (msg.rejectedHypotheses as string[]) ?? [],
+          nextActions: (msg.nextActions as string[]) ?? [],
+          confidence: Number(msg.confidence ?? 0),
+          progressLevel: (msg.progress as "SIGNIFICANT" | "MINOR" | "NONE") ?? "NONE",
+          stalled: Boolean(msg.stalled),
+        });
+        repos.challenges.update(challengeId, {
+          progressStatus: msg.stalled ? "STALLED" : "ACTIVE",
+        });
+        if (sessionId) repos.sessions.heartbeat(sessionId);
+        bus.publish({ type: "SOLVER_PROGRESS", challengeId, payload: { sessionId, progressId: rec.id, summary: rec.summary, stalled: rec.stalled } });
+        break;
+      }
+      case "candidate": {
+        await this.deps.submission.onCandidate({
+          challengeId,
+          sessionId: String(sessionId ?? ""),
+          value: String(msg.value ?? ""),
+          confidence: Number(msg.confidence ?? 0),
+          reason: String(msg.reason ?? ""),
+          evidence: (msg.evidence as { type: string; path?: string; text?: string }[]) ?? [],
+        });
+        break;
+      }
+      case "handoff": {
+        const target = String(msg.target ?? "") === "CRYPTO" ? "CRYPTO" : "MISC";
+        logger.info({ event: "handoff_requested", challengeId, target, summary: String(msg.summary ?? "") });
+        await this.handoff(challengeId, target, String(msg.summary ?? ""));
+        break;
+      }
+      case "reflection_request": {
+        this.deps.reflection.reflect(challengeId, "solver_request");
+        break;
+      }
+      case "artifact": {
+        try {
+          repos.artifacts.create({
+            challengeId,
+            parentArtifactId: (msg.parent as string | null) ?? null,
+            path: String(msg.absPath ?? ""),
+            mime: null,
+            size: Number(msg.size ?? 0),
+            sha256: String(msg.sha256 ?? ""),
+            generatedBy: "TOOL",
+            operation: String(msg.op ?? "tool"),
+          });
+        } catch (e) {
+          logger.warn({ event: "artifact_record_failed", challengeId, err: String(e) });
+        }
+        break;
+      }
+      case "usage": {
+        if (sessionId) {
+          repos.sessions.recordUsage(sessionId, Number(msg.inputTokens ?? 0), Number(msg.outputTokens ?? 0), Number(msg.toolCalls ?? 0));
+        }
+        break;
+      }
+      case "idle": {
+        bus.publish({ type: "SOLVER_IDLE", challengeId, payload: { sessionId, usage: msg.usage } });
+        break;
+      }
+      case "error": {
+        logger.warn({ event: "solver_error", challengeId, sessionId, message: String(msg.message ?? "") });
+        bus.publish({ type: "SOLVER_ERROR", challengeId, payload: { sessionId, message: msg.message } });
+        break;
+      }
+      case "info":
+      case "pong":
+        break;
+      default:
+        logger.debug({ event: "worker_msg_unhandled", challengeId, type: msg.type });
+      }
+    } catch (e) {
+      // A bad message must never take down the control plane (§101 recoverable).
+      logger.error({ event: "worker_msg_error", challengeId, type: msg.type, err: String(e) });
+    }
+  }
+
+  private onWorkerLost(challengeId: string): void {
+    const { repos, bus } = this.deps;
+    const c = repos.challenges.get(challengeId);
+    this.releaseLlmSlot(challengeId);
+    if (c && c.lifecycleStatus === "ACTIVE") {
+      this.deps.stateMachine.transition(challengeId, "SOLVER_STOPPED", { payload: { reason: "WORKER_LOST" } });
+    }
+    bus.publish({ type: "WORKER_LOST", challengeId, payload: { reason: "lease expired" } });
+  }
+
+  private onWorkerExit(challengeId: string, code: number | null): void {
+    const { repos } = this.deps;
+    const c = repos.challenges.get(challengeId);
+    this.releaseLlmSlot(challengeId);
+    if (!c) return;
+    if (this.intentionallyStopped.has(challengeId)) {
+      this.intentionallyStopped.delete(challengeId);
+      return;
+    }
+    if (c.lifecycleStatus === "ACTIVE") {
+      this.deps.logger.warn({ event: "worker_crashed", challengeId, code }, "worker exited unexpectedly — requeueing");
+      this.deps.stateMachine.transition(challengeId, "SOLVER_STOPPED", { payload: { reason: `worker exit ${code}` } });
+    } else if (c.lifecycleStatus === "VERIFYING" || c.lifecycleStatus === "SUBMITTING") {
+      // verification/submission continues without the worker
+      this.deps.logger.info({ event: "worker_exit_while_verify", challengeId, code });
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Handoff (§88)
+  // -------------------------------------------------------------------------
+
+  private async handoff(challengeId: string, target: "MISC" | "CRYPTO", summary: string): Promise<void> {
+    const { repos } = this.deps;
+    const c = repos.challenges.get(challengeId);
+    if (!c || c.lifecycleStatus !== "ACTIVE") return;
+    const oldSession = repos.sessions.activeForChallenge(challengeId);
+    this.intentionallyStopped.add(challengeId);
+    this.workerPool.abort(challengeId);
+    await new Promise((r) => setTimeout(r, 800));
+    this.workerPool.kill(challengeId);
+    if (oldSession) repos.sessions.setStatus(oldSession.id, "ENDED");
+
+    const session = repos.sessions.create({
+      challengeId,
+      solverType: target,
+      piSessionId: null,
+      piSessionFile: null,
+      providerId: null,
+      modelId: null,
+      status: "ACTIVE",
+      startedAt: Date.now(),
+      lastActiveAt: Date.now(),
+      endedAt: null,
+      inputTokens: 0,
+      outputTokens: 0,
+      toolCalls: 0,
+    });
+    const layout = this.workspace.ensure(challengeId);
+    repos.challenges.update(challengeId, { currentSolverType: target, currentSessionId: session.id });
+    await this.workerPool.startWorker({
+      challengeId,
+      sessionId: session.id,
+      solverType: target,
+      workspaceRoot: layout.root,
+      sessionDir: this.deps.sessionsRoot,
+      systemPrompt: systemPromptFor(target),
+      initialMessage: `A prior solver requested handoff to ${target}.\n\nPrior solver summary: ${summary}\n\nContinue solving challenge.txt with fresh eyes.`,
+      modelRef: this.#resolveModelRef(),
+    });
+    this.deps.bus.publish({ type: "SOLVER_HANDOFF", challengeId, payload: { from: c.currentSolverType, to: target, summary } });
+  }
+
+  // -------------------------------------------------------------------------
+  // Watchdog (§65)
+  // -------------------------------------------------------------------------
+
+  private watchdogTick(): void {
+    const { repos, logger, bus } = this.deps;
+    const now = Date.now();
+    for (const c of repos.challenges.listByStatus("ACTIVE")) {
+      // timers
+      if (c.solverStartedAt) {
+        repos.challenges.update(c.id, { activeSolveMs: now - c.solverStartedAt, wallClockSolveMs: now - c.discoveredAt });
+      }
+      const session = repos.sessions.activeForChallenge(c.id);
+      const lastActivity = Math.max(session?.lastActiveAt ?? 0, this.workerPool.get(c.id)?.lastActivityAt ?? 0);
+      const idle = now - lastActivity;
+      if (idle > this.deps.config.agent.stallDetectMs && c.progressStatus !== "STALLED") {
+        repos.challenges.update(c.id, { progressStatus: "STALLED" });
+        bus.publish({ type: "SOLVER_STALLED", challengeId: c.id, payload: { idleMs: idle } });
+        logger.warn({ event: "solver_stalled", challengeId: c.id, idleMs: idle });
+      }
+      if (idle > this.deps.config.agent.reflectionAfterStalledMs) {
+        const lastReflect = this.reflectCooldown.get(c.id) ?? 0;
+        if (now - lastReflect > 5 * 60_000) {
+          this.reflectCooldown.set(c.id, now);
+          this.deps.reflection.reflect(c.id, "watchdog_stalled");
+        }
+      }
+    }
+    // disk alarm
+    const free = this.disk.freeDiskGb();
+    if (free < this.deps.config.storage.reserveDiskGb) {
+      bus.publish({ type: "DISK_LOW", challengeId: null, payload: { freeGb: Math.round(free * 10) / 10 } });
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Control API commands
+  // -------------------------------------------------------------------------
+
+  private releaseLlmSlot(challengeId: string): void {
+    const slot = this.llmHeld.get(challengeId);
+    if (slot) {
+      slot();
+      this.llmHeld.delete(challengeId);
+    }
+  }
+
+  /** Deliver a message into a live worker (hint / feedback / update). */
+  injectWorker(challengeId: string, message: string): boolean {
+    return this.workerPool.inject(challengeId, message);
+  }
+
+  async pause(challengeId: string, reason?: string): Promise<void> {
+    const c = this.deps.repos.challenges.get(challengeId);
+    if (!c) throw new Error("unknown challenge");
+    this.intentionallyStopped.add(challengeId);
+    this.workerPool.abort(challengeId);
+    this.releaseLlmSlot(challengeId);
+    this.deps.stateMachine.transition(challengeId, "PAUSE", { reason: reason ?? "manual pause", payload: { pausedReason: reason ?? "manual pause" } });
+    const session = this.deps.repos.sessions.activeForChallenge(challengeId);
+    if (session) this.deps.repos.sessions.setStatus(session.id, "PAUSED");
+  }
+
+  resume(challengeId: string): void {
+    this.deps.stateMachine.transition(challengeId, "RESUME");
+  }
+
+  async park(challengeId: string, reason?: string): Promise<void> {
+    this.intentionallyStopped.add(challengeId);
+    this.workerPool.abort(challengeId);
+    this.releaseLlmSlot(challengeId);
+    this.deps.stateMachine.transition(challengeId, "PARK", { reason: reason ?? "manual park", payload: { parkedReason: reason ?? "manual park" } });
+  }
+
+  unpark(challengeId: string): void {
+    this.deps.stateMachine.transition(challengeId, "UNPARK");
+  }
+
+  async restartSolver(challengeId: string): Promise<void> {
+    this.intentionallyStopped.add(challengeId);
+    this.workerPool.abort(challengeId);
+    this.releaseLlmSlot(challengeId);
+    const res = this.deps.stateMachine.transition(challengeId, "RESTART_SOLVER", { payload: { reason: "manual restart" } });
+    if (!res.allowed) throw new Error(`cannot restart ${challengeId} (${res.from})`);
+  }
+
+  setPriority(challengeId: string, priority: number): void {
+    this.deps.repos.challenges.update(challengeId, { priority });
+    this.deps.bus.publish({ type: "PRIORITY_CHANGED", challengeId, payload: { priority } });
+  }
+
+  async forceHint(challengeId: string): Promise<string> {
+    return this.deps.hints.fetchHint(challengeId);
+  }
+
+  runReflection(challengeId: string): void {
+    this.deps.reflection.reflect(challengeId, "manual");
+  }
+
+  switchModel(challengeId: string, modelId: string): void {
+    const model = this.deps.repos.models.get(modelId);
+    if (!model) throw new Error("unknown model");
+    const session = this.deps.repos.sessions.activeForChallenge(challengeId);
+    if (session) this.deps.repos.sessions.update(session.id, { modelId: model.modelName, providerId: model.providerId });
+    this.workerPool.switchModel(challengeId, { providerId: model.providerId, modelId: model.modelName });
+    this.deps.bus.publish({ type: "MODEL_SWITCHED", challengeId, payload: { modelId } });
+  }
+
+  async manualCandidate(challengeId: string, input: { value: string; confidence?: number; reason?: string }): Promise<void> {
+    const c = this.deps.repos.challenges.get(challengeId);
+    if (!c) throw new Error("unknown challenge");
+    await this.deps.submission.onCandidate({
+      challengeId,
+      sessionId: "",
+      value: input.value,
+      confidence: input.confidence ?? 0.9,
+      reason: input.reason ?? "manual candidate from dashboard",
+      evidence: [],
+    });
+  }
+
+  async manualSubmit(challengeId: string, candidateId: string): Promise<void> {
+    await this.deps.submission.manualSubmit(challengeId, candidateId);
+  }
+
+  async handleSubmissionCorrect(challengeId: string): Promise<void> {
+    this.intentionallyStopped.add(challengeId);
+    this.workerPool.abort(challengeId);
+    this.workerPool.kill(challengeId);
+    this.releaseLlmSlot(challengeId);
+    const session = this.deps.repos.sessions.activeForChallenge(challengeId);
+    if (session) this.deps.repos.sessions.setStatus(session.id, "ENDED");
+  }
+
+  status(): Record<string, unknown> {
+    const { repos } = this.deps;
+    const all = repos.challenges.list();
+    const countBy = (s: string) => all.filter((c) => c.lifecycleStatus === s).length;
+    return {
+      total: all.length,
+      solved: countBy("SOLVED"),
+      active: countBy("ACTIVE"),
+      queued: countBy("QUEUED"),
+      preparing: countBy("PREPARING"),
+      parked: countBy("PARKED"),
+      paused: countBy("PAUSED"),
+      unsupported: countBy("UNSUPPORTED"),
+      error: countBy("ERROR"),
+      miscSolved: all.filter((c) => c.category === "MISC" && c.lifecycleStatus === "SOLVED").length,
+      cryptoSolved: all.filter((c) => c.category === "CRYPTO" && c.lifecycleStatus === "SOLVED").length,
+      workers: this.workerPool.activeCount(),
+      workerSlots: this.deps.config.workers.solverConcurrency,
+      diskFreeGb: Math.round(this.disk.freeDiskGb() * 10) / 10,
+      startedAt: (repos.settings.get("startedAt") ? Number(repos.settings.get("startedAt")) : null),
+      adapter: this.deps.adapter.kind,
+      agentRuntime: this.deps.agentRuntime,
+      providers: repos.providers.list().map((p) => ({ id: p.id, name: p.displayName, health: p.health })),
+    };
+  }
+
+  async stop(): Promise<void> {
+    if (this.stopped) return;
+    this.stopped = true;
+    for (const c of this.deps.repos.challenges.listByStatus("ACTIVE")) {
+      this.intentionallyStopped.add(c.id);
+    }
+    this.poller.stop();
+    if (this.schedulerTimer) clearInterval(this.schedulerTimer);
+    if (this.hintTimer) clearInterval(this.hintTimer);
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+    this.workerPool.stopAll();
+    this.deps.submission.stop();
+    await new Promise((r) => setTimeout(r, 2200));
+    try {
+      await (this.deps.adapter as { close?: () => Promise<void> }).close?.();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function normalizeCategory(raw: string): Challenge["category"] {
+  const up = raw.toUpperCase().trim();
+  if (up.includes("MISC")) return "MISC";
+  if (up.includes("CRYPTO")) return "CRYPTO";
+  if (up.includes("WEB")) return "WEB";
+  if (up.includes("PWN")) return "PWN";
+  if (up.includes("REV")) return "REVERSE";
+  if (up === "OTHER") return "OTHER";
+  return "UNKNOWN";
+}

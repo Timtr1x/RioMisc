@@ -1,0 +1,5 @@
+{
+  "title": "Baby XOR",
+  "category": "CRYPTO",
+  "description": "The flag was XORed with a repeating key.\nkey = ky\ncipher = 0d150a1e100a02170c150e2608110a15071c051e0e2606160f1c16\nDecrypt it."
+}

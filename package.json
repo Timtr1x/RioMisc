@@ -1,0 +1,29 @@
+{
+  "name": "rio-misc-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "RioMisc — CTF Misc/Crypto Autonomous Agent Runtime (MVP-1)",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/server",
+    "cli": "tsx apps/cli/src/index.ts",
+    "solve": "tsx apps/cli/src/index.ts solve",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -b",
+    "db:migrate": "npm run migrate -w packages/database"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^3.2.7"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

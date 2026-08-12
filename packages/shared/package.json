@@ -1,0 +1,16 @@
+{
+  "name": "@rio/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@rio/domain": "*",
+    "pino": "^9.5.0",
+    "yaml": "^2.6.1",
+    "zod": "^3.24.1"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

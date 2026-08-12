@@ -1,0 +1,68 @@
+# RioMisc runtime configuration (config/runtime.yaml)
+# Every value is Zod-validated at startup; invalid config aborts boot.
+
+contest:
+  adapter: mock            # mock | local | none
+  poll:
+    initialMs: 5000        # 5s default poll interval
+    maxMs: 15000           # backoff ceiling
+  # localChallengeDir: ./challenge   # required when adapter: local (rio solve)
+
+challenge:
+  startPolicy: ON_SOLVER_ASSIGNMENT   # ON_DISCOVERY | ON_PREPARATION | ON_SOLVER_ASSIGNMENT
+
+hint:
+  autoFetch: true
+  requireStalled: true     # only fetch when the solver looks stuck
+  eligibleAfterStartMs: 600000        # 10 min after startChallenge()
+  stallThresholdMs: 300000            # 5 min without progress
+
+submission:
+  autoSubmit: true
+  confidenceThreshold: 0.85
+  localMaxWrong: 3         # after 3 wrong: AUTO_SUBMIT_DISABLED → manual review
+  defaultCooldownMs: 60000
+
+workers:
+  solverConcurrency: 4     # 8-core host → max 4 concurrent solvers
+  triageConcurrency: 4
+
+resources:
+  llm: 6
+  cpuLight: 4
+  cpuHeavy: 1
+  memHeavy: 1
+  diskHeavy: 1
+  network: 4
+  sage: 1
+
+storage:
+  globalWorkspaceLimitGb: 80
+  reserveDiskGb: 10
+  maxConcurrentDownloads: 2
+  perChallengeSoftLimitGb: 8
+
+agent:
+  progressIntervalMs: 120000
+  reflectionAfterStalledMs: 300000
+  stallDetectMs: 180000
+  contextCompactThreshold: 0.8
+  compactTriggerThreshold: 0.7
+
+watchdog:
+  checkMs: 30000
+  heartbeatMs: 15000
+  leaseTtlMs: 45000
+
+models:
+  primary: null            # set via Dashboard / CLI once providers are added
+  fallback: null
+  autoFallback: false
+
+server:
+  host: 127.0.0.1
+  port: 3000
+
+paths:
+  dataDir: ./data
+  configDir: ./config
