@@ -136,6 +136,8 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     bus,
     workspacesRoot,
     sessionsRoot,
+    piDir: join(dataDir, "pi"),
+    secretsFile: join(dataDir, "secrets.enc"),
     agentRuntime: (process.env.RIO_AGENT_RUNTIME as "mock" | "pi" | undefined) ?? "mock",
     stateMachine,
     preparation,

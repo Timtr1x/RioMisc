@@ -6,12 +6,13 @@ import type { Repositories } from "@rio/database";
 import { SOLVER_CATEGORIES, type Challenge, type SolverType, type ModelRef } from "@rio/domain";
 import type { ContestAdapter } from "@rio/contest";
 import { Poller, ApiRateLimiter, DiskManager } from "@rio/contest";
+import type { WorkerMessage, StartWorkerConfig } from "./worker-pool.js";
 import { WorkspaceManager } from "@rio/tool-runtime";
 import { systemPromptFor } from "@rio/solver";
 import { ResourceSemaphore, computePriorityScore } from "@rio/scheduler";
 import { StateMachine } from "../state-machine.js";
 import { EventBus } from "./bus.js";
-import { WorkerPool, type WorkerMessage } from "./worker-pool.js";
+import { WorkerPool } from "./worker-pool.js";
 import { PreparationService } from "./preparation.js";
 import { SubmissionManager } from "./submission.js";
 import { HintManager } from "./hints.js";
@@ -28,6 +29,8 @@ export interface ControlPlaneDeps {
   bus: EventBus;
   workspacesRoot: string;
   sessionsRoot: string;
+  piDir: string;
+  secretsFile: string;
   agentRuntime: "mock" | "pi";
   stateMachine: StateMachine;
   preparation: PreparationService;
@@ -371,6 +374,8 @@ Re-evaluate assumptions affected by this change.`;
       systemPrompt: systemPromptFor(solverType),
       initialMessage: "Begin solving the challenge described in challenge.txt. Keep the control plane informed via report_progress.",
       modelRef,
+      runtime: this.deps.agentRuntime,
+      pi: this.#piWorkerConfig(),
     });
     repos.sessions.update(session.id, { modelId: modelRef?.modelId ?? null, providerId: modelRef?.providerId ?? null });
     bus.publish({ type: "SOLVER_ASSIGNED", challengeId: challenge.id, payload: { sessionId: session.id, solverType, workerId: this.workerPool.get(challenge.id)?.workerId } });
@@ -382,6 +387,30 @@ Re-evaluate assumptions affected by this change.`;
     const primary = this.deps.repos.models.primary();
     if (primary) return { providerId: primary.providerId, modelId: primary.modelName };
     return null;
+  }
+
+  /** Provider specs for the Pi runtime, assembled from the registry (§55). */
+  #piWorkerConfig(): StartWorkerConfig["pi"] {
+    const providers = this.deps.repos.providers.list().filter((p) => p.enabled);
+    const models = this.deps.repos.models.listEnabled();
+    const list: NonNullable<StartWorkerConfig["pi"]>["providers"] = [];
+    for (const m of models) {
+      const p = providers.find((x) => x.id === m.providerId);
+      if (p) {
+        list.push({
+          id: p.id,
+          displayName: p.displayName,
+          protocol: p.protocol,
+          baseUrl: p.baseUrl,
+          apiKeyRef: p.apiKeyRef,
+          modelId: m.modelName,
+          contextWindow: m.contextWindow,
+          maxOutputTokens: m.maxOutputTokens,
+        });
+      }
+    }
+    if (list.length === 0) return undefined;
+    return { piDir: this.deps.piDir, secretsFile: this.deps.secretsFile, providers: list };
   }
 
   // -------------------------------------------------------------------------
@@ -550,6 +579,8 @@ Re-evaluate assumptions affected by this change.`;
       systemPrompt: systemPromptFor(target),
       initialMessage: `A prior solver requested handoff to ${target}.\n\nPrior solver summary: ${summary}\n\nContinue solving challenge.txt with fresh eyes.`,
       modelRef: this.#resolveModelRef(),
+      runtime: this.deps.agentRuntime,
+      pi: this.#piWorkerConfig(),
     });
     this.deps.bus.publish({ type: "SOLVER_HANDOFF", challengeId, payload: { from: c.currentSolverType, to: target, summary } });
   }

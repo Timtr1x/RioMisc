@@ -22,6 +22,23 @@ export interface StartWorkerConfig {
   systemPrompt: string;
   initialMessage: string;
   modelRef: ModelRef | null;
+  /** Which agent harness the worker should use ("mock" | "pi"). */
+  runtime: "mock" | "pi";
+  /** Pi runtime: providers + how to resolve API keys (worker reads the encrypted file itself). */
+  pi?: {
+    piDir: string;
+    secretsFile: string;
+    providers: {
+      id: string;
+      displayName: string;
+      protocol: "OPENAI_CHAT_COMPLETIONS" | "OPENAI_RESPONSES" | "ANTHROPIC_MESSAGES";
+      baseUrl: string;
+      apiKeyRef: string;
+      modelId: string;
+      contextWindow: number;
+      maxOutputTokens: number;
+    }[];
+  };
 }
 
 export interface WorkerHandle {

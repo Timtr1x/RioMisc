@@ -75,13 +75,13 @@ export const remoteChallengeDetailSchema = remoteChallengeSchema.extend({
 
 export const reportProgressParamsSchema = z.object({
   summary: z.string().max(4000),
-  hypotheses: z.array(z.string().max(1000)).max(20),
-  confirmedFacts: z.array(z.string().max(1000)).max(20),
-  rejectedHypotheses: z.array(z.string().max(1000)).max(20),
-  nextActions: z.array(z.string().max(1000)).max(20),
+  hypotheses: z.array(z.string().max(1000)).max(20).optional(),
+  confirmedFacts: z.array(z.string().max(1000)).max(20).optional(),
+  rejectedHypotheses: z.array(z.string().max(1000)).max(20).optional(),
+  nextActions: z.array(z.string().max(1000)).max(20).optional(),
   confidence: z.number().min(0).max(1),
-  progress: z.enum(["SIGNIFICANT", "MINOR", "NONE"]),
-  stalled: z.boolean(),
+  progress: z.enum(["SIGNIFICANT", "MINOR", "NONE"]).optional(),
+  stalled: z.boolean().optional(),
 });
 
 export const submitFlagCandidateParamsSchema = z.object({
@@ -96,7 +96,8 @@ export const submitFlagCandidateParamsSchema = z.object({
         text: z.string().max(2000).optional(),
       }),
     )
-    .max(20),
+    .max(20)
+    .optional(),
 });
 
 export const requestHandoffParamsSchema = z.object({

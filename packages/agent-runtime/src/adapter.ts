@@ -1,9 +1,24 @@
 // AgentRuntimeAdapter — the ONLY place business code may touch an agent harness
 // (Pi SDK, mock, or future harness). Everything else talks to this interface.
-import type { SolverType, ModelRef } from "@rio/domain";
+import type { SolverType, ModelRef, ProviderProtocol } from "@rio/domain";
 import type { ToolContext } from "@rio/tool-runtime";
 
 export type { ModelRef };
+
+/** One resolvable provider+model pair for the Pi runtime (worker-side). */
+export interface PiProviderSpec {
+  id: string;
+  displayName: string;
+  protocol: ProviderProtocol;
+  baseUrl: string;
+  /** Ref into the encrypted SecretStore; the worker resolves it to apiKey. */
+  apiKeyRef: string;
+  /** Decrypted key (worker fills this in before creating sessions). */
+  apiKey: string;
+  modelId: string;
+  contextWindow: number;
+  maxOutputTokens: number;
+}
 
 export interface ToolSpec {
   name: string;
@@ -27,6 +42,8 @@ export interface SolverSessionConfig {
   tools: ToolSpec[];
   /** Shared tool runtime context (fs guard, process runner, emit). */
   toolContext: ToolContext;
+  /** Pi runtime: resolvable providers (apiKey already decrypted, worker-side). */
+  piProviders?: PiProviderSpec[];
 }
 
 export interface SolverSessionHandle {

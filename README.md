@@ -127,11 +127,40 @@ config/runtime.yaml     运行配置（Zod 启动校验）
 1. **SQLite 驱动**：规格建议 better-sqlite3 + Drizzle ORM；本机无 VS C++ 工具链，
    better-sqlite3 编译失败，改用 Node 24 内置 `node:sqlite`（零原生依赖）。
    Repository 模式（规格硬性要求）不变，未来可无痛换库。
-2. **Pi SDK**：`@earendil-works/pi-coding-agent` 在公开 npm 上为空占位包，
-   无法安装。`PiAgentRuntimeAdapter` 已按文档 API 表面完整实现（lazy import +
-   结构类型），包可用时零改动切换；当前默认 `MockAgentRuntime`。
+2. **Pi SDK（重要更新）**：`@earendil-works/pi-coding-agent`（npm 官方 registry
+   有 0.84.1，维护者 mitsuhiko/badlogic，homepage: github.com/earendil-works/pi-mono）。
+   早期一次 `npm install` 因 better-sqlite3 原生编译失败整体回滚，导致包目录为空，
+   并非"空包"。现已安装并**用真实类型完整对接**：
+   - `PiAgentRuntimeAdapter` 用真实 SDK API 重写（`createAgentSession` /
+     `DefaultResourceLoader.systemPromptOverride` / `defineTool`+typebox /
+     `ModelRuntime.create({modelsPath, authPath})` / `setRuntimeApiKey` /
+     `SessionManager.create/open`），`pi-sdk.d.ts` stub 已删除。
+   - Provider 映射：注册表（DB）→ `data/pi/models.json` + `setRuntimeApiKey`
+     运行时注入 → API Key 不落明文（§56）。
+   - 工具 schema 对模型宽容（`evidence` 等可选字段 optional），模型省略字段
+     不再导致校验失败。
+   - 已用**本地 fake OpenAI 端点（SSE）全链路验证**：2 回合真实请求、
+     工具 schema 传递、systemPrompt 注入、工具执行 → `candidate` 事件 → 模型
+     收到工具结果。`npm run pi-smoke`（单 session 全链路）和
+     `npm run pi-e2e`（完整系统：worker 子进程 → 真实 SDK → 提交 → WRONG 反馈）
+     可随时复跑。
 3. **Dashboard/UI**：保持最小可用（Overview/Challenges/Detail/Providers），
    规格中的其余页面可在此基础上扩展。
+
+## 使用真实 LLM（Pi 运行时）
+
+```bash
+# 1. 配置 Provider（Dashboard → Providers 或 API/CLI）
+#    Add Provider: baseUrl + protocol + API key（加密落盘，两阶段测试验证）
+
+# 2. 用 Pi 运行时启动
+RIO_AGENT_RUNTIME=pi npm run dev
+
+# 3. 无 Provider 时自动回退 MockAgent（同一工具链，闭环仍可跑通）
+```
+
+注意：Pi 会读取 `~/.pi/agent` 下的全局扩展/skills 配置；本系统通过
+`agentDir` 指向 `data/pi` 隔离，避免污染用户全局配置。
 
 ## 配置
 

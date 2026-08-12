@@ -290,7 +290,17 @@ export function reportProgressTool(ctx: ToolContext, params: unknown): Promise<T
   const started = Date.now();
   const p = reportProgressParamsSchema.safeParse(params);
   if (!p.success) return Promise.resolve(fail("VALIDATION", p.error.issues[0]?.message ?? "bad params", 0));
-  ctx.emit("progress", { challengeId: ctx.challengeId, sessionId: ctx.sessionId, ...p.data });
+  ctx.emit("progress", {
+    challengeId: ctx.challengeId,
+    sessionId: ctx.sessionId,
+    ...p.data,
+    hypotheses: p.data.hypotheses ?? [],
+    confirmedFacts: p.data.confirmedFacts ?? [],
+    rejectedHypotheses: p.data.rejectedHypotheses ?? [],
+    nextActions: p.data.nextActions ?? [],
+    progress: p.data.progress ?? "NONE",
+    stalled: p.data.stalled ?? false,
+  });
   return Promise.resolve(ok("progress reported", { acknowledged: true }, Date.now() - started));
 }
 
@@ -298,7 +308,12 @@ export function submitFlagCandidateTool(ctx: ToolContext, params: unknown): Prom
   const started = Date.now();
   const p = submitFlagCandidateParamsSchema.safeParse(params);
   if (!p.success) return Promise.resolve(fail("VALIDATION", p.error.issues[0]?.message ?? "bad params", 0));
-  ctx.emit("candidate", { challengeId: ctx.challengeId, sessionId: ctx.sessionId, ...p.data });
+  ctx.emit("candidate", {
+    challengeId: ctx.challengeId,
+    sessionId: ctx.sessionId,
+    ...p.data,
+    evidence: p.data.evidence ?? [],
+  });
   return Promise.resolve(ok("candidate submitted for verification", { acknowledged: true }, Date.now() - started));
 }
 

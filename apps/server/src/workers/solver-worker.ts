@@ -9,7 +9,8 @@ import {
   type ToolContext,
   type ArtifactRef,
 } from "@rio/tool-runtime";
-import { MockAgentRuntime, PiAgentRuntimeAdapter, type AgentRuntimeAdapter } from "@rio/agent-runtime";
+import { MockAgentRuntime, PiAgentRuntimeAdapter, type AgentRuntimeAdapter, type PiProviderSpec } from "@rio/agent-runtime";
+import { FileSecretStore } from "@rio/shared";
 import type { SolverType } from "@rio/domain";
 
 interface StartConfig {
@@ -22,6 +23,11 @@ interface StartConfig {
   initialMessage: string;
   modelRef: { providerId: string | null; modelId: string | null } | null;
   runtime: "mock" | "pi";
+  pi?: {
+    piDir: string;
+    secretsFile: string;
+    providers: Omit<PiProviderSpec, "apiKey">[];
+  };
 }
 
 let started = false;
@@ -36,15 +42,27 @@ function send(msg: Record<string, unknown>): void {
   parent.send?.(msg);
 }
 
-async function selectRuntime(preferred: "mock" | "pi"): Promise<AgentRuntimeAdapter> {
+async function selectRuntime(preferred: "mock" | "pi", config: StartConfig): Promise<AgentRuntimeAdapter> {
   if (preferred === "pi") {
-    const pi = await PiAgentRuntimeAdapter.available();
-    if (pi) {
-      send({ type: "info", message: "using pi runtime" });
-      return pi;
+    const available = await PiAgentRuntimeAdapter.isAvailable();
+    if (available && config.pi && config.pi.providers.length > 0) {
+      // decrypt API keys from the encrypted secrets file (never over IPC)
+      const secrets = new FileSecretStore(config.pi.secretsFile, process.env.CTF_RUNTIME_MASTER_KEY);
+      const providers: PiProviderSpec[] = [];
+      for (const p of config.pi.providers) {
+        const apiKey = await secrets.get(p.apiKeyRef);
+        if (apiKey) providers.push({ ...p, apiKey });
+      }
+      if (providers.length > 0) {
+        send({ type: "info", message: `using pi runtime (${providers.length} provider(s))` });
+        return new PiAgentRuntimeAdapter(config.pi.piDir).withProviders(providers);
+      }
+      send({ type: "info", message: "pi runtime: no API keys resolvable — falling back to mock" });
+    } else {
+      send({ type: "info", message: "pi runtime requested but SDK/providers unavailable — falling back to mock" });
     }
   }
-  send({ type: "info", message: "using mock runtime (pi sdk unavailable)" });
+  send({ type: "info", message: "using mock runtime" });
   return new MockAgentRuntime();
 }
 
@@ -117,7 +135,7 @@ process.on("message", async (msg: { type: string; [k: string]: unknown }) => {
     currentConfig = msg.config as StartConfig;
     started = true;
     try {
-      runtimeAdapter = await selectRuntime(currentConfig.runtime);
+      runtimeAdapter = await selectRuntime(currentConfig.runtime, currentConfig);
       const ctx = buildToolContext(currentConfig);
       const tools = toolNames().map((name) => ({ name, description: `Solver tool ${name}` }));
       sessionHandle = await runtimeAdapter.createSolverSession({
