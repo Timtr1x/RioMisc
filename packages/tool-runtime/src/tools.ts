@@ -67,6 +67,45 @@ function ok<T>(summary: string, data: T, durationMs: number, extra: Partial<Tool
   return { ok: true, summary, data, durationMs, ...extra };
 }
 
+/**
+ * Text the LLM actually sees. Must include `data` (file contents, listings,
+ * python stdout). Sending only `summary` ("file read" / "command finished")
+ * makes the model wander the empty work/ directory forever.
+ */
+export function formatToolResultForModel(result: ToolResult, maxChars = MAX_INLINE_CHARS): string {
+  const payload: Record<string, unknown> = {
+    ok: result.ok,
+    summary: result.summary,
+  };
+  if (result.data !== undefined) payload.data = result.data;
+  if (result.fullOutputPath) payload.fullOutputPath = result.fullOutputPath;
+  if (result.truncated) payload.truncated = true;
+  if (result.error) payload.error = result.error;
+  if (result.artifacts?.length) payload.artifacts = result.artifacts;
+  let text = JSON.stringify(payload, null, 2);
+  if (text.length > maxChars) text = `${text.slice(0, maxChars)}\n…(truncated, ${text.length} chars total)`;
+  return text;
+}
+
+/** Scripts/notes go under work/ unless the caller already picked a writable dir. */
+export function normalizeWorkPath(requested: string): string {
+  const norm = requested.replaceAll("\\", "/").replace(/^\.\//, "");
+  if (!norm || norm === ".") return "work/untitled.txt";
+  if (
+    norm.startsWith("work/") ||
+    norm.startsWith("artifacts/") ||
+    norm.startsWith("results/") ||
+    norm.startsWith("tmp/") ||
+    norm.startsWith("state/")
+  ) {
+    return norm;
+  }
+  if (norm.startsWith("input/") || norm === "challenge.txt") {
+    return `work/${norm.replace(/^input\//, "")}`;
+  }
+  return `work/${norm}`;
+}
+
 function fail(code: string, message: string, durationMs: number, extra: Partial<ToolResult> = {}): ToolResult {
   return { ok: false, summary: message, durationMs, error: { code, message }, ...extra };
 }
@@ -122,7 +161,30 @@ export function listWorkspace(ctx: ToolContext, params: unknown): Promise<ToolRe
       return { name, dir: st.isDirectory(), size: st.isFile() ? st.size : null };
     });
     const rel = relative(ctx.workspace.root, abs).replaceAll("\\", "/") || ".";
-    return Promise.resolve(ok(`listed ${entries.length} entries in ${rel}`, { path: rel, entries }, Date.now() - started));
+    const names = entries.map((e) => (e.dir ? `${e.name}/` : `${e.name}${e.size !== null ? ` (${e.size}B)` : ""}`)).join(", ");
+    // Root listing also peeks into input/ so the model sees attachments immediately.
+    const children: Record<string, { name: string; dir: boolean; size: number | null }[]> = {};
+    if (rel === ".") {
+      for (const peek of ["input", "work", "artifacts"]) {
+        const peekAbs = join(abs, peek);
+        if (existsSync(peekAbs) && statSync(peekAbs).isDirectory()) {
+          children[peek] = readdirSync(peekAbs).map((name) => {
+            const st = statSync(join(peekAbs, name));
+            return { name, dir: st.isDirectory(), size: st.isFile() ? st.size : null };
+          });
+        }
+      }
+    }
+    const peekSummary = Object.entries(children)
+      .map(([dir, list]) => `${dir}/: ${list.map((e) => e.name).join(", ") || "(empty)"}`)
+      .join("; ");
+    return Promise.resolve(
+      ok(
+        `listed ${entries.length} entries in ${rel}: ${names || "(empty)"}${peekSummary ? ` | ${peekSummary}` : ""}`,
+        { path: rel, entries, children: Object.keys(children).length ? children : undefined },
+        Date.now() - started,
+      ),
+    );
   } catch (e) {
     return Promise.resolve(fail("FS", String(e), Date.now() - started));
   }
@@ -133,11 +195,12 @@ export function writeWorkFile(ctx: ToolContext, params: unknown): Promise<ToolRe
   const p = writeWorkFileParamsSchema.safeParse(params);
   if (!p.success) return Promise.resolve(fail("VALIDATION", p.error.issues[0]?.message ?? "bad params", 0));
   try {
-    const abs = ctx.safeResolve(p.data.path);
+    const dest = normalizeWorkPath(p.data.path);
+    const abs = ctx.safeResolve(dest);
     mkdirSync(join(abs, ".."), { recursive: true });
     writeFileSync(abs, p.data.content, "utf8");
     const ref = ctx.recordArtifact("write_work_file", abs) ?? fileArtifact(ctx, abs);
-    return Promise.resolve(ok(`wrote ${p.data.path} (${p.data.content.length} bytes)`, { path: p.data.path }, Date.now() - started, { artifacts: [ref] }));
+    return Promise.resolve(ok(`wrote ${dest} (${p.data.content.length} bytes)`, { path: dest }, Date.now() - started, { artifacts: [ref] }));
   } catch (e) {
     return Promise.resolve(fail("FS", String(e), Date.now() - started));
   }
@@ -202,14 +265,17 @@ export function runPython(ctx: ToolContext, params: unknown, meta: { toolIndex: 
   const envAllowlist = ["PATH", "PYTHONPATH", "HOME", "USERPROFILE", "APPDATA", "SystemRoot", "TEMP", "TMP"];
   const pyp = ctx.pythonExecutable;
   try {
+    // cwd = workspace root so open("input/foo.zip") and open("work/solve.py") both work.
+    // Running in empty work/ made every real model session spend itself on os.listdir(".").
+    const cwd = ctx.workspace.root;
     if (p.data.code) {
       return runner
-        .run(pyp, ["-c", p.data.code, ...(p.data.args ?? [])], { cwd: ctx.workspace.work, timeoutMs: timeout, maxStdoutBytes: MAX_TOOL_OUTPUT_BYTES, maxStderrBytes: 1024 * 1024, envAllowlist }, fullPath)
+        .run(pyp, ["-c", p.data.code, ...(p.data.args ?? [])], { cwd, timeoutMs: timeout, maxStdoutBytes: MAX_TOOL_OUTPUT_BYTES, maxStderrBytes: 1024 * 1024, envAllowlist }, fullPath)
         .then((r) => processResult(ctx, "run_python", r, started, timeout));
     }
     const abs = ctx.safeResolve(p.data.scriptPath!);
     return runner
-      .run(pyp, [abs, ...(p.data.args ?? [])], { cwd: ctx.workspace.work, timeoutMs: timeout, maxStdoutBytes: MAX_TOOL_OUTPUT_BYTES, maxStderrBytes: 1024 * 1024, envAllowlist }, fullPath)
+      .run(pyp, [abs, ...(p.data.args ?? [])], { cwd, timeoutMs: timeout, maxStdoutBytes: MAX_TOOL_OUTPUT_BYTES, maxStderrBytes: 1024 * 1024, envAllowlist }, fullPath)
       .then((r) => processResult(ctx, "run_python", r, started, timeout));
   } catch (e) {
     return Promise.resolve(fail("FS", String(e), Date.now() - started));
@@ -227,11 +293,13 @@ function processResult(ctx: ToolContext, op: string, r: ProcessResult, started: 
     });
   }
   const truncated = out.length > MAX_INLINE_CHARS;
-  const summary = truncated ? out.slice(0, 400) : out;
+  const stdout = truncated ? out.slice(0, MAX_INLINE_CHARS) : out;
   return {
     ok: true,
-    summary: `command finished (${elapsed}ms, exit 0)${truncated ? " — output truncated, use search_tool_output / read_tool_output_chunk" : ""}`,
-    data: { stdout: truncated ? out.slice(0, MAX_INLINE_CHARS) : out, truncated },
+    summary: truncated
+      ? `command finished (${elapsed}ms, exit 0) — output truncated, use search_tool_output / read_tool_output_chunk`
+      : `command finished (${elapsed}ms, exit 0)\n${stdout.slice(0, 2000)}`,
+    data: { stdout, stderr: r.stderr, truncated },
     fullOutputPath: r.fullOutputPath,
     truncated,
     durationMs: elapsed,
@@ -338,17 +406,17 @@ export function requestReflectionTool(ctx: ToolContext, params: unknown): Promis
 // ---------------------------------------------------------------------------
 
 export const TOOL_IMPLS: ToolImpl[] = [
-  { name: "read_challenge_file", description: "Read a file inside the challenge workspace (input/, artifacts/, results/)", schema: readFileParamsSchema, run: readChallengeFile },
-  { name: "list_workspace", description: "List files in the challenge workspace", schema: listWorkspaceParamsSchema, run: listWorkspace },
-  { name: "write_work_file", description: "Write a script or note into work/ (preserved as reproducible evidence)", schema: writeWorkFileParamsSchema, run: writeWorkFile },
-  { name: "inspect_file", description: "Magic bytes, size, sha256, entropy, image dims, pcap summary", schema: inspectFileParamsSchema, run: inspectFileTool },
-  { name: "extract_archive", description: "Extract a zip (or gunzip) into artifacts/ with bomb limits", schema: extractArchiveParamsSchema, run: extractArchive },
-  { name: "run_python", description: "Run python code or a script inside the workspace (prefer writing solve.py to work/ first)", schema: runPythonParamsSchema, run: runPython },
+  { name: "read_challenge_file", description: "Read a file in the workspace. Paths are relative to the workspace ROOT (not work/). Examples: challenge.txt, input/task.zip, artifacts/extracted/flag.txt", schema: readFileParamsSchema, run: readChallengeFile },
+  { name: "list_workspace", description: "List a directory in the workspace. Omit path or use '.' for the root (challenge.txt, input/, work/, artifacts/). Do not use Python os.listdir to find files — use this tool.", schema: listWorkspaceParamsSchema, run: listWorkspace },
+  { name: "write_work_file", description: "Write a script or note. Bare names are placed under work/ (solve.py → work/solve.py).", schema: writeWorkFileParamsSchema, run: writeWorkFile },
+  { name: "inspect_file", description: "Magic bytes, size, sha256, entropy, image dims, pcap summary. Use on every attachment first.", schema: inspectFileParamsSchema, run: inspectFileTool },
+  { name: "extract_archive", description: "Extract a zip (or gunzip) into artifacts/ with zip-bomb limits. path e.g. input/task.zip", schema: extractArchiveParamsSchema, run: extractArchive },
+  { name: "run_python", description: "Run Python. cwd is the workspace ROOT, so open('input/foo.zip') and open('work/solve.py') both work. Prefer writing work/solve.py then scriptPath='work/solve.py'.", schema: runPythonParamsSchema, run: runPython },
   { name: "search_tool_output", description: "Search a saved tool output file for a substring", schema: z.object({ path: z.string().max(1000), query: z.string().min(1).max(200), maxMatches: z.number().int().min(1).max(200).optional() }), run: searchToolOutput },
   { name: "read_tool_output_chunk", description: "Read a chunk of a saved tool output file", schema: z.object({ path: z.string().max(1000), offset: z.number().int().min(0).optional(), maxChars: z.number().int().min(100).max(100_000).optional() }), run: readToolOutputChunk },
   { name: "report_progress", description: "Report progress/hypotheses to the control plane (~every 2 minutes or on major discoveries)", schema: reportProgressParamsSchema, run: reportProgressTool },
-  { name: "submit_flag_candidate", description: "Propose a flag candidate (confidence 0..1, reason required). The control plane verifies and submits.", schema: submitFlagCandidateParamsSchema, run: submitFlagCandidateTool },
-  { name: "request_handoff", description: "Ask the control plane to hand off to another solver domain", schema: requestHandoffParamsSchema, run: requestHandoffTool },
+  { name: "submit_flag_candidate", description: "Propose a flag candidate (confidence 0..1, reason required). You cannot submit to the contest yourself — the control plane verifies and submits.", schema: submitFlagCandidateParamsSchema, run: submitFlagCandidateTool },
+  { name: "request_handoff", description: "Ask the control plane to hand off to another solver domain (MISC or CRYPTO)", schema: requestHandoffParamsSchema, run: requestHandoffTool },
   { name: "request_reflection", description: "Request a reflection pass when stuck", schema: requestReflectionParamsSchema, run: requestReflectionTool },
 ];
 

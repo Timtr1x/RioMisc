@@ -13,7 +13,10 @@ npm install
 npm run dev          # 启动控制平面 + API (http://127.0.0.1:3000)
 ```
 
-Mock 比赛一次放出 11 道题（5 Misc + 5 Crypto + 1 道不支持的 WEB），系统自动：
+默认 `contest.adapter: none`：空比赛，Dashboard 粘贴题目 URL 即开始一道真实任务。
+已配置 Provider + Model 时自动使用 Pi（真实 LLM）；否则回退 Mock Agent。
+
+要跑内置 11 道演示题，把 `config/runtime.yaml` 改成 `adapter: mock`，系统自动：
 
 ```
 发现 → 下载附件(流式+SHA256) → Triage → 排队 → 最多 4 个 Solver 并行

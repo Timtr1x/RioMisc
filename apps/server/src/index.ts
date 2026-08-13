@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createLogger, loadConfig, FileSecretStore, type RuntimeConfig } from "@rio/shared";
 import { createRepositories } from "@rio/database";
-import { MockContestAdapter, LocalContestAdapter, DiskManager, type ContestAdapter } from "@rio/contest";
+import { MockContestAdapter, IdleContestAdapter, LocalContestAdapter, DiskManager, type ContestAdapter } from "@rio/contest";
 import { WorkspaceManager } from "@rio/tool-runtime";
 import { StateMachine } from "./state-machine.js";
 import { EventBus } from "./control/bus.js";
@@ -17,6 +17,14 @@ import { ModelRegistry } from "./control/registry.js";
 import { ControlPlane } from "./control/control-plane.js";
 import { buildApi } from "./api/routes.js";
 import Fastify from "fastify";
+
+function resolveAgentRuntime(repos: ReturnType<typeof createRepositories>): "mock" | "pi" {
+  const env = process.env.RIO_AGENT_RUNTIME;
+  if (env === "mock" || env === "pi") return env;
+  const hasProvider = repos.providers.list().some((p) => p.enabled);
+  const hasModel = repos.models.listEnabled().length > 0;
+  return hasProvider && hasModel ? "pi" : "mock";
+}
 
 export interface Runtime {
   config: RuntimeConfig;
@@ -80,6 +88,8 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     const mock = new MockContestAdapter();
     mock.loadFixtures();
     adapter = mock;
+  } else if (config.contest.adapter === "none") {
+    adapter = new IdleContestAdapter();
   } else {
     throw new Error(`unsupported contest adapter: ${config.contest.adapter}`);
   }
@@ -159,7 +169,7 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     sessionsRoot,
     piDir: join(dataDir, "pi"),
     secretsFile: join(dataDir, "secrets.enc"),
-    agentRuntime: (process.env.RIO_AGENT_RUNTIME as "mock" | "pi" | undefined) ?? "mock",
+    agentRuntime: resolveAgentRuntime(repos),
     stateMachine,
     preparation,
     submission,

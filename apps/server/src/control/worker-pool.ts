@@ -49,6 +49,7 @@ export interface WorkerHandle {
   lastPongAt: number;
   lastActivityAt: number;
   alive: boolean;
+  startedAt: number;
 }
 
 export interface WorkerMessage {
@@ -66,6 +67,7 @@ export class WorkerPool {
   private workers = new Map<string, WorkerHandle>();
   private readonly pingIntervalMs: number;
   private readonly leaseTtlMs: number;
+  private readonly startupGraceMs: number;
 
   constructor(
     private repos: Repositories,
@@ -79,6 +81,8 @@ export class WorkerPool {
   ) {
     this.pingIntervalMs = timing.pingIntervalMs;
     this.leaseTtlMs = timing.leaseTtlMs;
+    // Pi 首次会话可能长时间无 pong：SDK 加载 + 多轮模型调用
+    this.startupGraceMs = Math.max(timing.leaseTtlMs * 4, 180_000);
   }
 
   async startWorker(config: StartWorkerConfig): Promise<WorkerHandle> {
@@ -98,6 +102,7 @@ export class WorkerPool {
       lastPongAt: Date.now(),
       lastActivityAt: Date.now(),
       alive: true,
+      startedAt: Date.now(),
     };
     this.workers.set(config.challengeId, handle);
 
@@ -131,7 +136,9 @@ export class WorkerPool {
         clearInterval(timer);
         return;
       }
-      if (Date.now() - h.lastPongAt > this.leaseTtlMs) {
+      // 启动宽限期：Pi 首次会话要加载 160MB SDK + 多轮模型调用，主线程
+      // 可能长时间无法回 pong——此期间不按心跳超时判定失联。
+      if (Date.now() - h.startedAt > this.startupGraceMs && Date.now() - h.lastPongAt > this.leaseTtlMs) {
         clearInterval(timer);
         this.#markLost(config.challengeId, "heartbeat timeout");
         return;
@@ -145,19 +152,26 @@ export class WorkerPool {
     timer.unref();
 
     // send start config; on timeout kill the child so it can't leak
+    // IMPORTANT: the timeout MUST be cleared once ready/error arrives —
+    // otherwise a slow (but healthy) Pi worker gets SIGKILLed at 60s.
     await new Promise<void>((resolveReady, rejectReady) => {
+      let timer: NodeJS.Timeout | null = null;
+      const done = (err: Error | null) => {
+        if (timer) clearTimeout(timer);
+        child.off("message", onMsg);
+        if (err) rejectReady(err);
+        else resolveReady();
+      };
       const onMsg = (m: WorkerMessage) => {
         if (m.type === "ready") {
-          child.off("message", onMsg);
-          resolveReady();
+          done(null);
         } else if (m.type === "error" && !m.challengeId) {
-          child.off("message", onMsg);
-          rejectReady(new Error(String(m.message ?? "worker failed to start")));
+          done(new Error(String(m.message ?? "worker failed to start")));
         }
       };
       child.on("message", onMsg);
       child.send({ type: "start", config });
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         child.off("message", onMsg);
         handle.alive = false;
         this.workers.delete(config.challengeId);

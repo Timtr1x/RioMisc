@@ -127,6 +127,12 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     await control.manualSubmit((req.params as { id: string }).id, String(body.candidateId));
     return { ok: true };
   });
+  fastify.post("/api/challenges/:id/accept", async (req) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as { candidateId: string };
+    await control.acceptCandidate(id, String(body.candidateId));
+    return { ok: true };
+  });
 
   // -------------------------------------------------------------------------
   // Providers / models
@@ -166,6 +172,24 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     const body = modelCreateSchema.parse(req.body);
     const model = await registry.addModel(body);
     return { ok: true, model };
+  });
+
+  fastify.post("/api/models/:id/role", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as { role?: string };
+    if (!["PRIMARY", "FALLBACK", "GENERAL"].includes(body.role ?? "")) {
+      return reply.code(400).send({ error: "role must be PRIMARY | FALLBACK | GENERAL" });
+    }
+    const model = repos.models.get(id);
+    if (!model) return reply.code(404).send({ error: "unknown model" });
+    repos.models.update(id, { role: body.role as "PRIMARY" | "FALLBACK" | "GENERAL" });
+    // 同一 provider 只保留一个 PRIMARY
+    if (body.role === "PRIMARY") {
+      for (const other of repos.models.listByProvider(model.providerId)) {
+        if (other.id !== id && other.role === "PRIMARY") repos.models.update(other.id, { role: "GENERAL" });
+      }
+    }
+    return { ok: true };
   });
 
   // -------------------------------------------------------------------------

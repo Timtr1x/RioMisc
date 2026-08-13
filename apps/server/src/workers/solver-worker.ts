@@ -117,6 +117,12 @@ function buildToolContext(config: StartConfig): ToolContext {
   };
 }
 
+process.on("uncaughtException", (e) => {
+  console.error("[worker-uncaught]", e);
+});
+process.on("unhandledRejection", (e) => {
+  console.error("[worker-unhandled]", e);
+});
 process.on("message", async (msg: { type: string; [k: string]: unknown }) => {
   if (started && msg.type !== "start") {
     // runtime commands
@@ -139,30 +145,34 @@ process.on("message", async (msg: { type: string; [k: string]: unknown }) => {
   if (msg.type === "start") {
     currentConfig = msg.config as StartConfig;
     started = true;
-    try {
-      runtimeAdapter = await selectRuntime(currentConfig.runtime, currentConfig);
-      const ctx = buildToolContext(currentConfig);
-      const tools = toolNames().map((name) => ({ name, description: `Solver tool ${name}` }));
-      sessionHandle = await runtimeAdapter.createSolverSession({
-        sessionId: currentConfig.sessionId,
-        challengeId: currentConfig.challengeId,
-        solverType: currentConfig.solverType,
-        cwd: ctx.workspace.work,
-        workspaceRoot: ctx.workspace.root,
-        sessionDir: currentConfig.sessionDir,
-        systemPrompt: currentConfig.systemPrompt,
-        initialMessage: currentConfig.initialMessage,
-        modelRef: currentConfig.modelRef,
-        tools,
-        toolContext: ctx,
-      });
-      send({ type: "ready", sessionId: currentConfig.sessionId });
-      await sessionHandle.waitForIdle();
-      const usage = sessionHandle.usage();
-      send({ type: "idle", challengeId: currentConfig.challengeId, sessionId: currentConfig.sessionId, usage });
-    } catch (e) {
-      send({ type: "error", challengeId: currentConfig.challengeId, sessionId: currentConfig.sessionId, message: String(e) });
-      process.exit(1);
-    }
+    // ready 立即发送（进程就绪）；创建 session + 首次模型调用很慢（Pi 加载 SDK、
+    // 模型思考），必须在后台执行，否则控制平面以为启动超时。
+    send({ type: "ready", sessionId: currentConfig.sessionId });
+    void (async () => {
+      try {
+        runtimeAdapter = await selectRuntime(currentConfig.runtime, currentConfig);
+        const ctx = buildToolContext(currentConfig);
+        const tools = toolNames().map((name) => ({ name, description: `Solver tool ${name}` }));
+        sessionHandle = await runtimeAdapter.createSolverSession({
+          sessionId: currentConfig.sessionId,
+          challengeId: currentConfig.challengeId,
+          solverType: currentConfig.solverType,
+          cwd: ctx.workspace.work,
+          workspaceRoot: ctx.workspace.root,
+          sessionDir: currentConfig.sessionDir,
+          systemPrompt: currentConfig.systemPrompt,
+          initialMessage: currentConfig.initialMessage,
+          modelRef: currentConfig.modelRef,
+          tools,
+          toolContext: ctx,
+        });
+        await sessionHandle.waitForIdle();
+        const usage = sessionHandle.usage();
+        send({ type: "idle", challengeId: currentConfig.challengeId, sessionId: currentConfig.sessionId, usage });
+      } catch (e) {
+        send({ type: "error", challengeId: currentConfig.challengeId, sessionId: currentConfig.sessionId, message: String(e) });
+        process.exit(1);
+      }
+    })();
   }
 });

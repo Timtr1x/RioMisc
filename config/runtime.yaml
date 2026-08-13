@@ -2,7 +2,7 @@
 # Every value is Zod-validated at startup; invalid config aborts boot.
 
 contest:
-  adapter: mock            # mock | local | none
+  adapter: none            # none = empty (URL / real tasks) | mock = 11 demo puzzles | local
   poll:
     initialMs: 5000        # 5s default poll interval
     maxMs: 15000           # backoff ceiling

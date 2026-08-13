@@ -78,42 +78,66 @@ export class ModelRegistry {
     const started = Date.now();
     const out: TestConnectionResult = { authentication: false, textApi: false, toolCall: false, latencyMs: 0 };
 
-    // Phase 1: plain chat
+    // Phase 1: plain chat — budget must cover reasoning models (deepseek etc.)
     try {
       const text = await this.#request(provider, apiKey, {
         messages: [{ role: "user", content: "Respond exactly with OK." }],
-        max_tokens: 16,
+        max_tokens: 256,
       }, false, modelName);
       out.authentication = true;
-      out.textApi = typeof text === "string" && text.trim().toUpperCase() === "OK";
-      if (!out.textApi) out.message = `text API replied: ${JSON.stringify(text).slice(0, 100)}`;
+      // success = the API answered with *some* text; reasoning models may
+      // reply from reasoning_content, not message.content
+      out.textApi = typeof text === "string" && text.trim().length > 0;
+      out.message = `text API replied: ${JSON.stringify(typeof text === "string" ? text.slice(0, 120) : text)}`;
+      if (!out.textApi) out.message += " (empty reply — check the model's reasoning mode / response format)";
     } catch (e) {
       out.message = `text API failed: ${(e as Error).message}`;
       return out;
     }
 
-    // Phase 2: tool call
-    try {
-      const response = (await this.#request(provider, apiKey, {
-        messages: [{ role: "user", content: "Call the test_tool function with value=hello. Call it now." }],
-        max_tokens: 64,
-        tools: [
-          {
-            type: "function",
-            function: {
-              name: "test_tool",
-              description: "A test tool",
-              parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"] },
+    // Phase 2: tool call — probe how to disable thinking on this endpoint
+    // (some reasoning models forbid tool calls while thinking is on).
+    const probes: { label: string; extra: Record<string, unknown> }[] = [
+      { label: "thinking.disabled", extra: { thinking: { type: "disabled" } } },
+      { label: "reasoning_effort.none", extra: { reasoning_effort: "none" } },
+      { label: "thinkingConfig.0", extra: { thinkingConfig: { thinkingBudget: 0 } } },
+      { label: "no-param", extra: {} },
+    ];
+    out.toolCall = false;
+    let probeNote = "";
+    for (const probe of probes) {
+      try {
+        const response = (await this.#request(provider, apiKey, {
+          messages: [{ role: "user", content: "Call the test_tool function with value=hello. Call it now." }],
+          max_tokens: 1024,
+          ...probe.extra,
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "test_tool",
+                description: "A test tool",
+                parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"] },
+              },
             },
-          },
-        ],
-        tool_choice: "auto",
-      }, true, modelName)) as Record<string, unknown> | null;
-      out.toolCall = Array.isArray(response?.tool_calls) && response.tool_calls.length > 0;
-      if (!out.toolCall) out.message = (out.message ?? "") + " | no tool call returned";
-    } catch (e) {
-      out.message = (out.message ?? "") + ` | tool call failed: ${(e as Error).message}`;
+          ],
+          tool_choice: "auto",
+        }, true, modelName)) as Record<string, unknown> | null;
+        // 标准 OpenAI 响应: choices[0].message.tool_calls（不是顶层）
+        const choice = (response?.choices as { message?: { tool_calls?: unknown[] } }[] | undefined)?.[0];
+        const toolCalls = Array.isArray(choice?.message?.tool_calls) ? choice.message.tool_calls : [];
+        if (toolCalls.length > 0) {
+          out.toolCall = true;
+          probeNote = ` (thinking 关闭方式: ${probe.label})`;
+          break;
+        }
+        const finish = choice?.message ? (response?.choices as { finish_reason?: string }[] | undefined)?.[0]?.finish_reason : "?";
+        probeNote = ` (探测 ${probe.label}: finish=${finish ?? "?"}, 无 tool call)`;
+      } catch (e) {
+        probeNote = ` (探测 ${probe.label} 失败: ${(e as Error).message.slice(0, 160)})`;
+      }
     }
+    out.message = (out.message ?? "") + ` | tool call: ${out.toolCall ? "OK" : "FAILED"}${probeNote}`;
 
     out.latencyMs = Date.now() - started;
     if (out.authentication && out.textApi && out.toolCall) {
@@ -152,10 +176,16 @@ export class ModelRegistry {
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const json = (await res.json()) as Record<string, unknown>;
     if (wantToolCalls) return json;
-    const choices = (json.choices as { message?: { content?: string | null | { type: string; text: string }[] } }[]) ?? [];
+    const choices = (json.choices as { message?: { content?: string | null | { type: string; text: string }[]; reasoning_content?: string | null } }[]) ?? [];
     const msg = choices[0]?.message;
-    if (typeof msg?.content === "string") return msg.content;
+    if (typeof msg?.content === "string" && msg.content.length > 0) return msg.content;
     if (Array.isArray(msg?.content)) return msg.content.filter((c) => c.type === "text").map((c) => c.text).join("");
+    // deepseek-style reasoning models put the visible text here when content is null
+    if (typeof msg?.reasoning_content === "string" && msg.reasoning_content.length > 0) return msg.reasoning_content;
+    // OpenAI Responses API shape
+    const outputArr = json.output as { content?: { type?: string; text?: string }[] }[] | undefined;
+    const outputText = (json.output_text ?? outputArr?.[0]?.content?.[0]?.text) as string | undefined;
+    if (typeof outputText === "string") return outputText;
     return "";
   }
 

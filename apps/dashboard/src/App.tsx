@@ -40,7 +40,18 @@ export function App() {
           </button>
         ))}
       </nav>
-      {tab === "overview" && <Overview status={status} challenges={challenges} events={events} />}
+      {tab === "overview" && (
+        <Overview
+          status={status}
+          challenges={challenges}
+          events={events}
+          onStarted={(id) => {
+            setSelectedId(id);
+            setTab("detail");
+            refresh();
+          }}
+        />
+      )}
       {tab === "challenges" && (
         <Challenges
           challenges={challenges}
@@ -56,7 +67,16 @@ export function App() {
   );
 }
 
-function Overview({ status, challenges, events }: { status: Status | null; challenges: ChallengeRow[]; events: string[] }) {
+function Overview({
+  status,
+  events,
+  onStarted,
+}: {
+  status: Status | null;
+  challenges: ChallengeRow[];
+  events: string[];
+  onStarted: (id: string) => void;
+}) {
   const [url, setUrl] = useState("");
   const [taskMsg, setTaskMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [taskBusy, setTaskBusy] = useState(false);
@@ -70,6 +90,7 @@ function Overview({ status, challenges, events }: { status: Status | null; chall
       const r = await api<{ challengeId: string; title: string; category: string; attachments: number }>("/tasks/from-url", { method: "POST", body: { url: u } });
       setTaskMsg({ ok: true, text: `已开始任务「${r.title}」(${r.category})，附件 ${r.attachments} 个 → ${r.challengeId}` });
       setUrl("");
+      onStarted(r.challengeId);
     } catch (e) {
       setTaskMsg({ ok: false, text: String((e as Error).message) });
     } finally {
@@ -109,6 +130,16 @@ function Overview({ status, challenges, events }: { status: Status | null; chall
           </button>
         </form>
         {taskMsg && <div className={taskMsg.ok ? "ok" : "err"} style={{ marginTop: 8 }}>{taskMsg.text}</div>}
+        {status.agentRuntime === "mock" && (
+          <div className="warn" style={{ marginTop: 8 }}>
+            当前是 Mock Agent，不会调用大模型。在 Providers 里添加模型后重启，就会自动走真实 LLM。
+          </div>
+        )}
+        {status.adapter === "mock" && (
+          <div className="warn" style={{ marginTop: 8 }}>
+            当前加载了 11 道演示题，会占满 worker。只跑自己的题时把 config/runtime.yaml 的 contest.adapter 设为 none。
+          </div>
+        )}
       </div>
       <div className="cards">
         {cards.map(([lbl, num]) => (
@@ -276,7 +307,18 @@ function Detail({ id, refresh }: { id: string; refresh: () => void }) {
             <div key={c.id}>
               <span className={c.status === "CORRECT" ? "ok" : c.status === "WRONG" ? "err" : ""}>{c.value}</span>{" "}
               <span className="badge">{c.status}</span> <span className="muted">conf={c.confidence}</span>
-              {c.status === "VERIFIED" && <button style={{ marginLeft: 6 }} onClick={() => act(`/challenges/${id}/submit`, "POST", { candidateId: c.id })}>Submit</button>}
+              {(c.status === "VERIFIED" || c.status === "PENDING" || c.status === "SUBMISSION_UNKNOWN") && (
+                <>
+                  {c.status === "VERIFIED" && (
+                    <button style={{ marginLeft: 6 }} onClick={() => act(`/challenges/${id}/submit`, "POST", { candidateId: c.id })}>
+                      Submit
+                    </button>
+                  )}
+                  <button style={{ marginLeft: 6 }} onClick={() => act(`/challenges/${id}/accept`, "POST", { candidateId: c.id })}>
+                    Mark Solved
+                  </button>
+                </>
+              )}
             </div>
           ))}
           {d.candidates.length === 0 && <div className="muted">none</div>}
@@ -364,7 +406,14 @@ function Providers({ refresh }: { refresh: () => void }) {
               <input placeholder="model name" value={modelName} onChange={(e) => setModelName(e.target.value)} style={{ width: 180 }} />
             </div>
             {data.models.filter((m) => m.providerId === p.id).map((m) => (
-              <div key={m.id} className="muted">model: {m.modelName} ({m.role})</div>
+              <div key={m.id} className="muted">
+                model: {m.modelName} ({m.role})
+                {m.role !== "PRIMARY" && (
+                  <button style={{ marginLeft: 8 }} onClick={() => void api(`/models/${m.id}/role`, { method: "POST", body: { role: "PRIMARY" } }).then(refresh).catch((e) => setMsg(String((e as Error).message)))}>
+                    Set PRIMARY
+                  </button>
+                )}
+              </div>
             ))}
           </div>
         ))}

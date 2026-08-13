@@ -10,7 +10,7 @@
 /// so API keys never land in plaintext on disk (§56).
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { TOOL_IMPLS, runTool, type ToolContext } from "@rio/tool-runtime";
+import { TOOL_IMPLS, runTool, formatToolResultForModel, type ToolContext } from "@rio/tool-runtime";
 import type { ModelRef } from "@rio/domain";
 import type { AgentRuntimeAdapter, PiProviderSpec, SolverSessionConfig, SolverSessionHandle } from "./adapter.js";
 import type { AgentSession, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -45,11 +45,97 @@ class PiSessionHandle implements SolverSessionHandle {
 }
 
 function toSummary(result: Awaited<ReturnType<typeof runTool>>): string {
-  if (result.ok) {
-    const out = result.summary;
-    return out.length > 600 ? out.slice(0, 600) + "…" : out;
+  return formatToolResultForModel(result);
+}
+
+type TBox = typeof import("typebox").Type;
+
+/** Real JSON-schema parameters so the model knows field names (not Type.Record Any). */
+function toolParameterSchema(Type: TBox, name: string) {
+  const evidence = Type.Optional(
+    Type.Array(
+      Type.Object({
+        type: Type.Union([
+          Type.Literal("artifact"),
+          Type.Literal("script"),
+          Type.Literal("tool_output"),
+          Type.Literal("reason"),
+        ]),
+        path: Type.Optional(Type.String()),
+        text: Type.Optional(Type.String()),
+      }),
+    ),
+  );
+  switch (name) {
+    case "read_challenge_file":
+      return Type.Object({
+        path: Type.String({ description: "Workspace-relative path, e.g. challenge.txt or input/task.zip" }),
+        maxChars: Type.Optional(Type.Number()),
+      });
+    case "list_workspace":
+      return Type.Object({
+        path: Type.Optional(Type.String({ description: "Directory relative to workspace root. Omit or '.' for root." })),
+      });
+    case "write_work_file":
+      return Type.Object({
+        path: Type.String({ description: "File to write. Bare names go under work/ (solve.py → work/solve.py)." }),
+        content: Type.String(),
+      });
+    case "inspect_file":
+      return Type.Object({ path: Type.String({ description: "e.g. input/task.zip" }) });
+    case "extract_archive":
+      return Type.Object({
+        path: Type.String({ description: "Archive path, e.g. input/task.zip" }),
+        destPath: Type.Optional(Type.String({ description: "Default artifacts/extracted" })),
+        maxDepth: Type.Optional(Type.Number()),
+      });
+    case "run_python":
+      return Type.Object({
+        code: Type.Optional(Type.String({ description: "Inline snippet. cwd is workspace root." })),
+        scriptPath: Type.Optional(Type.String({ description: "Prefer work/solve.py" })),
+        args: Type.Optional(Type.Array(Type.String())),
+        timeoutMs: Type.Optional(Type.Number()),
+      });
+    case "search_tool_output":
+      return Type.Object({
+        path: Type.String(),
+        query: Type.String(),
+        maxMatches: Type.Optional(Type.Number()),
+      });
+    case "read_tool_output_chunk":
+      return Type.Object({
+        path: Type.String(),
+        offset: Type.Optional(Type.Number()),
+        maxChars: Type.Optional(Type.Number()),
+      });
+    case "report_progress":
+      return Type.Object({
+        summary: Type.String(),
+        confidence: Type.Number({ description: "0..1" }),
+        hypotheses: Type.Optional(Type.Array(Type.String())),
+        confirmedFacts: Type.Optional(Type.Array(Type.String())),
+        rejectedHypotheses: Type.Optional(Type.Array(Type.String())),
+        nextActions: Type.Optional(Type.Array(Type.String())),
+        progress: Type.Optional(Type.Union([Type.Literal("SIGNIFICANT"), Type.Literal("MINOR"), Type.Literal("NONE")])),
+        stalled: Type.Optional(Type.Boolean()),
+      });
+    case "submit_flag_candidate":
+      return Type.Object({
+        value: Type.String({ description: "The flag, usually flag{...}" }),
+        confidence: Type.Number({ description: "0..1, auto-submit at >= 0.85" }),
+        reason: Type.String({ description: "How you derived it" }),
+        evidence,
+      });
+    case "request_handoff":
+      return Type.Object({
+        target: Type.Union([Type.Literal("MISC"), Type.Literal("CRYPTO")]),
+        summary: Type.String(),
+      });
+    case "request_reflection":
+      return Type.Object({ reason: Type.String() });
+    default:
+      return Type.Object({});
   }
-  return `ERROR: ${result.error?.message ?? result.summary}`;
 }
 
 export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
@@ -172,10 +258,18 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
               name: spec.displayName,
               baseUrl: spec.baseUrl,
               api: API_MAP[spec.protocol],
-              compat: { supportsDeveloperRole: false },
+              compat: {
+                supportsDeveloperRole: false,
+                supportsReasoningEffort: false,
+                // zai thinking 格式：Pi 会发送 thinking:{type:"disabled"} 关闭思考。
+                // 实测 opencode.ai/zen/go 的 reasoning 模型在 thinking 模式下
+                // 禁止工具调用，且要求回传 reasoning_content——关闭后一切正常。
+                thinkingFormat: "zai",
+              },
               models: [
                 {
                   id: spec.modelId,
+                  reasoning: true, // 配合 thinkingFormat:"zai"：无 reasoning_effort 时 Pi 发 thinking disabled
                   contextWindow: spec.contextWindow,
                   maxTokens: spec.maxOutputTokens,
                 },
@@ -209,7 +303,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
         name: impl.name,
         label: impl.name,
         description: `${impl.description} Operates inside the challenge workspace only.`,
-        parameters: Type.Record(Type.String(), Type.Any()),
+        parameters: toolParameterSchema(Type, impl.name),
         promptSnippet: impl.name,
         async execute(_toolCallId: string, params: Record<string, unknown>) {
           const result = await runTool(ctx, impl.name, params);

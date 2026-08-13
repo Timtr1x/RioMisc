@@ -20,6 +20,38 @@ export function systemPromptFor(solverType: "MISC" | "CRYPTO"): string {
   return `${COMMON_PROMPT}\n\n${domain}`;
 }
 
+/** First user message: inline the statement so the model does not have to discover the disk. */
+export function buildKickoffMessage(opts: {
+  challengeText: string;
+  inputFiles: { name: string; sizeBytes: number | null }[];
+  extraNote?: string;
+}): string {
+  const files =
+    opts.inputFiles.length === 0
+      ? "(none — data may be entirely in the description)"
+      : opts.inputFiles.map((f) => `- input/${f.name}${f.sizeBytes !== null ? ` (${f.sizeBytes} bytes)` : ""}`).join("\n");
+  const extra = opts.extraNote ? `\n${opts.extraNote}\n` : "";
+  return `You are already inside this challenge's workspace. Do not search for the project root.
+
+LAYOUT (paths for every tool are relative to this root):
+  challenge.txt   — problem statement (also inlined below)
+  input/          — original attachments (treat as read-only)
+  work/           — write scripts here
+  artifacts/      — extracted / generated files
+  results/        — long tool outputs
+
+INPUT FILES:
+${files}
+
+CHALLENGE:
+${opts.challengeText}
+${extra}
+Start with list_workspace path="." and inspect_file / extract_archive on the attachments.
+Python cwd is the workspace root: open("input/<file>") works. Do not os.listdir(".") hoping to find the flag.
+When you have a credible flag, call submit_flag_candidate (do not try to submit to the contest yourself).
+Call report_progress when direction changes.`;
+}
+
 /** challenge.txt written into each challenge workspace for the solver. */
 export function buildChallengeFile(opts: {
   title: string;

@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import { computePriorityScore } from "@rio/scheduler";
 import { ApiRateLimiter, buildFixtures, lsbEmbed, makePcapHttp, makeZip } from "@rio/contest";
-import { WorkspaceManager, extractZip, listZipEntries, pcapSummary } from "@rio/tool-runtime";
+import { WorkspaceManager, extractZip, listZipEntries, pcapSummary, formatToolResultForModel, normalizeWorkPath, runTool, type ToolContext } from "@rio/tool-runtime";
 import { inflateSync } from "node:zlib";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -90,6 +90,61 @@ describe("path guard", () => {
       expect(() => wm.safeResolve(wsRoot, bad)).toThrow();
     }
     expect(wm.safeResolve(wsRoot, "input/flag.txt")).toBe(join(wsRoot, "input", "flag.txt"));
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("tool result for the model", () => {
+  it("includes data so the LLM sees file contents, not just 'file read'", () => {
+    const text = formatToolResultForModel({
+      ok: true,
+      summary: "file read",
+      data: { path: "challenge.txt", text: "flag is in the zip" },
+      durationMs: 1,
+    });
+    expect(text).toContain("flag is in the zip");
+    expect(text).toContain("challenge.txt");
+  });
+
+  it("normalizes bare write paths into work/", () => {
+    expect(normalizeWorkPath("solve.py")).toBe("work/solve.py");
+    expect(normalizeWorkPath("work/solve.py")).toBe("work/solve.py");
+    expect(normalizeWorkPath("artifacts/out.bin")).toBe("artifacts/out.bin");
+  });
+
+  it("list_workspace names files and run_python sees input/ from workspace root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rio-tools-"));
+    const wm = new WorkspaceManager(root);
+    const layout = wm.ensure("chal");
+    writeFileSync(join(layout.input, "real.zip"), "PK");
+    writeFileSync(join(layout.root, "challenge.txt"), "extract the zip");
+    let resultIndex = 0;
+    const ctx: ToolContext = {
+      challengeId: "chal",
+      workspace: layout,
+      sessionId: "s",
+      safeResolve: (p) => wm.safeResolve(layout.root, p),
+      emit: () => {},
+      recordArtifact: () => null,
+      nextResultFile: () => join(layout.results, `tool-${++resultIndex}.txt`),
+      pythonExecutable: process.env.RIO_PYTHON ?? "python",
+      allowNetwork: false,
+    };
+    const listing = await runTool(ctx, "list_workspace", { path: "." });
+    expect(listing.ok).toBe(true);
+    expect(listing.summary).toMatch(/input\//);
+    expect(listing.summary).toMatch(/challenge\.txt/);
+    const modelText = formatToolResultForModel(listing);
+    expect(modelText).toContain("real.zip");
+
+    const py = await runTool(ctx, "run_python", { code: "import os; print(sorted(os.listdir('input')))" });
+    expect(py.ok).toBe(true);
+    const stdout = String((py.data as { stdout?: string })?.stdout ?? "");
+    expect(stdout).toContain("real.zip");
+
+    const wrote = await runTool(ctx, "write_work_file", { path: "note.txt", content: "hi" });
+    expect(wrote.ok).toBe(true);
+    expect(readFileSync(join(layout.work, "note.txt"), "utf8")).toBe("hi");
     rmSync(root, { recursive: true, force: true });
   });
 });

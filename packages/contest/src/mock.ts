@@ -47,7 +47,7 @@ interface MockState {
 }
 
 export class MockContestAdapter implements ContestAdapter {
-  readonly kind = "mock";
+  readonly kind: string = "mock";
   private server: Server | null = null;
   private baseUrl = "";
   private startedAt = 0;

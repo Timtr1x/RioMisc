@@ -207,6 +207,19 @@ export class SubmissionManager {
       case "UNKNOWN":
       case "ERROR":
       default: {
+        const raw = (result.raw ?? {}) as { needsManualReview?: boolean };
+        if (raw.needsManualReview) {
+          // URL / idle tasks have no official judge — keep the candidate for the dashboard.
+          if (candidate) repos.candidates.update(candidate.id, { status: "VERIFIED" });
+          this.deps.bus.publish({
+            type: "FLAG_NEEDS_REVIEW",
+            challengeId: challenge.id,
+            payload: { candidateId: candidate?.id, value: submission.flagValue, message: result.message },
+          });
+          this.deps.logger.info({ event: "flag_needs_review", challengeId: challenge.id, candidateId: candidate?.id }, "no official judge — candidate left for manual accept");
+          this.deps.stateMachine.transition(challenge.id, "SUBMIT_WRONG", { payload: { reason: "no official judge" } });
+          break;
+        }
         if (candidate) repos.candidates.update(candidate.id, { status: "SUBMISSION_UNKNOWN", submittedAt: Date.now() });
         this.deps.bus.publish({ type: "SUBMISSION_ERROR", challengeId: challenge.id, payload: { submissionId: submission.id, message: result.message } });
         this.deps.logger.warn({ event: "submission_unknown", challengeId: challenge.id, submissionId: submission.id, message: result.message }, "submission outcome unknown");

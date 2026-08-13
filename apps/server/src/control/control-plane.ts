@@ -8,7 +8,9 @@ import type { ContestAdapter } from "@rio/contest";
 import { Poller, ApiRateLimiter, DiskManager } from "@rio/contest";
 import type { WorkerMessage, StartWorkerConfig } from "./worker-pool.js";
 import { WorkspaceManager } from "@rio/tool-runtime";
-import { systemPromptFor } from "@rio/solver";
+import { systemPromptFor, buildKickoffMessage } from "@rio/solver";
+import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { ResourceSemaphore, computePriorityScore } from "@rio/scheduler";
 import { StateMachine } from "../state-machine.js";
 import { EventBus } from "./bus.js";
@@ -56,6 +58,8 @@ export class ControlPlane {  private poller: Poller;
   private stopped = false;
   private intentionallyStopped = new Set<string>();
   private reflectCooldown = new Map<string, number>();
+  /** Challenges discovered before this process started are ignored in idle mode. */
+  private readonly bootAt = Date.now();
 
   constructor(private deps: ControlPlaneDeps) {
     this.disk = new DiskManager(deps.workspacesRoot, {
@@ -233,7 +237,7 @@ Re-evaluate assumptions affected by this change.`;
     const { repos } = this.deps;
     try {
       // 1. DISCOVERED → prepare (queue with triage concurrency)
-      const discovered = repos.challenges.listByStatus("DISCOVERED");
+      const discovered = repos.challenges.listByStatus("DISCOVERED").filter((c) => this.#schedulable(c));
       for (const c of discovered.slice(0, this.deps.config.workers.triageConcurrency)) {
         if (this.preparing.has(c.id)) continue;
         if (!SOLVER_CATEGORIES.includes(c.category)) {
@@ -247,11 +251,12 @@ Re-evaluate assumptions affected by this change.`;
 
       // 2. READY → QUEUED
       for (const c of repos.challenges.listByStatus("READY")) {
+        if (!this.#schedulable(c)) continue;
         this.deps.stateMachine.transition(c.id, "QUEUE");
       }
 
       // 3. scores
-      const queued = repos.challenges.listByStatus("QUEUED");
+      const queued = repos.challenges.listByStatus("QUEUED").filter((c) => this.#schedulable(c));
       for (const c of queued) {
         const score = computePriorityScore(
           {
@@ -377,7 +382,7 @@ Re-evaluate assumptions affected by this change.`;
       workspaceRoot: layout.root,
       sessionDir: this.deps.sessionsRoot,
       systemPrompt: systemPromptFor(solverType),
-      initialMessage: "Begin solving the challenge described in challenge.txt. Keep the control plane informed via report_progress.",
+      initialMessage: this.#kickoff(layout.root),
       modelRef,
       runtime: this.deps.agentRuntime,
       pi: this.#piWorkerConfig(),
@@ -392,6 +397,34 @@ Re-evaluate assumptions affected by this change.`;
     const primary = this.deps.repos.models.primary();
     if (primary) return { providerId: primary.providerId, modelId: primary.modelName };
     return null;
+  }
+
+  /** Idle mode ignores leftover mock/url rows from previous runs so they cannot steal workers. */
+  #schedulable(c: Challenge): boolean {
+    if (this.deps.adapter.kind !== "idle") return true;
+    return c.discoveredAt >= this.bootAt;
+  }
+
+  #kickoff(workspaceRoot: string, extraNote?: string): string {
+    let challengeText = "";
+    try {
+      challengeText = readFileSync(join(workspaceRoot, "challenge.txt"), "utf8");
+    } catch {
+      challengeText = "(challenge.txt not written yet — use list_workspace and read_challenge_file)";
+    }
+    const inputDir = join(workspaceRoot, "input");
+    const inputFiles: { name: string; sizeBytes: number | null }[] = [];
+    if (existsSync(inputDir)) {
+      for (const name of readdirSync(inputDir)) {
+        try {
+          const st = statSync(join(inputDir, name));
+          inputFiles.push({ name, sizeBytes: st.isFile() ? st.size : null });
+        } catch {
+          inputFiles.push({ name, sizeBytes: null });
+        }
+      }
+    }
+    return buildKickoffMessage({ challengeText, inputFiles, extraNote });
   }
 
   /** Provider specs for the Pi runtime, assembled from the registry (§55). */
@@ -504,6 +537,8 @@ Re-evaluate assumptions affected by this change.`;
         break;
       }
       case "info":
+        logger.info({ event: "worker_info", challengeId, message: String(msg.message ?? "") });
+        break;
       case "pong":
         break;
       default:
@@ -582,7 +617,7 @@ Re-evaluate assumptions affected by this change.`;
       workspaceRoot: layout.root,
       sessionDir: this.deps.sessionsRoot,
       systemPrompt: systemPromptFor(target),
-      initialMessage: `A prior solver requested handoff to ${target}.\n\nPrior solver summary: ${summary}\n\nContinue solving challenge.txt with fresh eyes.`,
+      initialMessage: this.#kickoff(layout.root, `A prior solver requested handoff to ${target}.\nPrior solver summary: ${summary}\nContinue with fresh eyes.`),
       modelRef: this.#resolveModelRef(),
       runtime: this.deps.agentRuntime,
       pi: this.#piWorkerConfig(),
@@ -663,20 +698,49 @@ Re-evaluate assumptions affected by this change.`;
       description: fetched.description,
       attachments: fetched.attachments,
     });
+    // Discover immediately so the Dashboard can open the row (don't wait for the 5s poller).
+    await this.pollOnce();
+    const created = this.deps.repos.challenges.getByRemoteId(id);
+    if (created) {
+      this.deps.repos.challenges.update(created.id, { priority: 100 });
+    }
+    const challengeId = created?.id ?? `ch_${id}`;
     this.deps.bus.publish({
       type: "URL_CHALLENGE_ADDED",
-      challengeId: id,
+      challengeId,
       payload: { url, title: fetched.title, attachments: fetched.attachments.length },
     });
-    this.deps.logger.info({ event: "url_challenge_added", challengeId: id, url, title: fetched.title });
+    this.deps.logger.info({ event: "url_challenge_added", challengeId, url, title: fetched.title });
     return {
-      // poller 会用 ch_ 前缀创建 DB 行
-      challengeId: `ch_${id}`,
+      challengeId,
       title: fetched.title,
       category: fetched.category,
       attachments: fetched.attachments.length,
       description: fetched.description,
     };
+  }
+
+  async acceptCandidate(challengeId: string, candidateId: string): Promise<void> {
+    const { repos } = this.deps;
+    const challenge = repos.challenges.get(challengeId);
+    const candidate = repos.candidates.get(candidateId);
+    if (!challenge || !candidate) throw new Error("unknown challenge/candidate");
+    if (candidate.challengeId !== challengeId) throw new Error("candidate does not belong to this challenge");
+    repos.candidates.update(candidateId, { status: "CORRECT", submittedAt: Date.now() });
+    const status = challenge.lifecycleStatus;
+    if (status === "ACTIVE") {
+      this.deps.stateMachine.transition(challengeId, "CANDIDATE_FOUND", { payload: { candidateId } });
+      this.deps.stateMachine.transition(challengeId, "VERIFY_OK", { payload: { candidateId } });
+      this.deps.stateMachine.transition(challengeId, "SUBMIT_CORRECT", { payload: { candidateId, manual: true } });
+    } else if (status === "VERIFYING") {
+      this.deps.stateMachine.transition(challengeId, "VERIFY_OK", { payload: { candidateId } });
+      this.deps.stateMachine.transition(challengeId, "SUBMIT_CORRECT", { payload: { candidateId, manual: true } });
+    } else if (status === "SUBMITTING") {
+      this.deps.stateMachine.transition(challengeId, "SUBMIT_CORRECT", { payload: { candidateId, manual: true } });
+    } else if (status !== "SOLVED") {
+      throw new Error(`cannot accept candidate while ${status}`);
+    }
+    await this.handleSubmissionCorrect(challengeId);
   }
 
   async pause(challengeId: string, reason?: string): Promise<void> {
@@ -718,7 +782,7 @@ Re-evaluate assumptions affected by this change.`;
     this.deps.bus.publish({ type: "PRIORITY_CHANGED", challengeId, payload: { priority } });
   }
 
-  async forceHint(challengeId: string): Promise<string> {
+  async forceHint(challengeId: string): Promise<string | null> {
     return this.deps.hints.fetchHint(challengeId);
   }
 
