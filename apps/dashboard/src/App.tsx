@@ -11,7 +11,7 @@ const TAB_LABEL: Record<Tab, string> = {
   providers: "模型",
 };
 
-const STATUS_ZH: Record<string, string> = {
+const LIFECYCLE_ZH: Record<string, string> = {
   DISCOVERED: "已发现",
   PREPARING: "准备中",
   READY: "就绪",
@@ -24,36 +24,70 @@ const STATUS_ZH: Record<string, string> = {
   PARKED: "已搁置",
   UNSUPPORTED: "不支持",
   ERROR: "错误",
-  UNKNOWN: "未知",
-  ACTIVE_PROGRESS: "进行中",
-  STALLED: "停滞",
-  LOCKED: "未解锁",
-  ELIGIBLE: "可领取",
-  FETCHING: "获取中",
-  FETCHED: "已获取",
-  DECLINED: "已拒绝",
-  NOT_SUPPORTED: "不支持",
-  HEALTHY: "正常",
-  DEGRADED: "降级",
-  DOWN: "不可用",
-  PENDING: "待确认",
-  VERIFIED: "已验证",
-  REJECTED_LOCAL: "本地拒绝",
-  SUBMITTED: "已提交",
-  WRONG: "错误",
-  CORRECT: "正确",
-  SUBMISSION_UNKNOWN: "结果未知",
-  RATE_LIMITED: "限速",
-  SENDING: "发送中",
-  QUEUED_SUB: "排队提交",
 };
 
-function zh(code: string | null | undefined, fallback?: string): string {
-  if (!code) return fallback ?? "—";
-  return STATUS_ZH[code] ?? fallback ?? code;
+const PROGRESS_ZH: Record<string, string> = {
+  UNKNOWN: "—",
+  ACTIVE: "有进展",
+  STALLED: "停滞",
+};
+
+const HINT_ZH: Record<string, string> = {
+  NOT_SUPPORTED: "不支持 Hint",
+  LOCKED: "Hint 未解锁",
+  ELIGIBLE: "可取 Hint",
+  FETCHING: "正在取 Hint",
+  FETCHED: "已有 Hint",
+  DECLINED: "无 Hint",
+};
+
+const FLAG_ZH: Record<string, string> = {
+  PENDING: "待确认",
+  VERIFIED: "已验证",
+  REJECTED_LOCAL: "本地格式拒绝",
+  SUBMITTED: "已提交裁判",
+  WRONG: "裁判判错",
+  CORRECT: "正确",
+  SUBMISSION_UNKNOWN: "结果未知",
+  QUEUED: "排队提交",
+  SENDING: "发送中",
+  RATE_LIMITED: "限速",
+  UNKNOWN: "未知",
+};
+
+function zhLife(code: string | null | undefined): string {
+  if (!code) return "—";
+  return LIFECYCLE_ZH[code] ?? code;
+}
+function zhProgress(code: string | null | undefined): string {
+  if (!code) return "—";
+  return PROGRESS_ZH[code] ?? code;
+}
+function zhHint(code: string | null | undefined): string {
+  if (!code) return "—";
+  return HINT_ZH[code] ?? code;
+}
+function zhFlag(code: string | null | undefined): string {
+  if (!code) return "—";
+  return FLAG_ZH[code] ?? code;
+}
+function zhHealth(code: string | null | undefined): string {
+  if (code === "HEALTHY") return "正常";
+  if (code === "DEGRADED") return "降级";
+  if (code === "DOWN") return "不可用";
+  return code ?? "—";
 }
 
 const HEALTH_CLASS: Record<string, string> = { HEALTHY: "ok", DOWN: "err", DEGRADED: "warn" };
+
+function contestLabel(status: Status | null): string {
+  if (!status) return "…";
+  const c = status.contest;
+  if (c?.kind === "ctfd" && c.baseUrl) return `CTFd ${c.baseUrl}`;
+  if (c?.kind === "mock" || status.adapter === "mock") return "演示赛 Mock";
+  if (c?.kind === "local" || status.adapter === "local") return "单题本地";
+  return "未接入";
+}
 
 export function App() {
   const [tab, setTab] = useState<Tab>("overview");
@@ -86,7 +120,7 @@ export function App() {
       <header>
         <h1>⚡ RioMisc</h1>
         <span className="sub">
-          CTF Misc/Crypto 自动解题 · 适配器={status?.adapter ?? "…"} · 引擎={status?.agentRuntime === "pi" ? "真实模型" : status?.agentRuntime === "mock" ? "Mock" : "…"} · 工人 {status?.workers ?? 0}/{status?.workerSlots ?? 0} · 磁盘剩余 {status?.diskFreeGb ?? "…"}GB
+          CTF Misc/Crypto 自动解题 · 比赛={contestLabel(status)} · 引擎={status?.agentRuntime === "pi" ? "真实模型" : status?.agentRuntime === "mock" ? "Mock" : "…"} · 执行={status?.executionMode === "NATIVE_TRUSTED" ? "Native / Trusted" : status?.executionMode ?? "…"} · 工人 {status?.workers ?? 0}/{status?.workerSlots ?? 0} · 磁盘剩余 {status?.diskFreeGb ?? "…"}GB
         </span>
       </header>
       <nav>
@@ -115,9 +149,24 @@ export function App() {
             setSelectedId(id);
             setTab("detail");
           }}
+          onDeleted={(id) => {
+            setSelectedId((cur) => (cur === id ? null : cur));
+            refresh();
+          }}
         />
       )}
-      {tab === "detail" && <Detail id={selectedId ?? challenges[0]?.id ?? ""} refresh={refresh} />}
+      {tab === "detail" && (
+        <Detail
+          id={selectedId ?? challenges[0]?.id ?? ""}
+          refresh={refresh}
+          refreshKey={refreshKey}
+          onDeleted={(id) => {
+            setSelectedId((cur) => (cur === id ? null : cur));
+            setTab("challenges");
+            refresh();
+          }}
+        />
+      )}
       {tab === "providers" && <Providers refresh={refresh} />}
     </>
   );
@@ -136,6 +185,51 @@ function Overview({
   const [url, setUrl] = useState("");
   const [taskMsg, setTaskMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [taskBusy, setTaskBusy] = useState(false);
+  const [contestUrl, setContestUrl] = useState("");
+  const [contestToken, setContestToken] = useState("");
+  const [contestCookie, setContestCookie] = useState("");
+  const [contestMsg, setContestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [contestBusy, setContestBusy] = useState(false);
+
+  const contest = status?.contest;
+  const connected = contest?.connected === true || status?.adapter === "mock" || status?.adapter === "ctfd";
+
+  const connectContest = async (kind: "mock" | "ctfd") => {
+    setContestBusy(true);
+    setContestMsg(null);
+    try {
+      const r = await api<{ kind: string; lastListed: number; baseUrl: string | null }>("/contest/connect", {
+        method: "POST",
+        body:
+          kind === "mock"
+            ? { kind: "mock" }
+            : { kind: "ctfd", baseUrl: contestUrl.trim(), token: contestToken.trim() || undefined, cookie: contestCookie.trim() || undefined, miscCryptoOnly: true },
+      });
+      setContestMsg({
+        ok: true,
+        text: kind === "mock"
+          ? `已接入演示比赛，Poller 正在自动拉题（本次列出 ${r.lastListed} 道），Solver 会自动开做并交 flag。`
+          : `已接入 ${r.baseUrl ?? contestUrl}，列出 ${r.lastListed} 道 Misc/Crypto，正在自动下载并派工。`,
+      });
+    } catch (e) {
+      setContestMsg({ ok: false, text: String((e as Error).message) });
+    } finally {
+      setContestBusy(false);
+    }
+  };
+
+  const disconnectContest = async () => {
+    setContestBusy(true);
+    setContestMsg(null);
+    try {
+      await api("/contest/disconnect", { method: "POST" });
+      setContestMsg({ ok: true, text: "已断开比赛。已在跑的题会停在当前状态，不会再拉新题。" });
+    } catch (e) {
+      setContestMsg({ ok: false, text: String((e as Error).message) });
+    } finally {
+      setContestBusy(false);
+    }
+  };
 
   const startTask = async () => {
     const u = url.trim();
@@ -172,7 +266,63 @@ function Overview({
   return (
     <>
       <div className="panel">
-        <h3>▶ 开始新任务 — 输入题目网址（自动抓取题面+附件并解题）</h3>
+        <h3>▶ 接入比赛 — 全自动拉题 / 下载 / 派工 / 交 flag</h3>
+        <p className="muted" style={{ margin: "0 0 10px" }}>
+          连上之后 Poller 会周期性拉题单，新题自动进解题流水线。没有赛事 API 时先点「接入演示比赛」。
+        </p>
+        <div className="buttons" style={{ marginTop: 0 }}>
+          <button type="button" onClick={() => void connectContest("mock")} disabled={contestBusy || connected}>
+            {contestBusy && !contestUrl ? "接入中…" : "接入演示比赛（Mock，无需平台）"}
+          </button>
+          <button type="button" className="danger" onClick={() => void disconnectContest()} disabled={contestBusy || !connected}>
+            断开比赛
+          </button>
+        </div>
+        <form style={{ marginTop: 10 }}>
+          <input
+            style={{ flex: 1, minWidth: 260 }}
+            placeholder="CTFd / DASCTF 地址，如 https://ctf.example.com"
+            value={contestUrl}
+            onChange={(e) => setContestUrl(e.target.value)}
+          />
+          <input
+            type="password"
+            style={{ minWidth: 180 }}
+            placeholder="Access Token（可选）"
+            value={contestToken}
+            onChange={(e) => setContestToken(e.target.value)}
+          />
+          <input
+            style={{ minWidth: 180 }}
+            placeholder="Cookie（可选）"
+            value={contestCookie}
+            onChange={(e) => setContestCookie(e.target.value)}
+          />
+          <button type="button" onClick={() => void connectContest("ctfd")} disabled={contestBusy || !contestUrl.trim()}>
+            {contestBusy ? "连接中…" : "接入 CTFd"}
+          </button>
+        </form>
+        <div style={{ marginTop: 8 }}>
+          {connected ? (
+            <span className="ok">
+              已接入：{contestLabel(status)}
+              {typeof contest?.lastListed === "number" ? ` · 上次列出 ${contest.lastListed} 道` : ""}
+              {contest?.lastPollAt ? ` · 拉取 ${new Date(contest.lastPollAt).toLocaleTimeString()}` : ""}
+            </span>
+          ) : (
+            <span className="muted">当前未接入比赛，只会处理下面粘贴的单题。</span>
+          )}
+        </div>
+        {contest?.lastError && <div className="err" style={{ marginTop: 6 }}>拉取出错：{contest.lastError}</div>}
+        {contestMsg && <div className={contestMsg.ok ? "ok" : "err"} style={{ marginTop: 6 }}>{contestMsg.text}</div>}
+        {status.agentRuntime === "mock" && (
+          <div className="warn" style={{ marginTop: 8 }}>
+            当前是 Mock Agent，演示赛会用内置解题器交 flag；要接真实大模型请到「模型」页加 Provider。
+          </div>
+        )}
+      </div>
+      <div className="panel">
+        <h3>单题模式 — 粘贴一道题的网址（自动抓取题面+附件并解题）</h3>
         <form>
           <input
             style={{ flex: 1, minWidth: 320 }}
@@ -186,16 +336,6 @@ function Overview({
           </button>
         </form>
         {taskMsg && <div className={taskMsg.ok ? "ok" : "err"} style={{ marginTop: 8 }}>{taskMsg.text}</div>}
-        {status.agentRuntime === "mock" && (
-          <div className="warn" style={{ marginTop: 8 }}>
-            当前是 Mock Agent，不会调用大模型。在「模型」页添加 Provider 后重启，就会自动走真实 LLM。
-          </div>
-        )}
-        {status.adapter === "mock" && (
-          <div className="warn" style={{ marginTop: 8 }}>
-            当前加载了 11 道演示题，会占满 worker。只跑自己的题时把 config/runtime.yaml 的 contest.adapter 设为 none。
-          </div>
-        )}
       </div>
       <div className="cards">
         {cards.map(([lbl, num]) => (
@@ -211,7 +351,7 @@ function Overview({
           {status.providers.length === 0 && <div className="muted">尚未配置 Provider</div>}
           {status.providers.map((p) => (
             <div key={p.id}>
-              {p.name} <span className={`badge ${HEALTH_CLASS[p.health] ?? "warn"}`}>{zh(p.health)}</span>
+              {p.name} <span className={`badge ${HEALTH_CLASS[p.health] ?? "warn"}`}>{zhHealth(p.health)}</span>
             </div>
           ))}
         </div>
@@ -240,7 +380,15 @@ const FILTERS: { value: string; label: string }[] = [
   { value: "ERROR", label: "错误" },
 ];
 
-function Challenges({ challenges, onSelect }: { challenges: ChallengeRow[]; onSelect: (id: string) => void }) {
+function Challenges({
+  challenges,
+  onSelect,
+  onDeleted,
+}: {
+  challenges: ChallengeRow[];
+  onSelect: (id: string) => void;
+  onDeleted: (id: string) => void;
+}) {
   const [filter, setFilter] = useState("ALL");
   const rows = challenges.filter((c) => {
     if (filter === "ALL") return true;
@@ -275,6 +423,7 @@ function Challenges({ challenges, onSelect }: { challenges: ChallengeRow[]; onSe
             <th>提示</th>
             <th>错交</th>
             <th>Solver</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -284,13 +433,27 @@ function Challenges({ challenges, onSelect }: { challenges: ChallengeRow[]; onSe
               <td>{c.title}</td>
               <td>{c.category}</td>
               <td>{c.score ?? "-"}</td>
-              <td><span className={`status s-${c.status}`}>{zh(c.status)}</span>{c.blockedReason ? <span className="err" title={c.blockedReason}> ⚠</span> : null}</td>
+              <td><span className={`status s-${c.status}`}>{zhLife(c.status)}</span>{c.blockedReason ? <span className="err" title={c.blockedReason}> ⚠</span> : null}</td>
               <td>{c.priorityScore ?? "-"}</td>
               <td>{fmtMs(c.elapsedMs)}</td>
-              <td>{c.progress === "UNKNOWN" ? "—" : zh(c.progress)}</td>
-              <td>{zh(c.hint)}</td>
+              <td>{zhProgress(c.progress)}</td>
+              <td>{zhHint(c.hint)}</td>
               <td>{c.wrong}</td>
               <td>{c.solver ?? "-"}</td>
+              <td>
+                <button
+                  className="danger"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!window.confirm(`删除「${c.title}」？会停掉 Solver、清掉 workspace，并且不会再自动拉回。`)) return;
+                    void api(`/challenges/${c.id}`, { method: "DELETE" })
+                      .then(() => onDeleted(c.id))
+                      .catch((err) => window.alert(String((err as Error).message)));
+                  }}
+                >
+                  删除
+                </button>
+              </td>
             </tr>
           ))}
         </tbody>
@@ -299,54 +462,241 @@ function Challenges({ challenges, onSelect }: { challenges: ChallengeRow[]; onSe
   );
 }
 
-function Detail({ id, refresh }: { id: string; refresh: () => void }) {
+function Detail({
+  id,
+  refresh,
+  refreshKey,
+  onDeleted,
+}: {
+  id: string;
+  refresh: () => void;
+  refreshKey: number;
+  onDeleted: (id: string) => void;
+}) {
   const [d, setD] = useState<ChallengeDetail | null>(null);
   const [candidate, setCandidate] = useState("");
   const [err, setErr] = useState("");
-  useEffect(() => {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [reflection, setReflection] = useState<{
+    diagnosis: string;
+    likelyMistakes: string[];
+    missedEvidence: string[];
+    recommendedNextSteps: string[];
+    injected: boolean;
+  } | null>(null);
+
+  const load = useCallback(() => {
     if (!id) return;
-    const load = () => {
-      void api<ChallengeDetail>(`/challenges/${id}`).then(setD).catch(() => setD(null));
-    };
+    void api<ChallengeDetail>(`/challenges/${id}`)
+      .then((row) => {
+        setD(row);
+        const ev = [...row.timeline].reverse().find((e) => e.type === "REFLECTION_RUN");
+        if (ev) {
+          try {
+            const p = JSON.parse(ev.payloadJson) as {
+              diagnosis?: string;
+              likelyMistakes?: string[];
+              missedEvidence?: string[];
+              recommendedNextSteps?: string[];
+            };
+            setReflection((cur) =>
+              cur ?? {
+                diagnosis: p.diagnosis ?? "",
+                likelyMistakes: p.likelyMistakes ?? [],
+                missedEvidence: p.missedEvidence ?? [],
+                recommendedNextSteps: p.recommendedNextSteps ?? [],
+                injected: true,
+              },
+            );
+          } catch {
+            /* ignore */
+          }
+        }
+      })
+      .catch(() => setD(null));
+  }, [id]);
+
+  useEffect(() => {
     load();
     const timer = setInterval(load, 2000);
     return () => clearInterval(timer);
-  }, [id, refresh]);
+  }, [load, refreshKey]);
 
   if (!id) return <div className="muted">请先选择一道题</div>;
   if (!d) return <div className="muted">加载中…</div>;
 
   const act = async (path: string, method = "POST", body?: unknown) => {
+    setBusy(true);
     try {
-      await api(path, { method, body });
+      const r = await api<Record<string, unknown>>(path, { method, body });
       setErr("");
+      if (path.endsWith("/reflection")) {
+        setReflection({
+          diagnosis: String(r.diagnosis ?? ""),
+          likelyMistakes: (r.likelyMistakes as string[]) ?? [],
+          missedEvidence: (r.missedEvidence as string[]) ?? [],
+          recommendedNextSteps: (r.recommendedNextSteps as string[]) ?? [],
+          injected: Boolean(r.injected),
+        });
+        setNote(r.injected ? "反思已写入 Solver 会话" : "反思已生成，但当前没有活着的 Solver，只记在详情里");
+      } else if (path.endsWith("/pause")) {
+        setNote("已暂停");
+      } else if (path.endsWith("/resume")) {
+        setNote("已继续，等待调度");
+      } else if (path.endsWith("/park")) {
+        setNote("已搁置");
+      } else if (path.endsWith("/hint")) {
+        setNote(r.hint ? "已获取 Hint" : "Hint 不可用");
+      } else {
+        setNote("已执行");
+      }
+      load();
       refresh();
     } catch (e) {
       setErr(String((e as Error).message));
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
     <>
       <div className="panel">
-        <h3>{d.title} <span className={`status s-${d.lifecycleStatus}`}>{zh(d.lifecycleStatus)}</span> <span className="badge">{d.category}</span></h3>
+        <h3>{d.title} <span className={`status s-${d.lifecycleStatus}`}>{zhLife(d.lifecycleStatus)}</span> <span className="badge">{d.category}</span></h3>
         <p>{d.description}</p>
         <div className="buttons">
-          {d.lifecycleStatus === "ACTIVE" && <button onClick={() => act(`/challenges/${id}/pause`)}>暂停</button>}
-          {(d.lifecycleStatus === "PAUSED") && <button onClick={() => act(`/challenges/${id}/resume`)}>继续</button>}
-          {d.lifecycleStatus === "ACTIVE" && <button onClick={() => act(`/challenges/${id}/park`)}>搁置</button>}
-          {d.lifecycleStatus === "PARKED" && <button onClick={() => act(`/challenges/${id}/unpark`)}>取消搁置</button>}
-          <button onClick={() => act(`/challenges/${id}/restart`)} className="danger">重启 Solver</button>
-          <button onClick={() => act(`/challenges/${id}/hint`)}>强制取 Hint</button>
-          <button onClick={() => act(`/challenges/${id}/reflection`)}>反思</button>
-          <button onClick={() => act(`/challenges/${id}/priority`, "POST", { priority: "HIGH" })}>优先级：高</button>
+          {d.lifecycleStatus === "ACTIVE" && (
+            <button disabled={busy} onClick={() => act(`/challenges/${id}/pause`)}>
+              暂停
+            </button>
+          )}
+          {d.lifecycleStatus === "PAUSED" && (
+            <button disabled={busy} onClick={() => act(`/challenges/${id}/resume`)}>
+              继续
+            </button>
+          )}
+          {d.lifecycleStatus === "ACTIVE" && (
+            <button disabled={busy} onClick={() => act(`/challenges/${id}/park`)}>
+              搁置
+            </button>
+          )}
+          {d.lifecycleStatus === "PARKED" && (
+            <button disabled={busy} onClick={() => act(`/challenges/${id}/unpark`)}>
+              取消搁置
+            </button>
+          )}
+          <button disabled={busy} onClick={() => act(`/challenges/${id}/restart`)} className="danger">
+            重启 Solver
+          </button>
+          <button disabled={busy} onClick={() => act(`/challenges/${id}/hint`)}>
+            强制取 Hint
+          </button>
+          <button disabled={busy} onClick={() => act(`/challenges/${id}/reflection`)}>
+            反思
+          </button>
+          <button disabled={busy} onClick={() => act(`/challenges/${id}/priority`, "POST", { priority: "HIGH" })}>
+            优先级：高
+          </button>
+          <button
+            disabled={busy}
+            className="danger"
+            onClick={() => {
+              if (!window.confirm(`删除「${d.title}」？会停掉 Solver、清掉 workspace，并且不会再自动拉回。`)) return;
+              setBusy(true);
+              void api(`/challenges/${id}`, { method: "DELETE" })
+                .then(() => onDeleted(id))
+                .catch((e) => setErr(String((e as Error).message)))
+                .finally(() => setBusy(false));
+            }}
+          >
+            删除
+          </button>
         </div>
         <form>
           <input placeholder="手动输入候选 Flag" value={candidate} onChange={(e) => setCandidate(e.target.value)} />
-          <button type="button" onClick={() => { void act(`/challenges/${id}/candidate`, "POST", { value: candidate, confidence: 0.9, reason: "dashboard 手动候选" }); setCandidate(""); }}>添加候选</button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              void act(`/challenges/${id}/candidate`, "POST", { value: candidate, confidence: 0.9, reason: "dashboard 手动候选" });
+              setCandidate("");
+            }}
+          >
+            添加候选
+          </button>
         </form>
+        {note && <div className="ok" style={{ marginTop: 8 }}>{note}</div>}
         {err && <div className="err">{err}</div>}
       </div>
+
+      {reflection && (
+        <div className="panel">
+          <h3>反思结果</h3>
+          <p>{reflection.diagnosis}</p>
+          {reflection.likelyMistakes.length > 0 && (
+            <>
+              <div className="muted">可能的问题</div>
+              <ul>
+                {reflection.likelyMistakes.map((m) => (
+                  <li key={m}>{m}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {reflection.missedEvidence.length > 0 && (
+            <>
+              <div className="muted">可能漏掉的证据</div>
+              <ul>
+                {reflection.missedEvidence.map((m) => (
+                  <li key={m}>{m}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          <div className="muted">建议下一步</div>
+          <ul>
+            {reflection.recommendedNextSteps.map((m) => (
+              <li key={m}>{m}</li>
+            ))}
+          </ul>
+          <div className={reflection.injected ? "ok" : "warn"}>
+            {reflection.injected ? "已注入当前 Solver 会话" : "没有活着的 Solver，反思没有送进模型"}
+          </div>
+        </div>
+      )}
+
+      {(() => {
+        const unknownSub = d.submissions.find((s) => s.status === "UNKNOWN" || s.status === "SENDING");
+        const unknownCand = d.candidates.find((c) => c.status === "SUBMISSION_UNKNOWN");
+        if (!unknownSub && !unknownCand && d.blockedReason !== "SUBMISSION_OUTCOME_UNKNOWN") return null;
+        const flag = unknownCand?.value ?? unknownSub?.flagValue ?? "";
+        return (
+          <div className="panel" style={{ borderColor: "#c90", background: "rgba(200,140,0,0.08)" }}>
+            <h3>提交结果未知</h3>
+            <p>
+              Flag: <code>{flag}</code>
+            </p>
+            <p>RioMisc 无法确认赛事服务器是否已处理此次提交。系统不会自动重复提交。</p>
+            <div className="buttons">
+              {unknownCand && (
+                <button onClick={() => act(`/challenges/${id}/accept`, "POST", { candidateId: unknownCand.id })}>Mark Correct</button>
+              )}
+              {unknownCand && (
+                <button className="danger" onClick={() => act(`/challenges/${id}/reject`, "POST", { candidateId: unknownCand.id })}>
+                  Mark Wrong
+                </button>
+              )}
+              {unknownSub && (
+                <button onClick={() => act(`/challenges/${id}/retry-submission`, "POST", { submissionId: unknownSub.id })}>
+                  Retry Submission
+                </button>
+              )}
+              <button onClick={() => act(`/challenges/${id}/resume-solving`)}>Resume Solving</button>
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="detail-grid">
         <div className="panel">
@@ -381,15 +731,13 @@ function Detail({ id, refresh }: { id: string; refresh: () => void }) {
           {d.candidates.map((c) => (
             <div key={c.id} style={{ marginBottom: 6 }}>
               <span className={c.status === "CORRECT" ? "ok" : c.status === "WRONG" ? "err" : ""}>{c.value}</span>{" "}
-              <span className="badge">{zh(c.status)}</span> <span className="muted">置信度={c.confidence}</span>
-              {c.status !== "WRONG" && (
+              <span className="badge">{zhFlag(c.status)}</span> <span className="muted">置信度={c.confidence}</span>
+              {c.status !== "WRONG" && c.status !== "CORRECT" && (
                 <span className="buttons" style={{ display: "inline", marginLeft: 8 }}>
                   {c.status === "VERIFIED" && (
                     <button onClick={() => act(`/challenges/${id}/submit`, "POST", { candidateId: c.id })}>提交裁判</button>
                   )}
-                  {c.status !== "CORRECT" && (
-                    <button onClick={() => act(`/challenges/${id}/accept`, "POST", { candidateId: c.id })}>对，收题</button>
-                  )}
+                  <button onClick={() => act(`/challenges/${id}/accept`, "POST", { candidateId: c.id })}>对，收题</button>
                   <button className="danger" onClick={() => act(`/challenges/${id}/reject`, "POST", { candidateId: c.id })}>
                     错，继续跑
                   </button>
@@ -401,7 +749,7 @@ function Detail({ id, refresh }: { id: string; refresh: () => void }) {
           <h3 style={{ marginTop: 10 }}>提交记录</h3>
           {d.submissions.map((s) => (
             <div key={s.id}>
-              <span className={s.status === "CORRECT" ? "ok" : s.status === "WRONG" ? "err" : ""}>{s.flagValue}</span> <span className="badge">{zh(s.status)}</span>
+              <span className={s.status === "CORRECT" ? "ok" : s.status === "WRONG" ? "err" : ""}>{s.flagValue}</span> <span className="badge">{zhFlag(s.status)}</span>
             </div>
           ))}
         </div>
@@ -474,7 +822,7 @@ function Providers({ refresh }: { refresh: () => void }) {
         <h3>已配置的 Provider</h3>
         {data?.providers.filter((p) => p.enabled !== 0).map((p) => (
           <div key={p.id} style={{ marginBottom: 8 }}>
-            <b>{p.displayName}</b> <span className="badge">{p.protocol}</span> <span className={`badge ${HEALTH_CLASS[p.health] ?? "warn"}`}>{zh(p.health)}</span>
+            <b>{p.displayName}</b> <span className="badge">{p.protocol}</span> <span className={`badge ${HEALTH_CLASS[p.health] ?? "warn"}`}>{zhHealth(p.health)}</span>
             <span className="muted"> {p.baseUrl}</span>
             <div className="buttons">
               <button onClick={() => test(p.id)}>测试连接</button>

@@ -52,7 +52,8 @@ export class ModelRegistry {
   }): Promise<ModelConfig> {
     const provider = this.repos.providers.get(input.providerId);
     if (!provider) throw new Error("unknown provider");
-    return this.repos.models.create(input);
+    const role = input.role ?? (this.repos.models.primary() ? "GENERAL" : "PRIMARY");
+    return this.repos.models.create({ ...input, role });
   }
 
   /** Two-phase test (§57): plain chat + tool calling. */

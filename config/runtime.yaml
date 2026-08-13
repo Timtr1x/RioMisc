@@ -2,11 +2,17 @@
 # Every value is Zod-validated at startup; invalid config aborts boot.
 
 contest:
-  adapter: none            # none = empty (URL / real tasks) | mock = 11 demo puzzles | local
+  adapter: none            # none = empty (Dashboard 接入比赛 / 单题 URL) | mock | local | ctfd
   poll:
     initialMs: 5000        # 5s default poll interval
     maxMs: 15000           # backoff ceiling
   # localChallengeDir: ./challenge   # required when adapter: local (rio solve)
+  # 开机即接入 CTFd/DASCTF（也可运行时在 Dashboard 点「接入比赛」，不必改这里）：
+  # adapter: ctfd
+  # baseUrl: https://ctf.example.com
+  # token: ""                # 或环境变量 CTFD_TOKEN
+  # cookie: ""               # 或环境变量 CTFD_COOKIE
+  # miscCryptoOnly: true     # 只拉 Misc / Crypto / 杂项 / 密码
 
 challenge:
   startPolicy: ON_SOLVER_ASSIGNMENT   # ON_DISCOVERY | ON_PREPARATION | ON_SOLVER_ASSIGNMENT

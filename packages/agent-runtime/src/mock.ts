@@ -2,6 +2,8 @@
 // It genuinely solves the mock fixtures by using the same Tool Runtime the Pi
 // agent would use (inspect/extract/python), emitting progress/candidate events.
 // This keeps the whole E2E loop testable without any model API.
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import type { SolverSessionConfig, SolverSessionHandle, AgentRuntimeAdapter } from "./adapter.js";
 import { runTool, type ToolResult, type ToolContext } from "@rio/tool-runtime";
 
@@ -374,6 +376,16 @@ export class MockAgentRuntime implements AgentRuntimeAdapter {
       owner: config,
       waitForIdle: () => handle.idlePromise,
       usage: () => ({ inputTokens: handle.inputTokens, outputTokens: handle.outputTokens, toolCalls: handle.toolCalls }),
+      persistence: () => {
+        const file = join(config.sessionDir, `mock-${config.sessionId}.json`);
+        try {
+          mkdirSync(config.sessionDir, { recursive: true });
+          writeFileSync(file, JSON.stringify({ mock: true, sessionId: config.sessionId }), "utf8");
+        } catch {
+          /* ignore */
+        }
+        return { externalSessionId: `mock_${config.sessionId}`, sessionFile: file };
+      },
     };
     void this.#solveLoop(config, handle);
     return handle;

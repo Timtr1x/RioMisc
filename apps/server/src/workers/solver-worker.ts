@@ -1,8 +1,8 @@
 // Solver Worker entry (forked child process).
 // Builds the ToolContext, wires IPC, runs the agent runtime (mock or Pi).
-import { readFileSync, statSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { statSync } from "node:fs";
 import { resolve, join } from "node:path";
+import { sha256File } from "@rio/tool-runtime";
 import {
   WorkspaceManager,
   toolNames,
@@ -23,6 +23,12 @@ interface StartConfig {
   initialMessage: string;
   modelRef: { providerId: string | null; modelId: string | null } | null;
   runtime: "mock" | "pi";
+  resume?: boolean;
+  persistedSession?: {
+    piSessionId: string | null;
+    piSessionFile: string | null;
+  };
+  pythonExecutable?: string;
   pi?: {
     piDir: string;
     secretsFile: string;
@@ -43,29 +49,27 @@ function send(msg: Record<string, unknown>): void {
 }
 
 async function selectRuntime(preferred: "mock" | "pi", config: StartConfig): Promise<AgentRuntimeAdapter> {
-  if (preferred === "pi") {
-    // 没有配置 provider 时直接走 mock——绝不加载 160MB 的 Pi SDK（启动快 10 倍）
+  const havePiSpecs = Boolean(config.pi && config.pi.providers.length > 0);
+  // A configured provider+key always wins. Boot-time "mock" must not stick after the user adds a key.
+  if (havePiSpecs || preferred === "pi") {
     if (!config.pi || config.pi.providers.length === 0) {
-      send({ type: "info", message: "pi runtime requested but no providers configured — using mock" });
-      return new MockAgentRuntime();
+      throw new Error("Pi runtime requested but no providers configured");
     }
     const available = await PiAgentRuntimeAdapter.isAvailable();
-    if (available) {
-      // decrypt API keys from the encrypted secrets file (never over IPC)
-      const secrets = new FileSecretStore(config.pi.secretsFile, process.env.CTF_RUNTIME_MASTER_KEY);
-      const providers: PiProviderSpec[] = [];
-      for (const p of config.pi.providers) {
-        const apiKey = await secrets.get(p.apiKeyRef);
-        if (apiKey) providers.push({ ...p, apiKey });
-      }
-      if (providers.length > 0) {
-        send({ type: "info", message: `using pi runtime (${providers.length} provider(s))` });
-        return new PiAgentRuntimeAdapter(config.pi.piDir).withProviders(providers);
-      }
-      send({ type: "info", message: "pi runtime: no API keys resolvable — falling back to mock" });
-    } else {
-      send({ type: "info", message: "pi runtime requested but SDK unavailable — falling back to mock" });
+    if (!available) {
+      throw new Error("Pi runtime requested but @earendil-works/pi-coding-agent is unavailable");
     }
+    const secrets = new FileSecretStore(config.pi.secretsFile, process.env.CTF_RUNTIME_MASTER_KEY);
+    const providers: PiProviderSpec[] = [];
+    for (const p of config.pi.providers) {
+      const apiKey = await secrets.get(p.apiKeyRef);
+      if (apiKey) providers.push({ ...p, apiKey });
+    }
+    if (providers.length === 0) {
+      throw new Error("Pi runtime: no API keys resolvable from SecretStore — check the stored key / master key");
+    }
+    send({ type: "info", message: `using pi runtime (${providers.length} provider(s))` });
+    return new PiAgentRuntimeAdapter(config.pi.piDir).withProviders(providers);
   }
   send({ type: "info", message: "using mock runtime" });
   return new MockAgentRuntime();
@@ -92,7 +96,7 @@ function buildToolContext(config: StartConfig): ToolContext {
     recordArtifact: (op: string, absPath: string, parent?: string | null): ArtifactRef | null => {
       try {
         const st = statSync(absPath);
-        const sha = createHash("sha256").update(readFileSync(absPath)).digest("hex");
+        const sha = sha256File(absPath);
         send({
           type: "artifact",
           challengeId: config.challengeId,
@@ -112,8 +116,8 @@ function buildToolContext(config: StartConfig): ToolContext {
       resultFileCounter += 1;
       return join(root, "results", `tool-${String(resultFileCounter).padStart(4, "0")}.txt`);
     },
-    pythonExecutable: process.env.RIO_PYTHON ?? "python",
-    allowNetwork: false,
+    pythonExecutable: config.pythonExecutable || process.env.RIO_PYTHON || "python",
+    networkIsolation: "NONE",
   };
 }
 
@@ -131,7 +135,13 @@ process.on("message", async (msg: { type: string; [k: string]: unknown }) => {
     } else if (msg.type === "switch_model" && sessionHandle) {
       await runtimeAdapter?.switchModel(sessionHandle, (msg.modelRef ?? null) as never);
     } else if (msg.type === "abort") {
-      await runtimeAdapter?.abort(sessionHandle!);
+      if (sessionHandle && runtimeAdapter) {
+        try {
+          await runtimeAdapter.abort(sessionHandle);
+        } catch {
+          /* shutting down */
+        }
+      }
       process.exit(0);
     } else if (msg.type === "ping") {
       send({ type: "pong", t: Date.now() });
@@ -153,7 +163,7 @@ process.on("message", async (msg: { type: string; [k: string]: unknown }) => {
         runtimeAdapter = await selectRuntime(currentConfig.runtime, currentConfig);
         const ctx = buildToolContext(currentConfig);
         const tools = toolNames().map((name) => ({ name, description: `Solver tool ${name}` }));
-        sessionHandle = await runtimeAdapter.createSolverSession({
+        const sessionConfig = {
           sessionId: currentConfig.sessionId,
           challengeId: currentConfig.challengeId,
           solverType: currentConfig.solverType,
@@ -165,6 +175,18 @@ process.on("message", async (msg: { type: string; [k: string]: unknown }) => {
           modelRef: currentConfig.modelRef,
           tools,
           toolContext: ctx,
+          persistedSession: currentConfig.persistedSession,
+        };
+        sessionHandle = currentConfig.resume
+          ? await runtimeAdapter.resumeSolverSession(sessionConfig)
+          : await runtimeAdapter.createSolverSession(sessionConfig);
+        const persisted = sessionHandle.persistence();
+        send({
+          type: "session_persisted",
+          challengeId: currentConfig.challengeId,
+          sessionId: currentConfig.sessionId,
+          piSessionId: persisted.externalSessionId,
+          piSessionFile: persisted.sessionFile,
         });
         await sessionHandle.waitForIdle();
         const usage = sessionHandle.usage();

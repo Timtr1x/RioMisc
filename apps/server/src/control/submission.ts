@@ -8,6 +8,7 @@ import { ApiRateLimiter } from "@rio/contest";
 import { hashHex } from "@rio/shared";
 import type { EventBus } from "./bus.js";
 import type { StateMachine } from "../state-machine.js";
+import { normalizeFlagValue } from "./flag.js";
 
 /** Default: any `prefix{payload}` used by real CTFs (flag{}, FLAG{}, cumtctf{}, DASCTF{}, …). */
 export const DEFAULT_FLAG_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,31}\{[^\r\n}]{1,400}\}$/;
@@ -29,6 +30,7 @@ export interface CandidateMsg {
 
 export class SubmissionManager {
   private rateLimiter = new ApiRateLimiter();
+  /** Per-submission retry timers (RATE_LIMITED only). Never keyed only by challenge. */
   private retryTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
@@ -42,6 +44,7 @@ export class SubmissionManager {
       confidenceThreshold: number;
       localMaxWrong: number;
       defaultCooldownMs: number;
+      submitTimeoutMs?: number;
       flagPattern?: RegExp | null;
       inject: (challengeId: string, message: string) => void;
       onAutoSubmitDisabled: (challengeId: string) => void;
@@ -49,22 +52,39 @@ export class SubmissionManager {
     },
   ) {}
 
+  replaceAdapter(adapter: ContestAdapter): void {
+    this.deps.adapter = adapter;
+  }
+
+  cancelRetriesForChallenge(challengeId: string): void {
+    for (const sub of this.deps.repos.submissions.listByChallenge(challengeId)) {
+      const timer = this.retryTimers.get(sub.id);
+      if (timer) {
+        clearTimeout(timer);
+        this.retryTimers.delete(sub.id);
+      }
+    }
+  }
+
   /** Entry point for a candidate emitted by a worker. */
   async onCandidate(msg: CandidateMsg): Promise<void> {
     const { repos } = this.deps;
     const challenge = repos.challenges.get(msg.challengeId);
     if (!challenge || challenge.lifecycleStatus === "SOLVED") return;
 
+    const value = normalizeFlagValue(msg.value);
+    msg = { ...msg, value };
+
     // duplicate candidate?
-    if (repos.candidates.existsByValue(challenge.id, msg.value)) {
-      this.deps.logger.info({ event: "candidate_duplicate", challengeId: challenge.id, value: msg.value });
+    if (repos.candidates.existsByValue(challenge.id, value)) {
+      this.deps.logger.info({ event: "candidate_duplicate", challengeId: challenge.id, flagHash: hashHex(value) });
       return;
     }
 
     const candidate = repos.candidates.create({
       challengeId: challenge.id,
       sessionId: msg.sessionId,
-      value: msg.value,
+      value,
       confidence: msg.confidence,
       reason: msg.reason,
       evidenceJson: JSON.stringify(msg.evidence ?? []),
@@ -230,9 +250,15 @@ export class SubmissionManager {
 
     let result: SubmissionResult;
     try {
-      result = await this.deps.adapter.submitFlag(challenge.remoteId ?? challenge.id, submission.flagValue);
+      const timeoutMs = this.deps.submitTimeoutMs ?? 30_000;
+      result = await Promise.race([
+        this.deps.adapter.submitFlag(challenge.remoteId ?? challenge.id, submission.flagValue),
+        new Promise<never>((_, reject) => {
+          const t = setTimeout(() => reject(new Error("submit timeout")), timeoutMs);
+          t.unref();
+        }),
+      ]);
     } catch (e) {
-      // network error / timeout → outcome UNKNOWN; do not resubmit blindly
       result = { ok: false, correct: false, status: "UNKNOWN", message: String(e), raw: {} };
     }
 
@@ -280,40 +306,69 @@ export class SubmissionManager {
       default: {
         const raw = (result.raw ?? {}) as { needsManualReview?: boolean };
         if (raw.needsManualReview || !this.hasOfficialJudge(challenge) || /unknown challenge/i.test(result.message ?? "")) {
-          // URL / idle tasks have no official judge — keep the candidate for the dashboard.
           if (candidate) repos.candidates.update(candidate.id, { status: "VERIFIED" });
           this.deps.bus.publish({
             type: "FLAG_NEEDS_REVIEW",
             challengeId: challenge.id,
-            payload: { candidateId: candidate?.id, value: submission.flagValue, message: result.message },
+            payload: { candidateId: candidate?.id, flagHash: submission.flagHash, message: result.message },
           });
           this.deps.logger.info({ event: "flag_needs_review", challengeId: challenge.id, candidateId: candidate?.id }, "no official judge — candidate left for manual accept");
           this.deps.stateMachine.transition(challenge.id, "SUBMIT_WRONG", { payload: { reason: "no official judge" } });
           break;
         }
-        if (candidate) repos.candidates.update(candidate.id, { status: "SUBMISSION_UNKNOWN", submittedAt: Date.now() });
-        this.deps.bus.publish({ type: "SUBMISSION_ERROR", challengeId: challenge.id, payload: { submissionId: submission.id, message: result.message } });
-        this.deps.logger.warn({ event: "submission_unknown", challengeId: challenge.id, submissionId: submission.id, message: result.message }, "submission outcome unknown");
-        this.scheduleRetry(challenge.id, submission.id, 60_000);
+        this.#markOutcomeUnknown(challenge.id, submission.id, candidate?.id ?? null, result.message ?? "unknown");
         break;
       }
     }
   }
 
-  /** Retry a submission after a delay (cooldown / rate limit / unknown outcome). */
+  /** Retry a RATE_LIMITED / cooldown submission. Never used for UNKNOWN. */
   scheduleRetry(challengeId: string, submissionId: string, waitMs: number): void {
-    const existing = this.retryTimers.get(challengeId);
+    const existing = this.retryTimers.get(submissionId);
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
-      this.retryTimers.delete(challengeId);
+      this.retryTimers.delete(submissionId);
       const challenge = this.deps.repos.challenges.get(challengeId);
       const submission = this.deps.repos.submissions.get(submissionId);
       if (!challenge || !submission) return;
       if (challenge.lifecycleStatus !== "SUBMITTING") return;
+      if (submission.status === "UNKNOWN") return;
       void this.#submitNow(challenge, submissionId);
     }, waitMs);
     timer.unref();
-    this.retryTimers.set(challengeId, timer);
+    this.retryTimers.set(submissionId, timer);
+  }
+
+  hasRetryTimer(submissionId: string): boolean {
+    return this.retryTimers.has(submissionId);
+  }
+
+  retryTimerCount(): number {
+    return this.retryTimers.size;
+  }
+
+  #markOutcomeUnknown(challengeId: string, submissionId: string, candidateId: string | null, message: string): void {
+    const { repos } = this.deps;
+    repos.submissions.update(submissionId, {
+      status: "UNKNOWN",
+      error: message,
+      submittedAt: repos.submissions.get(submissionId)?.submittedAt ?? Date.now(),
+    });
+    if (candidateId) repos.candidates.update(candidateId, { status: "SUBMISSION_UNKNOWN", submittedAt: Date.now() });
+    repos.challenges.update(challengeId, { blockedReason: "SUBMISSION_OUTCOME_UNKNOWN" });
+    this.deps.bus.publish({
+      type: "SUBMISSION_OUTCOME_UNKNOWN",
+      challengeId,
+      payload: { submissionId, flagHash: repos.submissions.get(submissionId)?.flagHash },
+    });
+    this.deps.logger.warn(
+      { event: "submission_unknown", challengeId, submissionId },
+      "automatic resubmission disabled; human reconciliation required",
+    );
+    this.deps.logger.warn(
+      { event: "submission_retry_suppressed", challengeId, submissionId },
+      "UNKNOWN outcome must not auto-retry",
+    );
   }
 
   injectFeedback(challengeId: string, flagValue: string): void {
@@ -341,23 +396,30 @@ Treat the rejection as negative evidence.`;
       return;
     }
 
-    // 1. a submission was sent but its outcome is unknown → resubmit once
-    const unknown = this.deps.repos.submissions.findUnknownOutcome(challengeId);
-    if (unknown) {
-      this.deps.logger.info({ event: "recovery_resubmit", challengeId }, "resubmitting unknown-outcome submission");
-      this.deps.repos.submissions.update(unknown.id, { status: "SENDING" });
-      this.scheduleRetry(challengeId, unknown.id, 5_000);
+    const rows = this.deps.repos.submissions.listByChallenge(challengeId);
+
+    // SENDING after crash → UNKNOWN. Never resend.
+    const sending = rows.find((s) => s.status === "SENDING");
+    if (sending) {
+      this.#markOutcomeUnknown(challengeId, sending.id, sending.candidateId, "process restart while SENDING");
       return;
     }
 
-    // 2. a submission was queued but never sent → drive it
-    const queued = this.deps.repos.submissions
-      .listByChallenge(challengeId)
-      .find((s) => s.status === "QUEUED" || s.status === "SENDING");
+    const unknown = rows.find((s) => s.status === "UNKNOWN");
+    if (unknown) {
+      this.deps.logger.warn(
+        { event: "submission_retry_suppressed", challengeId, submissionId: unknown.id },
+        "UNKNOWN submission left for human reconciliation",
+      );
+      this.deps.repos.challenges.update(challengeId, { blockedReason: "SUBMISSION_OUTCOME_UNKNOWN" });
+      return;
+    }
+
+    // QUEUED and never sent may be driven.
+    const queued = rows.find((s) => s.status === "QUEUED");
     if (queued) {
-      this.deps.logger.info({ event: "recovery_requeue_submission", challengeId }, "driving queued submission");
-      this.deps.repos.submissions.update(queued.id, { status: "SENDING" });
-      this.scheduleRetry(challengeId, queued.id, 1_000);
+      this.deps.logger.info({ event: "recovery_requeue_submission", challengeId, submissionId: queued.id }, "driving queued submission");
+      void this.#submitNow(challenge, queued.id);
       return;
     }
 
@@ -379,8 +441,36 @@ Treat the rejection as negative evidence.`;
       return;
     }
 
-    // 4. nothing pending → back to ACTIVE (solver continues)
-    this.deps.stateMachine.transition(challengeId, "SUBMIT_WRONG", { payload: { reason: "recovery: no pending candidate" } });
+    this.deps.stateMachine.transition(challengeId, "RECOVER_SUBMITTING", { payload: { reason: "recovery: no pending candidate" } });
+  }
+
+  /** Explicit human retry of an UNKNOWN / RATE_LIMITED submission. Never automatic. */
+  async retrySubmission(challengeId: string, submissionId: string): Promise<void> {
+    const challenge = this.deps.repos.challenges.get(challengeId);
+    const submission = this.deps.repos.submissions.get(submissionId);
+    if (!challenge || !submission) throw new Error("unknown challenge/submission");
+    if (submission.challengeId !== challengeId) throw new Error("submission does not belong to this challenge");
+    this.deps.repos.challenges.update(challengeId, { blockedReason: null });
+    if (challenge.lifecycleStatus !== "SUBMITTING") {
+      const toSubmit = this.deps.stateMachine.transition(challengeId, "CANDIDATE_FOUND", { payload: { submissionId } });
+      if (toSubmit.allowed) {
+        this.deps.stateMachine.transition(challengeId, "VERIFY_OK", { payload: { submissionId } });
+      }
+    }
+    this.deps.repos.submissions.update(submissionId, { status: "QUEUED", error: null });
+    const fresh = this.deps.repos.challenges.get(challengeId)!;
+    await this.#submitNow(fresh, submissionId);
+  }
+
+  /** Human: give up on this submission and continue solving. */
+  resumeSolvingAfterUnknown(challengeId: string): void {
+    this.deps.repos.challenges.update(challengeId, { blockedReason: null });
+    const res = this.deps.stateMachine.transition(challengeId, "RECOVER_SUBMITTING", {
+      payload: { reason: "human resume after UNKNOWN" },
+    });
+    if (!res.allowed) {
+      this.deps.stateMachine.transition(challengeId, "SUBMIT_WRONG", { payload: { reason: "human resume after UNKNOWN" } });
+    }
   }
 
   stop(): void {

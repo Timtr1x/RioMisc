@@ -44,6 +44,11 @@ export interface SolverSessionConfig {
   toolContext: ToolContext;
   /** Pi runtime: resolvable providers (apiKey already decrypted, worker-side). */
   piProviders?: PiProviderSpec[];
+  /** SDK-reported session file/id from a previous run (resume only). */
+  persistedSession?: {
+    piSessionId: string | null;
+    piSessionFile: string | null;
+  };
 }
 
 export interface SolverSessionHandle {
@@ -51,6 +56,17 @@ export interface SolverSessionHandle {
   /** Resolves when the agent is idle (no pending work). */
   waitForIdle(): Promise<void>;
   usage(): { inputTokens: number; outputTokens: number; toolCalls: number };
+  persistence(): { externalSessionId: string | null; sessionFile: string | null };
+}
+
+/** Shipped create-vs-resume branch. Tests drive this, not a reimplementation. */
+export async function openSolverSession(
+  adapter: AgentRuntimeAdapter,
+  config: SolverSessionConfig,
+  resume: boolean,
+): Promise<SolverSessionHandle> {
+  if (resume) return adapter.resumeSolverSession(config);
+  return adapter.createSolverSession(config);
 }
 
 export interface AgentRuntimeAdapter {

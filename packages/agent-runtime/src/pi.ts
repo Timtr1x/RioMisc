@@ -42,6 +42,13 @@ class PiSessionHandle implements SolverSessionHandle {
   usage() {
     return this.usage_;
   }
+
+  persistence() {
+    return {
+      externalSessionId: this.piSession.sessionId ?? null,
+      sessionFile: this.piSession.sessionFile ?? null,
+    };
+  }
 }
 
 function toSummary(result: Awaited<ReturnType<typeof runTool>>): string {
@@ -173,9 +180,10 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
     const { createAgentSession, DefaultResourceLoader, SessionManager } = await getSdk();
     const spec = this.#pickProvider(config);
     const { modelRuntime, model } = await this.#buildModelRuntime(spec);
-    const sessionManager = resume
-      ? SessionManager.open(this.#sessionFile(config.sessionId, config.sessionDir))
-      : SessionManager.create(config.sessionDir);
+    const persistedFile = config.persistedSession?.piSessionFile;
+    const sessionManager = resume && persistedFile
+      ? SessionManager.open(persistedFile, config.sessionDir, config.cwd)
+      : SessionManager.create(config.cwd, config.sessionDir);
 
     const loader = new DefaultResourceLoader({
       cwd: config.cwd,
@@ -220,6 +228,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
 
   async abort(session: SolverSessionHandle): Promise<void> {
     const h = session as PiSessionHandle;
+    if (!h?.piSession) return;
     await h.piSession.abort();
   }
 
@@ -239,10 +248,6 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
     }
     const preferred = config.modelRef?.modelId;
     return (preferred ? providers.find((p) => p.modelId === preferred) : undefined) ?? providers[0]!;
-  }
-
-  #sessionFile(sessionId: string, sessionDir: string): string {
-    return join(sessionDir, `${sessionId}.jsonl`);
   }
 
   async #buildModelRuntime(spec: PiProviderSpec) {

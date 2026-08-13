@@ -9,7 +9,7 @@ import type { Repositories } from "@rio/database";
 import type { Challenge, RemoteChallengeDetail, RemoteAttachment } from "@rio/domain";
 import type { ContestAdapter } from "@rio/contest";
 import { DiskManager } from "@rio/contest";
-import { WorkspaceManager, type WorkspaceLayout } from "@rio/tool-runtime";
+import { WorkspaceManager, type WorkspaceLayout, resolveAttachmentTarget } from "@rio/tool-runtime";
 import { buildChallengeFile, triage } from "@rio/solver";
 import type { EventBus } from "./bus.js";
 import type { StateMachine } from "../state-machine.js";
@@ -32,6 +32,10 @@ export class PreparationService {
       pythonExecutable: string;
     },
   ) {}
+
+  replaceAdapter(adapter: ContestAdapter): void {
+    this.deps.adapter = adapter;
+  }
 
   async prepare(challenge: Challenge): Promise<void> {
     if (this.active.has(challenge.id)) return;
@@ -127,7 +131,16 @@ export class PreparationService {
     this.downloads++;
     try {
       const ra: RemoteAttachment = { remoteId: att.remoteId, name: att.name, url: att.remoteUrl, sizeBytes: att.sizeBytes };
-      const target = join(layout.input, att.name);
+      const used = new Set(
+        repos.attachments
+          .listByChallenge(challenge.id)
+          .filter((a) => a.id !== att.id && a.localPath)
+          .map((a) => (a.localPath ?? "").split(/[\\/]/).pop()?.toLowerCase() ?? ""),
+      );
+      const { safeName, target } = resolveAttachmentTarget(this.deps.workspace, layout, att.name, att.id, used);
+      if (safeName !== att.name) {
+        logger.warn({ event: "attachment_name_sanitized", challengeId: challenge.id, attachmentId: att.id }, "remote attachment name sanitized");
+      }
       const part = `${target}.part`;
 
       // disk budget check

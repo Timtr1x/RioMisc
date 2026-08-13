@@ -70,9 +70,15 @@ export type SessionStatus =
   | "CREATED"
   | "ACTIVE"
   | "PAUSED"
+  | "INTERRUPTED"
   | "STALLED"
   | "ENDED"
   | "ERROR";
+
+/** Host-native execution. Not an OS sandbox. */
+export type ExecutionMode = "NATIVE_TRUSTED";
+
+export type NetworkIsolation = "NONE";
 
 export interface ModelRef {
   providerId: string | null;

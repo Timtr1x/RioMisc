@@ -1,7 +1,7 @@
 // Workspace manager + Filesystem Guard (§44, §47).
 // Each challenge gets data/workspaces/<challenge-id>/{input,work,artifacts,results,state,agent}.
 // Solver tools resolve paths through safeResolve() and may never escape the workspace.
-import { mkdirSync, realpathSync, existsSync } from "node:fs";
+import { mkdirSync, realpathSync, existsSync, rmSync } from "node:fs";
 import { join, resolve, sep, isAbsolute, normalize } from "node:path";
 
 export interface WorkspaceLayout {
@@ -42,6 +42,16 @@ export class WorkspaceManager {
   /** Absolute root of a challenge workspace. */
   rootOf(id: string): string {
     return resolve(join(this.workspacesRoot, sanitizeId(id)));
+  }
+
+  /** Delete the challenge workspace. No-op if it does not exist. */
+  remove(id: string): void {
+    const root = this.rootOf(id);
+    const base = resolve(this.workspacesRoot);
+    if (root === base || !root.startsWith(base + sep)) {
+      throw new Error(`refusing to delete workspace outside root: ${id}`);
+    }
+    rmSync(root, { recursive: true, force: true });
   }
 
   /** Resolve a possibly-relative tool path inside the workspace, rejecting escapes. */

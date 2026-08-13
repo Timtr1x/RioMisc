@@ -24,6 +24,14 @@ export interface StartWorkerConfig {
   modelRef: ModelRef | null;
   /** Which agent harness the worker should use ("mock" | "pi"). */
   runtime: "mock" | "pi";
+  /** Resume a persisted Pi session instead of creating a new conversation. */
+  resume: boolean;
+  persistedSession?: {
+    piSessionId: string | null;
+    piSessionFile: string | null;
+  };
+  /** Absolute Python path resolved at Control Plane boot. */
+  pythonExecutable: string;
   /** Pi runtime: providers + how to resolve API keys (worker reads the encrypted file itself). */
   pi?: {
     piDir: string;

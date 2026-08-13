@@ -1,0 +1,36 @@
+import type { Challenge, ChallengeLifecycleStatus } from "@rio/domain";
+
+export function seedChallenge(overrides: Partial<Challenge> & { id: string; lifecycleStatus: ChallengeLifecycleStatus }): Challenge {
+  return {
+    remoteId: overrides.remoteId ?? overrides.id,
+    title: overrides.title ?? overrides.id,
+    description: overrides.description ?? "desc",
+    category: overrides.category ?? "MISC",
+    subcategory: null,
+    score: 100,
+    solveCount: null,
+    startStatus: overrides.startStatus ?? "STARTED",
+    hintStatus: overrides.hintStatus ?? "LOCKED",
+    progressStatus: overrides.progressStatus ?? "UNKNOWN",
+    priority: 0,
+    lastPriorityScore: null,
+    difficultyEstimate: 2,
+    currentSolverType: overrides.currentSolverType ?? "MISC",
+    currentSessionId: overrides.currentSessionId ?? null,
+    wrongSubmissionCount: 0,
+    solverRestartCount: 0,
+    pausedReason: overrides.pausedReason ?? null,
+    parkedReason: overrides.parkedReason ?? null,
+    blockedReason: overrides.blockedReason ?? null,
+    contentHash: "h",
+    discoveredAt: Date.now(),
+    updatedAt: Date.now(),
+    startedAt: overrides.startedAt ?? Date.now(),
+    solverStartedAt: overrides.solverStartedAt ?? Date.now(),
+    wallClockSolveMs: 0,
+    activeSolveMs: 0,
+    remoteCreatedAt: null,
+    remoteUpdatedAt: null,
+    ...overrides,
+  };
+}

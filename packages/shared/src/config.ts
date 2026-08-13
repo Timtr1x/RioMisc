@@ -1,17 +1,23 @@
 // Runtime configuration (config/runtime.yaml) with strict Zod validation.
 // Invalid config must fail startup loudly — never silently use dangerous defaults.
 import { z } from "zod";
-import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import YAML from "yaml";
 import type { StartPolicy } from "@rio/domain";
 
 export const runtimeConfigSchema = z.object({
   contest: z.object({
-    adapter: z.enum(["mock", "local", "none"]).default("mock"),
+    adapter: z.enum(["mock", "local", "none", "ctfd"]).default("mock"),
     /** Path to a MockContest scenario JSON file (optional; defaults to built-in fixtures). */
     mockScenario: z.string().nullable().default(null),
     localChallengeDir: z.string().nullable().default(null),
+    /** CTFd / DASCTF base URL when adapter is ctfd (also settable at runtime via Dashboard). */
+    baseUrl: z.string().nullable().default(null),
+    token: z.string().nullable().default(null),
+    cookie: z.string().nullable().default(null),
+    /** When true, only ingest Misc / Crypto (and 杂项 / 密码). */
+    miscCryptoOnly: z.boolean().default(true),
     poll: z.object({
       initialMs: z.number().int().min(1000).max(60000).default(5000),
       maxMs: z.number().int().min(1000).max(60000).default(15000),
@@ -101,8 +107,23 @@ export function defaultConfig(): RuntimeConfig {
   return runtimeConfigSchema.parse({});
 }
 
+/** Prefer RIO_CONFIG, then cwd/config, then walk up so `npm run dev -w apps/server` still finds the repo yaml. */
+export function resolveConfigPath(filePath?: string): string {
+  if (filePath) return filePath;
+  if (process.env.RIO_CONFIG) return resolve(process.env.RIO_CONFIG);
+  let dir = resolve(".");
+  for (let i = 0; i < 6; i++) {
+    const candidate = join(dir, "config", "runtime.yaml");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return join(resolve("./config"), "runtime.yaml");
+}
+
 export function loadConfig(filePath?: string): RuntimeConfig {
-  const path = filePath ?? join(resolve("./config"), "runtime.yaml");
+  const path = resolveConfigPath(filePath);
   let raw: unknown = {};
   try {
     const text = readFileSync(path, "utf8");

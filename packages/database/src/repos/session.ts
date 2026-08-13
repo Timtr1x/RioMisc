@@ -71,6 +71,13 @@ export class SolverSessionRepository {
     return this.db.all<SolverSession>(`SELECT ${SESS_COLUMNS} FROM solver_sessions WHERE status = 'ACTIVE'`);
   }
 
+  listByChallenge(challengeId: string): SolverSession[] {
+    return this.db.all<SolverSession>(
+      `SELECT ${SESS_COLUMNS} FROM solver_sessions WHERE challenge_id = ? ORDER BY started_at ASC`,
+      challengeId,
+    );
+  }
+
   update(id: string, patch: Partial<SolverSession>): void {
     const { clause, values } = buildSet(patch as Record<string, unknown>, SESS_UPDATE);
     if (!clause) return;
@@ -158,7 +165,11 @@ export class ProgressRepository {
   latestForChallenge(challengeId: string): ProgressReport | null {
     return (
       this.db.get<ProgressReport>(
-        `SELECT * FROM solver_progress WHERE challenge_id = ? ORDER BY created_at DESC LIMIT 1`,
+        `SELECT id, challenge_id AS challengeId, session_id AS sessionId, summary,
+                hypotheses_json AS hypothesesJson, confirmed_facts_json AS confirmedFactsJson,
+                rejected_hypotheses_json AS rejectedHypothesesJson, next_actions_json AS nextActionsJson,
+                confidence, progress_level AS progressLevel, stalled, created_at AS createdAt
+         FROM solver_progress WHERE challenge_id = ? ORDER BY created_at DESC LIMIT 1`,
         challengeId,
       ) ?? null
     );
@@ -166,7 +177,11 @@ export class ProgressRepository {
 
   listForChallenge(challengeId: string, limit = 100): ProgressReport[] {
     return this.db.all<ProgressReport>(
-      `SELECT * FROM solver_progress WHERE challenge_id = ? ORDER BY created_at ASC LIMIT ?`,
+      `SELECT id, challenge_id AS challengeId, session_id AS sessionId, summary,
+              hypotheses_json AS hypothesesJson, confirmed_facts_json AS confirmedFactsJson,
+              rejected_hypotheses_json AS rejectedHypothesesJson, next_actions_json AS nextActionsJson,
+              confidence, progress_level AS progressLevel, stalled, created_at AS createdAt
+       FROM solver_progress WHERE challenge_id = ? ORDER BY created_at ASC LIMIT ?`,
       challengeId,
       limit,
     );

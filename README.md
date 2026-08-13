@@ -5,6 +5,8 @@
 
 > **架构三句话**：Control Plane 决定比赛怎么打；Solver Agent 决定一道题怎么解；
 > Tool Runtime 决定 Agent 可以安全地做什么。
+>
+> NativeTrusted 模式不能阻止 Agent 生成的 Python 主动访问宿主机其他文件或网络。RioMisc 通过 Tool 路径守卫、环境变量过滤、超时和进程树清理降低风险，但这不是 OS 安全边界。MVP-1.1 默认继续采用该模式。
 
 ## 快速开始（Demo）
 
@@ -13,7 +15,11 @@ npm install
 npm run dev          # 启动控制平面 + API (http://127.0.0.1:3000)
 ```
 
-默认 `contest.adapter: none`：空比赛，Dashboard 粘贴题目 URL 即开始一道真实任务。
+默认 `contest.adapter: none`：空比赛。Dashboard 总览有两个入口：
+
+- **接入比赛**：全自动拉题 / 下载 / 派工 / 交 flag。没有赛事 API 时点「接入演示比赛（Mock）」即可走完整流水线；有 CTFd / DASCTF 时填地址 + Token。
+- **单题模式**：粘贴一道题的 URL 或附件直链。
+
 已配置 Provider + Model 时自动使用 Pi（真实 LLM）；否则回退 Mock Agent。
 
 要跑内置 11 道演示题，把 `config/runtime.yaml` 改成 `adapter: mock`，系统自动：

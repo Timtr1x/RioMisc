@@ -102,6 +102,14 @@ export async function main(argv: string[]): Promise<void> {
     });
 
   program
+    .command("delete <id>")
+    .description("Delete a challenge (stop worker, drop rows, forget so poller will not recreate it)")
+    .action(async (id) => {
+      await api(`/api/challenges/${id}`, { method: "DELETE" });
+      console.log("deleted", id);
+    });
+
+  program
     .command("park <id>")
     .description("Park a challenge (low priority)")
     .action(async (id) => {

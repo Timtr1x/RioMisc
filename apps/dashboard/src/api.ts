@@ -4,7 +4,16 @@ export async function api<T>(path: string, opts: { method?: string; body?: unkno
     headers: opts.body ? { "content-type": "application/json" } : undefined,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  if (!res.ok) throw new Error(`API ${res.status} ${path}`);
+  if (!res.ok) {
+    let detail = `API ${res.status} ${path}`;
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body.error) detail = body.error;
+    } catch {
+      /* keep status text */
+    }
+    throw new Error(detail);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -24,8 +33,23 @@ export interface Status {
   workerSlots: number;
   diskFreeGb: number;
   adapter: string;
+  contest?: ContestStatus;
   agentRuntime: string;
+  executionMode?: string;
+  filesystemIsolation?: boolean;
+  networkIsolation?: boolean;
   providers: { id: string; name: string; health: string }[];
+}
+
+export interface ContestStatus {
+  kind: string;
+  connected: boolean;
+  baseUrl: string | null;
+  lastPollAt: number | null;
+  lastError: string | null;
+  lastListed: number;
+  miscCryptoOnly: boolean;
+  connectedAt: number | null;
 }
 
 export interface ChallengeRow {
@@ -59,6 +83,7 @@ export interface ChallengeDetail {
   startedAt: number | null;
   discoveredAt: number;
   wallClockSolveMs: number;
+  blockedReason: string | null;
   attachments: { id: string; name: string; sizeBytes: number | null; downloadStatus: string }[];
   artifacts: { id: string; path: string; operation: string; size: number }[];
   progress: { id: string; summary: string; confidence: number; stalled: number; createdAt: number }[];
@@ -68,8 +93,11 @@ export interface ChallengeDetail {
   timeline: { type: string; createdAt: number; payloadJson: string }[];
 }
 
+/** SSE goes straight to the API so Vite's proxy cannot buffer live events. */
+const EVENTS_URL = "http://127.0.0.1:3000/api/events/stream";
+
 export function useEvents(onEvent: (e: { type: string; challengeId?: string | null; payload: Record<string, unknown>; createdAt: number }) => void): () => void {
-  const es = new EventSource("/api/events/stream");
+  const es = new EventSource(EVENTS_URL);
   es.onmessage = (msg) => {
     try {
       onEvent(JSON.parse(msg.data));

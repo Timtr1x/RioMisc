@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "apps/server/src",
+    "apps/cli/src",
+    "packages/*/src"
+  ]
+}

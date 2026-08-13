@@ -17,7 +17,7 @@
     "url-fetch-test": "tsx scripts/url-fetch-test.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -b",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "db:migrate": "npm run migrate -w packages/database"
   },
   "devDependencies": {

@@ -122,6 +122,22 @@ describe("StateMachine", () => {
     expect(events.some((e) => e.type === "CHALLENGE_UNSUPPORTED")).toBe(true);
   });
 
+  it("recovery events requeue without disguising as SOLVER_ERROR", () => {
+    sm.transition("ch_test", "PREPARE_START");
+    expect(sm.transition("ch_test", "RECOVER_PREPARING").to).toBe("DISCOVERED");
+    expect(repos.events.recent("ch_test").some((e) => e.type === "CHALLENGE_RECOVERY_RESET_PREPARATION")).toBe(true);
+    sm.transition("ch_test", "PREPARE_START");
+    sm.transition("ch_test", "PREPARE_DONE");
+    sm.transition("ch_test", "QUEUE");
+    sm.transition("ch_test", "SCHEDULE", { sessionId: "s-rec" });
+    expect(sm.transition("ch_test", "RECOVER_ACTIVE").to).toBe("QUEUED");
+    expect(repos.challenges.get("ch_test")!.currentSessionId).toBe("s-rec");
+    sm.transition("ch_test", "SCHEDULE", { sessionId: "s-rec" });
+    sm.transition("ch_test", "CANDIDATE_FOUND");
+    expect(sm.transition("ch_test", "RECOVER_VERIFYING").to).toBe("QUEUED");
+    expect(repos.events.recent("ch_test").some((e) => e.type === "CHALLENGE_RECOVERY_VERIFY_INTERRUPTED")).toBe(true);
+  });
+
   it("increments restart count on RESTART_SOLVER", () => {
     sm.transition("ch_test", "PREPARE_START");
     sm.transition("ch_test", "PREPARE_DONE");

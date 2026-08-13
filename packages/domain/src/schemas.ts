@@ -111,9 +111,9 @@ export const requestReflectionParamsSchema = z.object({
 
 export const runPythonParamsSchema = z.object({
   scriptPath: z.string().max(1000).optional(),
-  code: z.string().max(20000).optional(),
-  args: z.array(z.string()).max(20).optional(),
-  timeoutMs: z.number().int().min(1000).max(600000).optional(),
+  code: z.string().max(512_000).optional(),
+  args: z.array(z.string().max(4096)).max(64).optional(),
+  timeoutMs: z.number().int().min(1000).max(300_000).optional(),
 });
 
 export const readFileParamsSchema = z.object({

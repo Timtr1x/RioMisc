@@ -355,6 +355,14 @@ export class MockContestAdapter implements ContestAdapter {
     return this.states.get(remoteId)?.challenge.flag ?? null;
   }
 
+  forgetChallenge(remoteId: string): void {
+    this.states.delete(remoteId);
+    this.submitted.delete(remoteId);
+    for (const group of this.scenario.releaseSchedule ?? []) {
+      group.challengeIds = group.challengeIds.filter((id) => id !== remoteId);
+    }
+  }
+
   async close(): Promise<void> {
     if (this.server) {
       this.server.close();

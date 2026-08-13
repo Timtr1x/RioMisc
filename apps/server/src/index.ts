@@ -4,8 +4,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createLogger, loadConfig, FileSecretStore, type RuntimeConfig } from "@rio/shared";
 import { createRepositories } from "@rio/database";
-import { MockContestAdapter, IdleContestAdapter, LocalContestAdapter, DiskManager, type ContestAdapter } from "@rio/contest";
-import { WorkspaceManager } from "@rio/tool-runtime";
+import { MockContestAdapter, IdleContestAdapter, LocalContestAdapter, CtfdContestAdapter, DiskManager, type ContestAdapter } from "@rio/contest";
+import { WorkspaceManager, resolvePythonExecutable } from "@rio/tool-runtime";
 import { StateMachine } from "./state-machine.js";
 import { EventBus } from "./control/bus.js";
 import { PreparationService } from "./control/preparation.js";
@@ -15,6 +15,7 @@ import { ReflectionService } from "./control/reflection.js";
 import { RecoveryManager } from "./control/recovery.js";
 import { ModelRegistry } from "./control/registry.js";
 import { ControlPlane } from "./control/control-plane.js";
+import { resolveAgentRuntime } from "./control/runtime-choice.js";
 import { buildApi } from "./api/routes.js";
 import Fastify from "fastify";
 
@@ -25,14 +26,6 @@ function compileFlagPattern(raw: string | null | undefined): RegExp | null {
   } catch (e) {
     throw new Error(`invalid submission.flagPattern: ${(e as Error).message}`);
   }
-}
-
-function resolveAgentRuntime(repos: ReturnType<typeof createRepositories>): "mock" | "pi" {
-  const env = process.env.RIO_AGENT_RUNTIME;
-  if (env === "mock" || env === "pi") return env;
-  const hasProvider = repos.providers.list().some((p) => p.enabled);
-  const hasModel = repos.models.listEnabled().length > 0;
-  return hasProvider && hasModel ? "pi" : "mock";
 }
 
 export interface Runtime {
@@ -82,6 +75,10 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
   const workspacesRoot = join(dataDir, "workspaces");
   const sessionsRoot = join(dataDir, "sessions");
   const workspace = new WorkspaceManager(workspacesRoot);
+
+  const python = resolvePythonExecutable(process.env.RIO_PYTHON ?? "python");
+  process.env.RIO_PYTHON = python.path;
+  logger.info({ event: "python_resolved", path: python.path, version: python.version }, "python executable resolved");
   const disk = new DiskManager(workspacesRoot, {
     globalWorkspaceLimitGb: config.storage.globalWorkspaceLimitGb,
     reserveDiskGb: config.storage.reserveDiskGb,
@@ -99,6 +96,15 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     adapter = mock;
   } else if (config.contest.adapter === "none") {
     adapter = new IdleContestAdapter();
+  } else if (config.contest.adapter === "ctfd") {
+    const baseUrl = config.contest.baseUrl?.trim();
+    if (!baseUrl) throw new Error("contest.adapter=ctfd requires contest.baseUrl");
+    adapter = new CtfdContestAdapter({
+      baseUrl,
+      token: config.contest.token ?? process.env.CTFD_TOKEN,
+      cookie: config.contest.cookie ?? process.env.CTFD_COOKIE,
+      miscCryptoOnly: config.contest.miscCryptoOnly,
+    });
   } else {
     throw new Error(`unsupported contest adapter: ${config.contest.adapter}`);
   }
@@ -107,9 +113,10 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
   const registry = new ModelRegistry(repos, secrets, logger);
 
   let control: ControlPlane | null = null;
-  const inject = (challengeId: string, message: string) => {
+  const inject = (challengeId: string, message: string): boolean => {
     const ok = control?.injectWorker(challengeId, message) ?? false;
     if (!ok) logger.debug({ event: "inject_skipped", challengeId }, "no live worker — message not delivered");
+    return ok;
   };
 
   const preparation = new PreparationService({
@@ -122,7 +129,7 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     logger,
     dataDir,
     maxConcurrentDownloads: config.storage.maxConcurrentDownloads,
-    pythonExecutable: "python",
+    pythonExecutable: python.path,
   });
 
   const submission = new SubmissionManager({
@@ -167,6 +174,7 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     logger,
     submissionManager: submission,
     preparation,
+    workspacesRoot,
   });
 
   control = new ControlPlane({
@@ -187,6 +195,7 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     reflection,
     registry,
     recovery,
+    pythonExecutable: python.path,
   });
 
   await control.start();

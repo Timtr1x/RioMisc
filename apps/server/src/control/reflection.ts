@@ -68,6 +68,15 @@ export function buildReflection(
   };
 }
 
+function safeJsonArray(raw: string): string[] {
+  try {
+    const v = JSON.parse(raw) as unknown;
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
 export function reflectionMessage(outcome: ReflectionOutcome): string {
   const lines = [
     "REFLECTION PASS (control plane)",
@@ -90,12 +99,12 @@ export class ReflectionService {
       repos: Repositories;
       bus: EventBus;
       logger: RioLogger;
-      inject: (challengeId: string, message: string) => void;
+      inject: (challengeId: string, message: string) => boolean;
     },
   ) {}
 
   /** Run a reflection pass and inject the result into the solver. */
-  reflect(challengeId: string, trigger: string): ReflectionOutcome {
+  reflect(challengeId: string, trigger: string): ReflectionOutcome & { injected: boolean } {
     const { repos } = this.deps;
     const challenge = repos.challenges.get(challengeId);
     if (!challenge) throw new Error("unknown challenge");
@@ -110,19 +119,20 @@ export class ReflectionService {
       latest
         ? {
             summary: latest.summary,
-            hypotheses: JSON.parse(latest.hypothesesJson) as string[],
-            confirmedFacts: JSON.parse(latest.confirmedFactsJson) as string[],
-            rejectedHypotheses: JSON.parse(latest.rejectedHypothesesJson) as string[],
-            nextActions: JSON.parse(latest.nextActionsJson) as string[],
+            hypotheses: safeJsonArray(latest.hypothesesJson),
+            confirmedFacts: safeJsonArray(latest.confirmedFactsJson),
+            rejectedHypotheses: safeJsonArray(latest.rejectedHypothesesJson),
+            nextActions: safeJsonArray(latest.nextActionsJson),
             confidence: latest.confidence,
           }
         : null,
       wrongFlags,
       hints,
     );
+    repos.events.append("REFLECTION_RUN", challengeId, { trigger, ...outcome });
     this.deps.bus.publish({ type: "REFLECTION_RUN", challengeId, payload: { trigger, ...outcome } });
-    this.deps.inject(challengeId, reflectionMessage(outcome));
-    this.deps.logger.info({ event: "reflection", challengeId, trigger });
-    return outcome;
+    const injected = this.deps.inject(challengeId, reflectionMessage(outcome));
+    this.deps.logger.info({ event: "reflection", challengeId, trigger, injected });
+    return { ...outcome, injected };
   }
 }

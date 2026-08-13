@@ -5,11 +5,13 @@ import { hashHex, type RioLogger, type RuntimeConfig } from "@rio/shared";
 import type { Repositories } from "@rio/database";
 import { SOLVER_CATEGORIES, type Challenge, type SolverType, type ModelRef } from "@rio/domain";
 import type { ContestAdapter } from "@rio/contest";
-import { Poller, ApiRateLimiter, DiskManager } from "@rio/contest";
+import { Poller, ApiRateLimiter, DiskManager, CtfdContestAdapter, IdleContestAdapter, MockContestAdapter } from "@rio/contest";
 import type { WorkerMessage, StartWorkerConfig } from "./worker-pool.js";
 import { WorkspaceManager } from "@rio/tool-runtime";
 import { systemPromptFor, buildKickoffMessage } from "@rio/solver";
-import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
+import { isResumableSession, buildResumeMessage } from "./session-resume.js";
+import { resolveAgentRuntime } from "./runtime-choice.js";
+import { readdirSync, readFileSync, statSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { ResourceSemaphore, computePriorityScore } from "@rio/scheduler";
 import { StateMachine } from "../state-machine.js";
@@ -21,6 +23,8 @@ import { HintManager } from "./hints.js";
 import { ReflectionService } from "./reflection.js";
 import { RecoveryManager } from "./recovery.js";
 import { ModelRegistry } from "./registry.js";
+import { acceptIntoSolved } from "./accept.js";
+import { isDeletedRemoteId, rememberDeletedRemoteId } from "./deleted.js";
 import { createHash } from "node:crypto";
 
 export interface ControlPlaneDeps {
@@ -41,6 +45,7 @@ export interface ControlPlaneDeps {
   reflection: ReflectionService;
   registry: ModelRegistry;
   recovery: RecoveryManager;
+  pythonExecutable: string;
 }
 
 export class ControlPlane {  private poller: Poller;
@@ -60,6 +65,21 @@ export class ControlPlane {  private poller: Poller;
   private reflectCooldown = new Map<string, number>();
   /** Challenges discovered before this process started are ignored in idle mode. */
   private readonly bootAt = Date.now();
+  private contestMeta: {
+    baseUrl: string | null;
+    connectedAt: number | null;
+    lastPollAt: number | null;
+    lastError: string | null;
+    lastListed: number;
+    miscCryptoOnly: boolean;
+  } = {
+    baseUrl: null,
+    connectedAt: null,
+    lastPollAt: null,
+    lastError: null,
+    lastListed: 0,
+    miscCryptoOnly: true,
+  };
 
   constructor(private deps: ControlPlaneDeps) {
     this.disk = new DiskManager(deps.workspacesRoot, {
@@ -77,6 +97,14 @@ export class ControlPlane {  private poller: Poller;
       cooldownAfterChangeMs: deps.config.contest.poll.cooldownAfterChangeMs,
       logger: deps.logger,
     });
+    if (deps.adapter instanceof CtfdContestAdapter) {
+      this.contestMeta.baseUrl = deps.adapter.baseUrl;
+      this.contestMeta.connectedAt = Date.now();
+      this.contestMeta.miscCryptoOnly = deps.adapter.miscCryptoOnly;
+    } else if (deps.adapter.kind === "mock") {
+      this.contestMeta.baseUrl = "mock://demo";
+      this.contestMeta.connectedAt = Date.now();
+    }
     this.workerPool = new WorkerPool(
       deps.repos,
       deps.logger,
@@ -123,6 +151,15 @@ export class ControlPlane {  private poller: Poller;
   // -------------------------------------------------------------------------
 
   async pollOnce(): Promise<{ changed: boolean }> {
+    try {
+      return await this.#pollOnceInner();
+    } catch (e) {
+      this.contestMeta.lastError = e instanceof Error ? e.message : String(e);
+      throw e;
+    }
+  }
+
+  async #pollOnceInner(): Promise<{ changed: boolean }> {
     const { adapter, repos, logger, bus } = this.deps;
     await this.limiter.acquire("POLL");
     // apply mock scenario schedules
@@ -131,8 +168,12 @@ export class ControlPlane {  private poller: Poller;
       await mockAdapter.applySchedule();
     }
     const list = await adapter.listChallenges();
+    this.contestMeta.lastPollAt = Date.now();
+    this.contestMeta.lastError = null;
+    this.contestMeta.lastListed = list.length;
     let changed = false;
     for (const r of list) {
+      if (isDeletedRemoteId(repos, r.remoteId)) continue;
       const existing = repos.challenges.getByRemoteId(r.remoteId);
       const canonical = JSON.stringify({
         title: r.title,
@@ -343,11 +384,10 @@ Re-evaluate assumptions affected by this change.`;
       }
     }
 
-    // session (reuse preserved session if it has a pi file; else new)
-    let session = repos.sessions.activeForChallenge(challenge.id);
     const latest = repos.sessions.latestForChallenge(challenge.id);
-    if (!session && latest && latest.piSessionFile && (latest.status === "ENDED" || latest.status === "ERROR")) {
-      session = latest;
+    const resume = isResumableSession(latest);
+    let session = resume ? latest! : repos.sessions.activeForChallenge(challenge.id);
+    if (resume && session) {
       repos.sessions.update(session.id, { status: "ACTIVE" });
     }
     if (!session) {
@@ -375,6 +415,10 @@ Re-evaluate assumptions affected by this change.`;
     const res = this.deps.stateMachine.transition(challenge.id, "SCHEDULE", { solverType, sessionId: session.id });
     if (!res.allowed) throw new Error(`cannot schedule ${challenge.id} (${challenge.lifecycleStatus})`);
 
+    const initialMessage = resume
+      ? this.#resumeMessage(challenge.id)
+      : this.#kickoff(layout.root);
+
     await this.workerPool.startWorker({
       challengeId: challenge.id,
       sessionId: session.id,
@@ -382,11 +426,22 @@ Re-evaluate assumptions affected by this change.`;
       workspaceRoot: layout.root,
       sessionDir: this.deps.sessionsRoot,
       systemPrompt: systemPromptFor(solverType),
-      initialMessage: this.#kickoff(layout.root),
+      initialMessage,
       modelRef,
-      runtime: this.deps.agentRuntime,
+      runtime: resolveAgentRuntime(this.deps.repos),
+      resume,
+      persistedSession: resume
+        ? { piSessionId: session.piSessionId, piSessionFile: session.piSessionFile }
+        : undefined,
+      pythonExecutable: this.deps.pythonExecutable,
       pi: this.#piWorkerConfig(),
     });
+    if (resume) {
+      this.deps.logger.info(
+        { event: "pi_session_resumed", challengeId: challenge.id, sessionId: session.id, piSessionFile: session.piSessionFile },
+        "resuming persisted Pi session",
+      );
+    }
     repos.sessions.update(session.id, { modelId: modelRef?.modelId ?? null, providerId: modelRef?.providerId ?? null });
     bus.publish({ type: "SOLVER_ASSIGNED", challengeId: challenge.id, payload: { sessionId: session.id, solverType, workerId: this.workerPool.get(challenge.id)?.workerId } });
     bus.publish({ type: "SOLVER_STARTED", challengeId: challenge.id, payload: { sessionId: session.id } });
@@ -396,6 +451,8 @@ Re-evaluate assumptions affected by this change.`;
   #resolveModelRef(): ModelRef | null {
     const primary = this.deps.repos.models.primary();
     if (primary) return { providerId: primary.providerId, modelId: primary.modelName };
+    const first = this.deps.repos.models.listEnabled()[0];
+    if (first) return { providerId: first.providerId, modelId: first.modelName };
     return null;
   }
 
@@ -427,6 +484,15 @@ Re-evaluate assumptions affected by this change.`;
       }
     }
     return buildKickoffMessage({ challengeText, inputFiles, extraNote });
+  }
+
+  #resumeMessage(challengeId: string): string {
+    const hints = this.deps.repos.hints.listForChallenge(challengeId).map((h) => h.content);
+    const wrongFlags = this.deps.repos.submissions
+      .listByChallenge(challengeId)
+      .filter((s) => s.status === "WRONG")
+      .map((s) => s.flagValue);
+    return buildResumeMessage({ newHints: hints, wrongFlags, revisionSummary: null });
   }
 
   /** Provider specs for the Pi runtime, assembled from the registry (§55). */
@@ -465,6 +531,23 @@ Re-evaluate assumptions affected by this change.`;
       const sessionId = (msg.sessionId as string | undefined) ?? null;
 
       switch (msg.type) {
+      case "session_persisted": {
+        const sid = sessionId ?? String(msg.sessionId ?? "");
+        if (sid) {
+          repos.sessions.update(sid, {
+            piSessionId: (msg.piSessionId as string | null) ?? null,
+            piSessionFile: (msg.piSessionFile as string | null) ?? null,
+          });
+          logger.info({
+            event: "session_persisted",
+            challengeId,
+            sessionId: sid,
+            piSessionId: msg.piSessionId,
+            piSessionFile: msg.piSessionFile,
+          });
+        }
+        break;
+      }
       case "progress": {
         const rec = repos.progress.append({
           challengeId,
@@ -552,12 +635,21 @@ Re-evaluate assumptions affected by this change.`;
     }
   }
 
+  #markSessionInterrupted(challengeId: string): void {
+    const { repos, logger } = this.deps;
+    for (const s of repos.sessions.listActive().filter((x) => x.challengeId === challengeId)) {
+      repos.sessions.setStatus(s.id, "INTERRUPTED");
+      logger.warn({ event: "session_interrupted", challengeId, sessionId: s.id }, "session marked INTERRUPTED");
+    }
+  }
+
   private onWorkerLost(challengeId: string): void {
     const { repos, bus } = this.deps;
     const c = repos.challenges.get(challengeId);
     this.releaseLlmSlot(challengeId);
     if (c && c.lifecycleStatus === "ACTIVE") {
-      this.deps.stateMachine.transition(challengeId, "SOLVER_STOPPED", { payload: { reason: "WORKER_LOST" } });
+      this.#markSessionInterrupted(challengeId);
+      this.deps.stateMachine.transition(challengeId, "RECOVER_ACTIVE", { payload: { reason: "WORKER_LOST" } });
     }
     bus.publish({ type: "WORKER_LOST", challengeId, payload: { reason: "lease expired" } });
   }
@@ -573,9 +665,9 @@ Re-evaluate assumptions affected by this change.`;
     }
     if (c.lifecycleStatus === "ACTIVE") {
       this.deps.logger.warn({ event: "worker_crashed", challengeId, code }, "worker exited unexpectedly — requeueing");
-      this.deps.stateMachine.transition(challengeId, "SOLVER_STOPPED", { payload: { reason: `worker exit ${code}` } });
+      this.#markSessionInterrupted(challengeId);
+      this.deps.stateMachine.transition(challengeId, "RECOVER_ACTIVE", { payload: { reason: `worker exit ${code}` } });
     } else if (c.lifecycleStatus === "VERIFYING" || c.lifecycleStatus === "SUBMITTING") {
-      // verification/submission continues without the worker
       this.deps.logger.info({ event: "worker_exit_while_verify", challengeId, code });
     }
   }
@@ -621,7 +713,9 @@ Re-evaluate assumptions affected by this change.`;
       systemPrompt: systemPromptFor(target),
       initialMessage: this.#kickoff(layout.root, `A prior solver requested handoff to ${target}.\nPrior solver summary: ${summary}\nContinue with fresh eyes.`),
       modelRef: this.#resolveModelRef(),
-      runtime: this.deps.agentRuntime,
+      runtime: resolveAgentRuntime(this.deps.repos),
+      resume: false,
+      pythonExecutable: this.deps.pythonExecutable,
       pi: this.#piWorkerConfig(),
     });
     this.deps.bus.publish({ type: "SOLVER_HANDOFF", challengeId, payload: { from: c.currentSolverType, to: target, summary } });
@@ -679,6 +773,113 @@ Re-evaluate assumptions affected by this change.`;
     return this.workerPool.inject(challengeId, message);
   }
 
+  contestStatus(): {
+    kind: string;
+    connected: boolean;
+    baseUrl: string | null;
+    lastPollAt: number | null;
+    lastError: string | null;
+    lastListed: number;
+    miscCryptoOnly: boolean;
+    connectedAt: number | null;
+  } {
+    const kind = this.deps.adapter.kind;
+    return {
+      kind,
+      connected: kind === "ctfd" || kind === "mock",
+      baseUrl: this.contestMeta.baseUrl,
+      lastPollAt: this.contestMeta.lastPollAt,
+      lastError: this.contestMeta.lastError,
+      lastListed: this.contestMeta.lastListed,
+      miscCryptoOnly: this.contestMeta.miscCryptoOnly,
+      connectedAt: this.contestMeta.connectedAt,
+    };
+  }
+
+  async connectContest(opts: {
+    kind?: "mock" | "ctfd";
+    baseUrl?: string | null;
+    token?: string | null;
+    cookie?: string | null;
+    miscCryptoOnly?: boolean;
+  }): Promise<ReturnType<ControlPlane["contestStatus"]>> {
+    const kind = opts.kind ?? (opts.baseUrl?.trim() ? "ctfd" : "mock");
+    if (kind === "mock") {
+      const adapter = new MockContestAdapter();
+      adapter.loadFixtures();
+      await this.#replaceAdapter(adapter, {
+        baseUrl: "mock://demo",
+        miscCryptoOnly: true,
+        connected: true,
+      });
+    } else {
+      const baseUrl = opts.baseUrl?.trim();
+      if (!baseUrl) throw new Error("接入 CTFd 需要比赛平台地址");
+      const adapter = new CtfdContestAdapter({
+        baseUrl,
+        token: opts.token,
+        cookie: opts.cookie,
+        miscCryptoOnly: opts.miscCryptoOnly,
+      });
+      await adapter.authenticate();
+      await this.#replaceAdapter(adapter, {
+        baseUrl: adapter.baseUrl,
+        miscCryptoOnly: adapter.miscCryptoOnly,
+        connected: true,
+      });
+    }
+    try {
+      await this.pollOnce();
+    } catch (e) {
+      this.deps.logger.warn({ event: "contest_first_poll_failed", err: String(e) });
+    }
+    const status = this.contestStatus();
+    this.deps.bus.publish({
+      type: "CONTEST_CONNECTED",
+      challengeId: null,
+      payload: { kind: status.kind, baseUrl: status.baseUrl, listed: status.lastListed },
+    });
+    this.deps.logger.info(
+      { event: "contest_connected", kind: status.kind, baseUrl: status.baseUrl, listed: status.lastListed },
+      "contest connected",
+    );
+    return status;
+  }
+
+  async disconnectContest(): Promise<ReturnType<ControlPlane["contestStatus"]>> {
+    if (this.deps.adapter.kind === "idle") return this.contestStatus();
+    const idle = new IdleContestAdapter();
+    await this.#replaceAdapter(idle, { baseUrl: null, miscCryptoOnly: true, connected: false });
+    this.deps.bus.publish({ type: "CONTEST_DISCONNECTED", challengeId: null, payload: {} });
+    this.deps.logger.info({ event: "contest_disconnected" }, "contest disconnected — idle mode");
+    return this.contestStatus();
+  }
+
+  async #replaceAdapter(
+    adapter: ContestAdapter,
+    meta: { baseUrl: string | null; miscCryptoOnly: boolean; connected: boolean },
+  ): Promise<void> {
+    const old = this.deps.adapter;
+    this.deps.adapter = adapter;
+    this.deps.preparation.replaceAdapter(adapter);
+    this.deps.submission.replaceAdapter(adapter);
+    this.deps.hints.replaceAdapter(adapter);
+    this.contestMeta.baseUrl = meta.baseUrl;
+    this.contestMeta.miscCryptoOnly = meta.miscCryptoOnly;
+    this.contestMeta.connectedAt = meta.connected ? Date.now() : null;
+    this.contestMeta.lastError = null;
+    if (old !== adapter) {
+      try {
+        await (old as { close?: () => Promise<void> }).close?.();
+      } catch {
+        /* ignore */
+      }
+    }
+    await adapter.authenticate();
+    const caps = await adapter.getCapabilities();
+    if (caps.polling) this.poller.start(() => this.pollOnce());
+  }
+
   /**
    * 从 URL 开始一道新任务：抓取题面/附件 → 注入当前比赛 → 自动进入
    * 完整解题流程（Triage → Solver → 候选 Flag）。
@@ -691,7 +892,7 @@ Re-evaluate assumptions affected by this change.`;
     const id = `url_${slug}_${Math.random().toString(36).slice(2, 6)}`;
     const mock = this.deps.adapter as unknown as { addExternalChallenge?: (input: unknown) => void };
     if (typeof mock.addExternalChallenge !== "function") {
-      throw new Error("当前比赛适配器不支持动态注入题目（仅 mock/local 模式支持）");
+      throw new Error("当前比赛适配器不支持动态注入题目（请先断开比赛，或改用 mock / 未接入状态）");
     }
     mock.addExternalChallenge({
       id,
@@ -799,47 +1000,109 @@ Treat the rejection as negative evidence and continue solving.`;
     const candidate = repos.candidates.get(candidateId);
     if (!challenge || !candidate) throw new Error("unknown challenge/candidate");
     if (candidate.challengeId !== challengeId) throw new Error("candidate does not belong to this challenge");
+    acceptIntoSolved(this.deps.stateMachine, repos, challengeId, candidateId);
     repos.candidates.update(candidateId, { status: "CORRECT", submittedAt: Date.now() });
-    const status = challenge.lifecycleStatus;
-    if (status === "ACTIVE") {
-      this.deps.stateMachine.transition(challengeId, "CANDIDATE_FOUND", { payload: { candidateId } });
-      this.deps.stateMachine.transition(challengeId, "VERIFY_OK", { payload: { candidateId } });
-      this.deps.stateMachine.transition(challengeId, "SUBMIT_CORRECT", { payload: { candidateId, manual: true } });
-    } else if (status === "VERIFYING") {
-      this.deps.stateMachine.transition(challengeId, "VERIFY_OK", { payload: { candidateId } });
-      this.deps.stateMachine.transition(challengeId, "SUBMIT_CORRECT", { payload: { candidateId, manual: true } });
-    } else if (status === "SUBMITTING") {
-      this.deps.stateMachine.transition(challengeId, "SUBMIT_CORRECT", { payload: { candidateId, manual: true } });
-    } else if (status !== "SOLVED") {
-      throw new Error(`cannot accept candidate while ${status}`);
-    }
+    const sub = repos.submissions.createOrGet({
+      challengeId,
+      candidateId,
+      flagHash: hashHex(candidate.value),
+      flagValue: candidate.value,
+      status: "CORRECT",
+    });
+    if (sub.status !== "CORRECT") repos.submissions.update(sub.id, { status: "CORRECT", submittedAt: Date.now() });
     await this.handleSubmissionCorrect(challengeId);
   }
 
   async pause(challengeId: string, reason?: string): Promise<void> {
     const c = this.deps.repos.challenges.get(challengeId);
     if (!c) throw new Error("unknown challenge");
+    if (c.lifecycleStatus === "PAUSED") return;
     this.intentionallyStopped.add(challengeId);
     this.workerPool.abort(challengeId);
     this.releaseLlmSlot(challengeId);
-    this.deps.stateMachine.transition(challengeId, "PAUSE", { reason: reason ?? "manual pause", payload: { pausedReason: reason ?? "manual pause" } });
+    const res = this.deps.stateMachine.transition(challengeId, "PAUSE", {
+      reason: reason ?? "manual pause",
+      payload: { pausedReason: reason ?? "manual pause" },
+    });
+    if (!res.allowed) throw new Error(`cannot pause while ${c.lifecycleStatus}`);
     const session = this.deps.repos.sessions.activeForChallenge(challengeId);
     if (session) this.deps.repos.sessions.setStatus(session.id, "PAUSED");
+    this.deps.bus.publish({ type: "CHALLENGE_PAUSED", challengeId, payload: { status: "PAUSED" } });
   }
 
   resume(challengeId: string): void {
-    this.deps.stateMachine.transition(challengeId, "RESUME");
+    const res = this.deps.stateMachine.transition(challengeId, "RESUME");
+    if (!res.allowed) throw new Error("cannot resume");
+    this.deps.bus.publish({ type: "CHALLENGE_RESUMED", challengeId, payload: { status: "QUEUED" } });
   }
 
   async park(challengeId: string, reason?: string): Promise<void> {
+    const c = this.deps.repos.challenges.get(challengeId);
+    if (!c) throw new Error("unknown challenge");
+    if (c.lifecycleStatus === "PARKED") return;
     this.intentionallyStopped.add(challengeId);
     this.workerPool.abort(challengeId);
     this.releaseLlmSlot(challengeId);
-    this.deps.stateMachine.transition(challengeId, "PARK", { reason: reason ?? "manual park", payload: { parkedReason: reason ?? "manual park" } });
+    const res = this.deps.stateMachine.transition(challengeId, "PARK", {
+      reason: reason ?? "manual park",
+      payload: { parkedReason: reason ?? "manual park" },
+    });
+    if (!res.allowed) throw new Error(`cannot park while ${c.lifecycleStatus}`);
+    const session = this.deps.repos.sessions.activeForChallenge(challengeId);
+    if (session) this.deps.repos.sessions.setStatus(session.id, "PAUSED");
+    this.deps.bus.publish({ type: "CHALLENGE_PARKED", challengeId, payload: { status: "PARKED" } });
   }
 
   unpark(challengeId: string): void {
     this.deps.stateMachine.transition(challengeId, "UNPARK");
+  }
+
+  async deleteChallenge(challengeId: string): Promise<{ id: string; remoteId: string | null }> {
+    const { repos, logger, bus } = this.deps;
+    const challenge = repos.challenges.get(challengeId);
+    if (!challenge) throw new Error("unknown challenge");
+
+    this.intentionallyStopped.add(challengeId);
+    this.preparing.delete(challengeId);
+    this.reflectCooldown.delete(challengeId);
+    this.deps.hints.clearChallenge(challengeId);
+    this.deps.submission.cancelRetriesForChallenge(challengeId);
+    this.workerPool.abort(challengeId);
+    this.releaseLlmSlot(challengeId);
+    await new Promise((r) => setTimeout(r, 200));
+    this.workerPool.kill(challengeId);
+    repos.leases.release(challengeId);
+
+    const sessionFiles = repos.sessions
+      .listByChallenge(challengeId)
+      .map((s) => s.piSessionFile)
+      .filter((p): p is string => Boolean(p));
+
+    rememberDeletedRemoteId(repos, challenge.remoteId);
+    const forget = this.deps.adapter as { forgetChallenge?: (remoteId: string) => void };
+    if (challenge.remoteId && typeof forget.forgetChallenge === "function") {
+      forget.forgetChallenge(challenge.remoteId);
+    }
+
+    repos.challenges.deleteCascade(challengeId);
+
+    try {
+      this.workspace.remove(challengeId);
+    } catch (e) {
+      logger.warn({ event: "workspace_delete_failed", challengeId, err: String(e) });
+    }
+    for (const file of sessionFiles) {
+      try {
+        if (existsSync(file)) unlinkSync(file);
+      } catch {
+        /* ignore leftover session files */
+      }
+    }
+
+    bus.publish({ type: "CHALLENGE_DELETED", challengeId, payload: { remoteId: challenge.remoteId, title: challenge.title } });
+    logger.info({ event: "challenge_deleted", challengeId, remoteId: challenge.remoteId, title: challenge.title });
+    this.intentionallyStopped.delete(challengeId);
+    return { id: challengeId, remoteId: challenge.remoteId };
   }
 
   async restartSolver(challengeId: string): Promise<void> {
@@ -856,11 +1119,19 @@ Treat the rejection as negative evidence and continue solving.`;
   }
 
   async forceHint(challengeId: string): Promise<string | null> {
-    return this.deps.hints.fetchHint(challengeId);
+    return this.deps.hints.fetchHint(challengeId, { force: true });
   }
 
-  runReflection(challengeId: string): void {
-    this.deps.reflection.reflect(challengeId, "manual");
+  async retrySubmission(challengeId: string, submissionId: string): Promise<void> {
+    await this.deps.submission.retrySubmission(challengeId, submissionId);
+  }
+
+  resumeSolvingAfterUnknown(challengeId: string): void {
+    this.deps.submission.resumeSolvingAfterUnknown(challengeId);
+  }
+
+  runReflection(challengeId: string): ReturnType<ReflectionService["reflect"]> {
+    return this.deps.reflection.reflect(challengeId, "manual");
   }
 
   switchModel(challengeId: string, modelId: string): void {
@@ -919,7 +1190,11 @@ Treat the rejection as negative evidence and continue solving.`;
       diskFreeGb: Math.round(this.disk.freeDiskGb() * 10) / 10,
       startedAt: (repos.settings.get("startedAt") ? Number(repos.settings.get("startedAt")) : null),
       adapter: this.deps.adapter.kind,
-      agentRuntime: this.deps.agentRuntime,
+      contest: this.contestStatus(),
+      agentRuntime: resolveAgentRuntime(this.deps.repos),
+      executionMode: "NATIVE_TRUSTED",
+      filesystemIsolation: false,
+      networkIsolation: false,
       providers: repos.providers.list().map((p) => ({ id: p.id, name: p.displayName, health: p.health })),
     };
   }
@@ -947,8 +1222,8 @@ Treat the rejection as negative evidence and continue solving.`;
 
 function normalizeCategory(raw: string): Challenge["category"] {
   const up = raw.toUpperCase().trim();
-  if (up.includes("MISC")) return "MISC";
-  if (up.includes("CRYPTO")) return "CRYPTO";
+  if (up.includes("MISC") || raw.includes("杂项") || /forensic/i.test(raw) || /osint/i.test(raw)) return "MISC";
+  if (up.includes("CRYPTO") || raw.includes("密码")) return "CRYPTO";
   if (up.includes("WEB")) return "WEB";
   if (up.includes("PWN")) return "PWN";
   if (up.includes("REV")) return "REVERSE";

@@ -1,8 +1,9 @@
 // Deterministic file inspection (§61 Cheap Inspection): magic, entropy, image
 // dims, pcap summary. No heavy operations.
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { listZipEntries } from "./zip.js";
+import { readFileSync, statSync } from "node:fs";
+import { listZipEntries, listZipEntriesFromFile } from "./zip.js";
+import { sampleFileWindows, sha256File, readFileWindow } from "./stream-io.js";
 
 export interface FileInspection {
   name: string;
@@ -13,6 +14,8 @@ export interface FileInspection {
   entropy: number;
   extension: string;
   hints: string[];
+  inspectionSampleBytes?: number;
+  partialInspection?: boolean;
 }
 
 export type MagicType =
@@ -143,8 +146,63 @@ export function inspectBuffer(buf: Buffer, name: string): FileInspection {
 }
 
 export function inspectFile(path: string): FileInspection {
-  const buf = readFileSync(path);
-  return inspectBuffer(buf, path.split(/[\\/]/).pop() ?? path);
+  const st = statSync(path);
+  // Small files stay exact; anything unbounded uses head/middle/tail + streaming hash.
+  if (st.size <= 256 * 1024) {
+    const buf = readFileSync(path);
+    return inspectBuffer(buf, path.split(/[\\/]/).pop() ?? path);
+  }
+  return inspectFilePath(path);
+}
+
+const PCAP_BOUND = 16 * 1024 * 1024;
+
+/** Bounded inspection: never readFileSync the whole unbounded file. */
+export function inspectFilePath(path: string): FileInspection {
+  const name = path.split(/[\\/]/).pop() ?? path;
+  const samples = sampleFileWindows(path);
+  const magic = detectMagic(samples.head);
+  const hints: string[] = [];
+  if (magic === "PNG" && samples.head.length > 24) {
+    const dims = pngDimensions(samples.head);
+    hints.push(`PNG ${dims.width}x${dims.height}`);
+  }
+  if (magic === "GIF" && samples.head.length > 10) {
+    hints.push(`GIF ${samples.head.readUInt16LE(6)}x${samples.head.readUInt16LE(8)}`);
+  }
+  if (magic === "ZIP") {
+    try {
+      hints.push(`ZIP ${listZipEntriesFromFile(path).length} entries`);
+    } catch {
+      hints.push("ZIP (corrupt or partial)");
+    }
+  }
+  if (magic === "PCAP") {
+    const window = readFileWindow(path, 0, Math.min(samples.size, PCAP_BOUND));
+    const s = pcapSummary(window);
+    hints.push(`PCAP ${s.packetCount} packets${samples.size > PCAP_BOUND ? " (partial, first 16MB)" : ""}`);
+    if (s.hasHttp) hints.push("HTTP present");
+  }
+  if (magic === "TEXT") {
+    const sample = samples.head.subarray(0, Math.min(samples.head.length, 120)).toString("utf8").replaceAll("\n", "⏎").replaceAll("\r", "");
+    hints.push(`text: ${JSON.stringify(sample)}`);
+  }
+  const entropySample = samples.middle
+    ? Buffer.concat([samples.head, samples.middle, samples.tail])
+    : samples.head;
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
+  return {
+    name,
+    size: samples.size,
+    sha256: sha256File(path),
+    magic,
+    mime: mimeFor(magic),
+    entropy: entropy(entropySample),
+    extension: ext,
+    hints: [...hints, samples.partialInspection ? "entropy/magic from samples, not the whole file" : ""].filter(Boolean),
+    inspectionSampleBytes: samples.inspectionSampleBytes,
+    partialInspection: samples.partialInspection,
+  };
 }
 
 export function pngDimensions(buf: Buffer): { width: number; height: number } {

@@ -21,15 +21,41 @@ export interface ApiDeps {
 export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
   const { fastify, control, repos, bus, registry, secrets } = deps;
 
+  fastify.addHook("onRequest", async (req, reply) => {
+    const origin = req.headers.origin;
+    if (origin === "http://127.0.0.1:5173" || origin === "http://localhost:5173") {
+      reply.header("Access-Control-Allow-Origin", origin);
+      reply.header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+      reply.header("Access-Control-Allow-Headers", "content-type");
+    }
+    if (req.method === "OPTIONS") {
+      reply.code(204);
+      return reply.send();
+    }
+  });
+
+  fastify.setErrorHandler((err, _req, reply) => {
+    const message = err instanceof Error ? err.message : String(err);
+    const status = /unknown|cannot |no stored|invalid/i.test(message) ? 400 : 500;
+    reply.code(status).send({ error: message });
+  });
+
   fastify.get("/api/status", async () => control.status());
 
-  fastify.get("/api/health", async () => ({
-    ok: true,
-    db: "ok",
-    workers: control.status().workers,
-    diskFreeGb: control.status().diskFreeGb,
-    adapter: control.status().adapter,
-  }));
+  fastify.get("/api/health", async () => {
+    const s = control.status();
+    return {
+      ok: true,
+      db: "ok",
+      workers: s.workers,
+      workerSlots: s.workerSlots,
+      diskFreeGb: s.diskFreeGb,
+      adapter: s.adapter,
+      executionMode: s.executionMode ?? "NATIVE_TRUSTED",
+      filesystemIsolation: false,
+      networkIsolation: false,
+    };
+  });
 
   // -------------------------------------------------------------------------
   // Challenges
@@ -77,10 +103,23 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     };
   });
 
+  fastify.delete("/api/challenges/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      const result = await control.deleteChallenge(id);
+      return { ok: true, ...result };
+    } catch (e) {
+      const message = (e as Error).message;
+      if (/unknown challenge/i.test(message)) return reply.code(404).send({ error: message });
+      return reply.code(400).send({ error: message });
+    }
+  });
+
   fastify.post("/api/challenges/:id/pause", async (req) => {
     const { id } = req.params as { id: string };
     await control.pause(id);
-    return { ok: true };
+    const c = repos.challenges.get(id);
+    return { ok: true, status: c?.lifecycleStatus ?? "PAUSED" };
   });
   fastify.post("/api/challenges/:id/resume", async (req) => {
     control.resume((req.params as { id: string }).id);
@@ -88,7 +127,8 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
   });
   fastify.post("/api/challenges/:id/park", async (req) => {
     await control.park((req.params as { id: string }).id);
-    return { ok: true };
+    const c = repos.challenges.get((req.params as { id: string }).id);
+    return { ok: true, status: c?.lifecycleStatus ?? "PARKED" };
   });
   fastify.post("/api/challenges/:id/unpark", async (req) => {
     control.unpark((req.params as { id: string }).id);
@@ -103,8 +143,8 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     return { ok: true, hint };
   });
   fastify.post("/api/challenges/:id/reflection", async (req) => {
-    control.runReflection((req.params as { id: string }).id);
-    return { ok: true };
+    const result = control.runReflection((req.params as { id: string }).id);
+    return { ok: true, ...result };
   });
   fastify.post("/api/challenges/:id/model", async (req) => {
     const body = switchModelParamsSchema.parse(req.body);
@@ -142,6 +182,17 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     const { id } = req.params as { id: string };
     const body = req.body as { candidateId: string };
     await control.rejectCandidate(id, String(body.candidateId));
+    return { ok: true };
+  });
+  fastify.post("/api/challenges/:id/retry-submission", async (req) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as { submissionId: string };
+    await control.retrySubmission(id, String(body.submissionId));
+    return { ok: true };
+  });
+  fastify.post("/api/challenges/:id/resume-solving", async (req) => {
+    const { id } = req.params as { id: string };
+    control.resumeSolvingAfterUnknown(id);
     return { ok: true };
   });
 
@@ -210,9 +261,10 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
   fastify.get("/api/events/stream", async (req, reply) => {
     reply.hijack();
     reply.raw.writeHead(200, {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
       connection: "keep-alive",
+      "x-accel-buffering": "no",
     });
     const send = (e: { type: string; challengeId?: string | null; payload: Record<string, unknown>; createdAt: number }) => {
       reply.raw.write(`data: ${JSON.stringify(e)}\n\n`);
@@ -232,6 +284,40 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
       reply.raw.end();
     });
     return reply;
+  });
+
+  // -------------------------------------------------------------------------
+  // Contest — connect a full contest (mock demo or CTFd) for auto ingest/solve
+  // -------------------------------------------------------------------------
+
+  fastify.get("/api/contest", async () => control.contestStatus());
+
+  fastify.post("/api/contest/connect", async (req, reply) => {
+    const body = (req.body ?? {}) as {
+      kind?: string;
+      baseUrl?: string;
+      token?: string;
+      cookie?: string;
+      miscCryptoOnly?: boolean;
+    };
+    const kind = body.kind === "ctfd" ? "ctfd" : body.kind === "mock" ? "mock" : body.baseUrl ? "ctfd" : "mock";
+    try {
+      const status = await control.connectContest({
+        kind,
+        baseUrl: body.baseUrl ?? process.env.CTFD_BASE_URL,
+        token: body.token ?? process.env.CTFD_TOKEN,
+        cookie: body.cookie ?? process.env.CTFD_COOKIE,
+        miscCryptoOnly: body.miscCryptoOnly,
+      });
+      return { ok: true, ...status };
+    } catch (e) {
+      return reply.code(400).send({ error: (e as Error).message });
+    }
+  });
+
+  fastify.post("/api/contest/disconnect", async () => {
+    const status = await control.disconnectContest();
+    return { ok: true, ...status };
   });
 
   // -------------------------------------------------------------------------

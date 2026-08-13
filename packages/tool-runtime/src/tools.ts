@@ -1,9 +1,8 @@
 // The Agent Tool Registry (§45, §48, §49).
 // Every tool: zod-validated params → safeResolve inside workspace → bounded output.
 // Long outputs are saved to results/tool-<n>.txt and referenced, never inline.
-import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, existsSync } from "node:fs";
+import { writeFileSync, readdirSync, statSync, mkdirSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   readFileParamsSchema,
@@ -19,8 +18,9 @@ import {
 } from "@rio/domain";
 import { WorkspaceManager, type WorkspaceLayout } from "./workspace.js";
 import { ProcessRunner, type ProcessResult, DEFAULT_TIMEOUTS } from "./process.js";
-import { inspectFile, entropy, pcapSummary, pngDimensions, detectMagic } from "./inspect.js";
-import { extractZip, isZip, isGzip } from "./zip.js";
+import { inspectFilePath, detectMagic } from "./inspect.js";
+import { extractZipFromFile, isZip, isGzip } from "./zip.js";
+import { sha256File, readFileWindow, readFileChunk, searchFileStream, extractGzipFile } from "./stream-io.js";
 
 export const MAX_INLINE_CHARS = 12_000;
 export const MAX_TOOL_OUTPUT_BYTES = 64 * 1024 * 1024;
@@ -60,7 +60,9 @@ export interface ToolContext {
   recordArtifact(op: string, absPath: string, parent?: string | null): ArtifactRef | null;
   nextResultFile(): string;
   pythonExecutable: string;
-  allowNetwork: boolean;
+  /** Deprecated: native mode cannot enforce this. Kept so old callers compile. */
+  allowNetwork?: boolean;
+  networkIsolation?: "NONE";
 }
 
 function ok<T>(summary: string, data: T, durationMs: number, extra: Partial<ToolResult<T>> = {}): ToolResult<T> {
@@ -115,9 +117,7 @@ function fileArtifact(ctx: ToolContext, absPath: string): ArtifactRef {
   return { path: relative(ctx.workspace.root, absPath).replaceAll("\\", "/"), size: st.size, sha256: sha256File(absPath) };
 }
 
-export function sha256File(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
+
 
 // ---------------------------------------------------------------------------
 // Individual tools
@@ -138,12 +138,13 @@ export function readChallengeFile(ctx: ToolContext, params: unknown): Promise<To
   try {
     const abs = ctx.safeResolve(p.data.path);
     if (!existsSync(abs) || !statSync(abs).isFile()) return Promise.resolve(fail("NOT_FOUND", `no such file: ${p.data.path}`, Date.now() - started));
-    const buf = readFileSync(abs);
+    const st = statSync(abs);
     const max = p.data.maxChars ?? MAX_INLINE_CHARS;
+    const buf = readFileWindow(abs, 0, max + 1);
     const text = buf.toString("utf8");
-    const truncated = text.length > max;
-    const out = truncated ? text.slice(0, max) + `\n... [truncated ${text.length - max} chars]` : text;
-    return Promise.resolve(ok("file read", { path: p.data.path, size: buf.length, text: out }, Date.now() - started, { truncated }));
+    const truncated = st.size > max || text.length > max;
+    const out = truncated ? text.slice(0, max) + `\n... [truncated, file is ${st.size} bytes]` : text;
+    return Promise.resolve(ok("file read", { path: p.data.path, size: st.size, text: out }, Date.now() - started, { truncated }));
   } catch (e) {
     return Promise.resolve(fail("FS", String(e), Date.now() - started));
   }
@@ -213,7 +214,7 @@ export function inspectFileTool(ctx: ToolContext, params: unknown): Promise<Tool
   try {
     const abs = ctx.safeResolve(p.data.path);
     if (!existsSync(abs) || !statSync(abs).isFile()) return Promise.resolve(fail("NOT_FOUND", `no such file: ${p.data.path}`, Date.now() - started));
-    const insp = inspectFile(abs);
+    const insp = inspectFilePath(abs);
     return Promise.resolve(ok("inspection done", insp, Date.now() - started));
   } catch (e) {
     return Promise.resolve(fail("FS", String(e), Date.now() - started));
@@ -227,12 +228,12 @@ export async function extractArchive(ctx: ToolContext, params: unknown): Promise
   try {
     const abs = ctx.safeResolve(p.data.path);
     if (!existsSync(abs) || !statSync(abs).isFile()) return fail("NOT_FOUND", `no such file: ${p.data.path}`, Date.now() - started);
-    const buf = readFileSync(abs);
     const destRel = p.data.destPath ?? "artifacts/extracted";
     const destAbs = ctx.safeResolve(destRel);
     mkdirSync(destAbs, { recursive: true });
-    if (isZip(buf)) {
-      const files = extractZip(buf, destAbs, { maxDepth: p.data.maxDepth ?? 8 });
+    const head = readFileWindow(abs, 0, 8);
+    if (isZip(head)) {
+      const files = await extractZipFromFile(abs, destAbs, { maxDepth: p.data.maxDepth ?? 8 });
       const refs = files.slice(0, 50).map((f) => fileArtifact(ctx, join(destAbs, f.path)));
       return ok(
         `extracted ${files.length} entries to ${destRel}${files.some((f) => f.nestedArchive) ? " (nested archives present — extract again)" : ""}`,
@@ -241,15 +242,13 @@ export async function extractArchive(ctx: ToolContext, params: unknown): Promise
         { artifacts: refs },
       );
     }
-    if (isGzip(buf)) {
-      // simple .gz — write decompressed next to it
-      const { gunzipSync } = await import("node:zlib");
-      const outPath = join(destAbs, (p.data.path.split(/[\\/]/).pop() ?? "file").replace(/\.gz$/i, ""));
-      writeFileSync(outPath, gunzipSync(buf));
+    if (isGzip(head)) {
+      const outPath = join(destAbs, (p.data.path.split(/[\\/]/).pop() ?? "file").replace(/\.gz$/i, "") || "gunzipped.bin");
+      await extractGzipFile(abs, outPath, 2 * 1024 ** 3);
       const ref = ctx.recordArtifact("extract_archive", outPath) ?? fileArtifact(ctx, outPath);
       return ok(`gunzipped to ${relative(ctx.workspace.root, outPath).replaceAll("\\", "/")}`, { dest: destRel }, Date.now() - started, { artifacts: [ref] });
     }
-    return fail("UNSUPPORTED_ARCHIVE", `not a supported archive: ${detectMagic(buf)}`, Date.now() - started);
+    return fail("UNSUPPORTED_ARCHIVE", `not a supported archive: ${detectMagic(head)}`, Date.now() - started);
   } catch (e) {
     return fail("ARCHIVE", String(e), Date.now() - started);
   }
@@ -313,7 +312,7 @@ function combineOutput(r: ProcessResult): string {
   return parts.join("\n");
 }
 
-export function searchToolOutput(ctx: ToolContext, params: unknown): Promise<ToolResult> {
+export async function searchToolOutput(ctx: ToolContext, params: unknown): Promise<ToolResult> {
   const started = Date.now();
   const schema = z.object({ path: z.string().max(1000), query: z.string().min(1).max(200), maxMatches: z.number().int().min(1).max(200).optional() });
   const p = schema.safeParse(params);
@@ -321,22 +320,15 @@ export function searchToolOutput(ctx: ToolContext, params: unknown): Promise<Too
   try {
     const abs = ctx.safeResolve(p.data.path);
     if (!existsSync(abs) || !statSync(abs).isFile()) return Promise.resolve(fail("NOT_FOUND", `no such file: ${p.data.path}`, Date.now() - started));
-    const text = readFileSync(abs, "utf8");
-    const lines = text.split("\n");
-    const matches: { line: number; text: string }[] = [];
     const max = p.data.maxMatches ?? 50;
-    for (let i = 0; i < lines.length && matches.length < max; i++) {
-      if (lines[i]!.toLowerCase().includes(p.data.query.toLowerCase())) {
-        matches.push({ line: i + 1, text: lines[i]!.slice(0, 500) });
-      }
-    }
-    return Promise.resolve(ok(`found ${matches.length} matches for "${p.data.query}"`, { path: p.data.path, matches }, Date.now() - started));
+    const matches = await searchFileStream(abs, p.data.query, max);
+    return ok(`found ${matches.length} matches for "${p.data.query}"`, { path: p.data.path, matches }, Date.now() - started);
   } catch (e) {
     return Promise.resolve(fail("FS", String(e), Date.now() - started));
   }
 }
 
-export function readToolOutputChunk(ctx: ToolContext, params: unknown): Promise<ToolResult> {
+export async function readToolOutputChunk(ctx: ToolContext, params: unknown): Promise<ToolResult> {
   const started = Date.now();
   const schema = z.object({ path: z.string().max(1000), offset: z.number().int().min(0).optional(), maxChars: z.number().int().min(100).max(100_000).optional() });
   const p = schema.safeParse(params);
@@ -344,11 +336,11 @@ export function readToolOutputChunk(ctx: ToolContext, params: unknown): Promise<
   try {
     const abs = ctx.safeResolve(p.data.path);
     if (!existsSync(abs) || !statSync(abs).isFile()) return Promise.resolve(fail("NOT_FOUND", `no such file: ${p.data.path}`, Date.now() - started));
-    const text = readFileSync(abs, "utf8");
     const offset = p.data.offset ?? 0;
     const max = p.data.maxChars ?? 8000;
-    const chunk = text.slice(offset, offset + max);
-    return Promise.resolve(ok(`chunk ${offset}..${offset + chunk.length}/${text.length}`, { path: p.data.path, offset, chunk, totalLength: text.length }, Date.now() - started));
+    const { chunk, total } = await readFileChunk(abs, offset, max);
+    const text = chunk.toString("utf8");
+    return ok(`chunk ${offset}..${offset + text.length}/${total}`, { path: p.data.path, offset, chunk: text, totalLength: total }, Date.now() - started);
   } catch (e) {
     return Promise.resolve(fail("FS", String(e), Date.now() - started));
   }

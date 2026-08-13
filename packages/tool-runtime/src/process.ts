@@ -29,6 +29,33 @@ export interface ProcessResult {
   signal: NodeJS.Signals | null;
 }
 
+/** Kill a PID and its descendants. Windows uses taskkill /T; Unix kills the process group. */
+export function killProcessTree(pid: number): Promise<void> {
+  if (!Number.isInteger(pid) || pid <= 0) return Promise.resolve();
+  if (process.platform === "win32") {
+    return new Promise((resolve) => {
+      const k = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
+        shell: false,
+        windowsHide: true,
+        stdio: "ignore",
+      });
+      const done = () => resolve();
+      k.on("close", done);
+      k.on("error", done);
+    });
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
+  return Promise.resolve();
+}
+
 export const DEFAULT_TIMEOUTS = {
   tool: 30_000,
   python: 60_000,
@@ -76,6 +103,7 @@ export class ProcessRunner {
           env,
           shell: false,
           windowsHide: true,
+          detached: process.platform !== "win32",
         });
       } catch (e) {
         resolvePromise({
@@ -95,7 +123,15 @@ export class ProcessRunner {
 
       const timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGKILL");
+        const pid = child.pid;
+        if (pid) void killProcessTree(pid);
+        else {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            /* ignore */
+          }
+        }
       }, opts.timeoutMs);
 
       const collect = (chunk: Buffer, isStdout: boolean) => {

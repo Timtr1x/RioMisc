@@ -29,7 +29,11 @@ export type TransitionEvent =
   | "SOLVER_ERROR"
   | "SOLVER_STOPPED"
   | "RESTART_SOLVER"
-  | "REOPEN";
+  | "REOPEN"
+  | "RECOVER_PREPARING"
+  | "RECOVER_ACTIVE"
+  | "RECOVER_VERIFYING"
+  | "RECOVER_SUBMITTING";
 
 export type LifecycleEventName =
   | "CHALLENGE_DISCOVERED"
@@ -45,7 +49,11 @@ export type LifecycleEventName =
   | "CHALLENGE_SUBMITTING"
   | "CHALLENGE_SOLVED"
   | "CHALLENGE_UNSUPPORTED"
-  | "CHALLENGE_ERROR";
+  | "CHALLENGE_ERROR"
+  | "CHALLENGE_RECOVERY_RESET_PREPARATION"
+  | "CHALLENGE_RECOVERY_REQUEUED"
+  | "CHALLENGE_RECOVERY_VERIFY_INTERRUPTED"
+  | "CHALLENGE_RECOVERY_SUBMIT_INTERRUPTED";
 
 const T: Partial<Record<ChallengeLifecycleStatus, Partial<Record<TransitionEvent, ChallengeLifecycleStatus>>>> = {
   DISCOVERED: {
@@ -57,6 +65,7 @@ const T: Partial<Record<ChallengeLifecycleStatus, Partial<Record<TransitionEvent
     PREPARE_DONE: "READY",
     PREPARE_FAILED: "ERROR",
     UNSUPPORTED: "UNSUPPORTED",
+    RECOVER_PREPARING: "DISCOVERED",
   },
   READY: {
     QUEUE: "QUEUED",
@@ -80,18 +89,21 @@ const T: Partial<Record<ChallengeLifecycleStatus, Partial<Record<TransitionEvent
     SOLVER_ERROR: "QUEUED",
     SOLVER_STOPPED: "QUEUED",
     RESTART_SOLVER: "QUEUED",
+    RECOVER_ACTIVE: "QUEUED",
   },
   VERIFYING: {
     VERIFY_FAIL: "ACTIVE",
     VERIFY_OK: "SUBMITTING",
     PAUSE: "PAUSED",
     SOLVER_ERROR: "QUEUED",
+    RECOVER_VERIFYING: "QUEUED",
   },
   SUBMITTING: {
     SUBMIT_CORRECT: "SOLVED",
     SUBMIT_WRONG: "ACTIVE",
     SUBMIT_RATE_LIMIT: "SUBMITTING",
     PAUSE: "PAUSED",
+    RECOVER_SUBMITTING: "QUEUED",
   },
   PAUSED: {
     RESUME: "QUEUED",
@@ -126,6 +138,10 @@ export const EVENT_FOR_TRANSITION: Partial<Record<TransitionEvent, LifecycleEven
   SOLVER_STOPPED: "CHALLENGE_QUEUED",
   RESTART_SOLVER: "CHALLENGE_QUEUED",
   REOPEN: "CHALLENGE_QUEUED",
+  RECOVER_PREPARING: "CHALLENGE_RECOVERY_RESET_PREPARATION",
+  RECOVER_ACTIVE: "CHALLENGE_RECOVERY_REQUEUED",
+  RECOVER_VERIFYING: "CHALLENGE_RECOVERY_VERIFY_INTERRUPTED",
+  RECOVER_SUBMITTING: "CHALLENGE_RECOVERY_SUBMIT_INTERRUPTED",
 };
 
 export interface TransitionContext {
@@ -186,6 +202,7 @@ export class StateMachine {
       patch.currentSolverType = null;
       if (event === "RESTART_SOLVER" || event === "REOPEN") patch.solverRestartCount = (challenge.solverRestartCount ?? 0) + 1;
     }
+    // Recovery events keep the session row so Pi can resume.
 
     const eventName = EVENT_FOR_TRANSITION[event];
     const events = this.repos.db.tx(() => {

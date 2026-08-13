@@ -116,6 +116,23 @@ export class ChallengeRepository {
     this.db.run("UPDATE challenges SET updated_at = ? WHERE id = ?", Date.now(), id);
   }
 
+  /** Remove the challenge and all per-challenge rows. Caller should stop workers first. */
+  deleteCascade(id: string): void {
+    this.db.tx(() => {
+      this.db.run("DELETE FROM challenge_revisions WHERE challenge_id = ?", id);
+      this.db.run("DELETE FROM attachments WHERE challenge_id = ?", id);
+      this.db.run("DELETE FROM artifacts WHERE challenge_id = ?", id);
+      this.db.run("DELETE FROM hints WHERE challenge_id = ?", id);
+      this.db.run("DELETE FROM solver_progress WHERE challenge_id = ?", id);
+      this.db.run("DELETE FROM solver_sessions WHERE challenge_id = ?", id);
+      this.db.run("DELETE FROM flag_candidates WHERE challenge_id = ?", id);
+      this.db.run("DELETE FROM submissions WHERE challenge_id = ?", id);
+      this.db.run("DELETE FROM worker_leases WHERE challenge_id = ?", id);
+      this.db.run("DELETE FROM domain_events WHERE challenge_id = ?", id);
+      this.db.run("DELETE FROM challenges WHERE id = ?", id);
+    });
+  }
+
   recordRevision(rev: {
     id: string;
     challengeId: string;
