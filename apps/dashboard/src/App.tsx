@@ -318,7 +318,7 @@ function Providers({ refresh }: { refresh: () => void }) {
       </div>
       <div className="panel">
         <h3>Providers</h3>
-        {data?.providers.map((p) => (
+        {data?.providers.filter((p) => p.enabled !== 0).map((p) => (
           <div key={p.id} style={{ marginBottom: 8 }}>
             <b>{p.displayName}</b> <span className="badge">{p.protocol}</span> <span className={`badge ${p.health === "HEALTHY" ? "ok" : p.health === "DOWN" ? "err" : "warn"}`}>{p.health}</span>
             <span className="muted"> {p.baseUrl}</span>
