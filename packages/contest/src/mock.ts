@@ -210,6 +210,16 @@ export class MockContestAdapter implements ContestAdapter {
       return { ok: false, correct: false, status: "RATE_LIMITED", message: "duplicate submission", raw: {} };
     }
     rec.flags.add(flag);
+    if (state.challenge.flag === "") {
+      // 外部注入的题目（URL 抓取等）没有已知答案 — 候选 flag 供人工验证
+      return {
+        ok: false,
+        correct: false,
+        status: "UNKNOWN",
+        message: `no known answer for external challenge — candidate "${flag}" requires manual verification`,
+        raw: { needsManualReview: true },
+      };
+    }
     if (flag === state.challenge.flag) {
       return { ok: true, correct: true, status: "CORRECT", raw: { remoteId } };
     }
@@ -297,6 +307,47 @@ export class MockContestAdapter implements ContestAdapter {
     const hasIds = (this.scenario.releaseSchedule ?? []).some((g) => g.challengeIds.length > 0);
     if (!hasIds) {
       this.scenario.releaseSchedule = [{ afterSeconds: 0, challengeIds: fixtures.map((f) => f.id) }];
+    }
+  }
+
+  /**
+   * 动态注入一道外部题目（来自 URL 抓取等），立即发布。
+   * 附件字节由 mock 的 HTTP server 提供，走完整下载/分析/解题流程。
+   */
+  addExternalChallenge(input: {
+    id: string;
+    title: string;
+    category: string;
+    description: string;
+    attachments: { name: string; data: Buffer }[];
+  }): void {
+    if (this.states.has(input.id)) {
+      throw new Error(`challenge ${input.id} already exists`);
+    }
+    const fixture: FixtureChallenge = {
+      id: input.id,
+      title: input.title,
+      description: input.description,
+      category: input.category,
+      flag: "", // 未知答案 — 提交返回 UNKNOWN，候选 flag 供人工验证
+      attachments: input.attachments.map((a) => ({ name: a.name, bytes: a.data })),
+    };
+    this.states.set(input.id, {
+      challenge: fixture,
+      releasedAt: 0,
+      startedAt: null,
+      title: input.title,
+      description: input.description,
+      updatedAt: null,
+    });
+    // 确保 releaseSchedule 覆盖它（poller 的 applySchedule 会发布）
+    const schedule = this.scenario.releaseSchedule ?? [];
+    const group = schedule.find((g) => g.afterSeconds === 0);
+    if (group) {
+      if (!group.challengeIds.includes(input.id)) group.challengeIds.push(input.id);
+    } else {
+      schedule.push({ afterSeconds: 0, challengeIds: [input.id] });
+      this.scenario.releaseSchedule = schedule;
     }
   }
 

@@ -19,7 +19,7 @@ export interface ApiDeps {
 }
 
 export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
-  const { fastify, control, repos, bus, registry } = deps;
+  const { fastify, control, repos, bus, registry, secrets } = deps;
 
   fastify.get("/api/status", async () => control.status());
 
@@ -188,6 +188,23 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
       reply.raw.end();
     });
     return reply;
+  });
+
+  // -------------------------------------------------------------------------
+  // Tasks — start a new task from a URL
+  // -------------------------------------------------------------------------
+
+  fastify.post("/api/tasks/from-url", async (req, reply) => {
+    const body = req.body as { url?: string };
+    if (!body?.url || !/^https?:\/\//i.test(body.url)) {
+      return reply.code(400).send({ error: "url must be an http(s) link" });
+    }
+    try {
+      const result = await control.addUrlChallenge(body.url);
+      return { ok: true, ...result };
+    } catch (e) {
+      return reply.code(400).send({ error: (e as Error).message });
+    }
   });
 
   // -------------------------------------------------------------------------

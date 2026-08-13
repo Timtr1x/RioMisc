@@ -642,6 +642,43 @@ Re-evaluate assumptions affected by this change.`;
     return this.workerPool.inject(challengeId, message);
   }
 
+  /**
+   * 从 URL 开始一道新任务：抓取题面/附件 → 注入当前比赛 → 自动进入
+   * 完整解题流程（Triage → Solver → 候选 Flag）。
+   */
+  async addUrlChallenge(url: string): Promise<{ challengeId: string; title: string; category: string; attachments: number; description: string }> {
+    const { fetchChallengeFromUrl } = await import("@rio/contest");
+    const fetched = await fetchChallengeFromUrl(url);
+    const slug = fetched.title.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 40) || "url-challenge";
+    // poller 会加 ch_ 前缀（remoteId → challenge id），这里用 url_ 前缀保证一致
+    const id = `url_${slug}_${Math.random().toString(36).slice(2, 6)}`;
+    const mock = this.deps.adapter as unknown as { addExternalChallenge?: (input: unknown) => void };
+    if (typeof mock.addExternalChallenge !== "function") {
+      throw new Error("当前比赛适配器不支持动态注入题目（仅 mock/local 模式支持）");
+    }
+    mock.addExternalChallenge({
+      id,
+      title: fetched.title,
+      category: fetched.category,
+      description: fetched.description,
+      attachments: fetched.attachments,
+    });
+    this.deps.bus.publish({
+      type: "URL_CHALLENGE_ADDED",
+      challengeId: id,
+      payload: { url, title: fetched.title, attachments: fetched.attachments.length },
+    });
+    this.deps.logger.info({ event: "url_challenge_added", challengeId: id, url, title: fetched.title });
+    return {
+      // poller 会用 ch_ 前缀创建 DB 行
+      challengeId: `ch_${id}`,
+      title: fetched.title,
+      category: fetched.category,
+      attachments: fetched.attachments.length,
+      description: fetched.description,
+    };
+  }
+
   async pause(challengeId: string, reason?: string): Promise<void> {
     const c = this.deps.repos.challenges.get(challengeId);
     if (!c) throw new Error("unknown challenge");

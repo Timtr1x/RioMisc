@@ -57,6 +57,26 @@ export function App() {
 }
 
 function Overview({ status, challenges, events }: { status: Status | null; challenges: ChallengeRow[]; events: string[] }) {
+  const [url, setUrl] = useState("");
+  const [taskMsg, setTaskMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [taskBusy, setTaskBusy] = useState(false);
+
+  const startTask = async () => {
+    const u = url.trim();
+    if (!u) return;
+    setTaskBusy(true);
+    setTaskMsg(null);
+    try {
+      const r = await api<{ challengeId: string; title: string; category: string; attachments: number }>("/tasks/from-url", { method: "POST", body: { url: u } });
+      setTaskMsg({ ok: true, text: `已开始任务「${r.title}」(${r.category})，附件 ${r.attachments} 个 → ${r.challengeId}` });
+      setUrl("");
+    } catch (e) {
+      setTaskMsg({ ok: false, text: String((e as Error).message) });
+    } finally {
+      setTaskBusy(false);
+    }
+  };
+
   if (!status) return <div className="muted">server not reachable</div>;
   const cards: [string, number | string][] = [
     ["Total", status.total],
@@ -74,6 +94,22 @@ function Overview({ status, challenges, events }: { status: Status | null; chall
   ];
   return (
     <>
+      <div className="panel">
+        <h3>▶ 开始新任务 — 输入题目网址（自动抓取题面+附件并解题）</h3>
+        <form>
+          <input
+            style={{ flex: 1, minWidth: 320 }}
+            placeholder="https://example.com/challenge 或 直接附件链接 .zip/.png/..."
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && startTask()}
+          />
+          <button type="button" onClick={startTask} disabled={taskBusy}>
+            {taskBusy ? "抓取中…" : "开始任务"}
+          </button>
+        </form>
+        {taskMsg && <div className={taskMsg.ok ? "ok" : "err"} style={{ marginTop: 8 }}>{taskMsg.text}</div>}
+      </div>
       <div className="cards">
         {cards.map(([lbl, num]) => (
           <div className="card" key={lbl}>
