@@ -49,6 +49,7 @@ export class ControlPlane {  private poller: Poller;
   private llmHeld = new Map<string, () => void>();
   private workerPool: WorkerPool;
   private schedulerTimer: NodeJS.Timeout | null = null;
+  private schedulerRunning = false;
   private hintTimer: NodeJS.Timeout | null = null;
   private watchdogTimer: NodeJS.Timeout | null = null;
   private preparing = new Set<string>();
@@ -227,6 +228,8 @@ Re-evaluate assumptions affected by this change.`;
   // -------------------------------------------------------------------------
 
   private async schedulerTick(): Promise<void> {
+    if (this.schedulerRunning) return; // never run two ticks concurrently
+    this.schedulerRunning = true;
     const { repos } = this.deps;
     try {
       // 1. DISCOVERED → prepare (queue with triage concurrency)
@@ -293,6 +296,8 @@ Re-evaluate assumptions affected by this change.`;
       }
     } catch (e) {
       this.deps.logger.error({ event: "scheduler_error", err: String(e) });
+    } finally {
+      this.schedulerRunning = false;
     }
   }
 

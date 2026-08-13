@@ -44,8 +44,13 @@ function send(msg: Record<string, unknown>): void {
 
 async function selectRuntime(preferred: "mock" | "pi", config: StartConfig): Promise<AgentRuntimeAdapter> {
   if (preferred === "pi") {
+    // 没有配置 provider 时直接走 mock——绝不加载 160MB 的 Pi SDK（启动快 10 倍）
+    if (!config.pi || config.pi.providers.length === 0) {
+      send({ type: "info", message: "pi runtime requested but no providers configured — using mock" });
+      return new MockAgentRuntime();
+    }
     const available = await PiAgentRuntimeAdapter.isAvailable();
-    if (available && config.pi && config.pi.providers.length > 0) {
+    if (available) {
       // decrypt API keys from the encrypted secrets file (never over IPC)
       const secrets = new FileSecretStore(config.pi.secretsFile, process.env.CTF_RUNTIME_MASTER_KEY);
       const providers: PiProviderSpec[] = [];
@@ -59,7 +64,7 @@ async function selectRuntime(preferred: "mock" | "pi", config: StartConfig): Pro
       }
       send({ type: "info", message: "pi runtime: no API keys resolvable — falling back to mock" });
     } else {
-      send({ type: "info", message: "pi runtime requested but SDK/providers unavailable — falling back to mock" });
+      send({ type: "info", message: "pi runtime requested but SDK unavailable — falling back to mock" });
     }
   }
   send({ type: "info", message: "using mock runtime" });

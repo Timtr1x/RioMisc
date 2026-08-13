@@ -144,7 +144,7 @@ export class WorkerPool {
     }, this.pingIntervalMs);
     timer.unref();
 
-    // send start config
+    // send start config; on timeout kill the child so it can't leak
     await new Promise<void>((resolveReady, rejectReady) => {
       const onMsg = (m: WorkerMessage) => {
         if (m.type === "ready") {
@@ -157,10 +157,18 @@ export class WorkerPool {
       };
       child.on("message", onMsg);
       child.send({ type: "start", config });
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         child.off("message", onMsg);
-        if (!handle.alive) rejectReady(new Error("worker died during startup"));
-      }, 20_000).unref();
+        handle.alive = false;
+        this.workers.delete(config.challengeId);
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* ignore */
+        }
+        rejectReady(new Error("worker startup timeout"));
+      }, 60_000);
+      timer.unref();
     });
 
     this.repos.leases.acquire({
