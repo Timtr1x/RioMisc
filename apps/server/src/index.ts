@@ -18,6 +18,15 @@ import { ControlPlane } from "./control/control-plane.js";
 import { buildApi } from "./api/routes.js";
 import Fastify from "fastify";
 
+function compileFlagPattern(raw: string | null | undefined): RegExp | null {
+  if (!raw) return null;
+  try {
+    return new RegExp(raw);
+  } catch (e) {
+    throw new Error(`invalid submission.flagPattern: ${(e as Error).message}`);
+  }
+}
+
 function resolveAgentRuntime(repos: ReturnType<typeof createRepositories>): "mock" | "pi" {
   const env = process.env.RIO_AGENT_RUNTIME;
   if (env === "mock" || env === "pi") return env;
@@ -126,6 +135,7 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     confidenceThreshold: config.submission.confidenceThreshold,
     localMaxWrong: config.submission.localMaxWrong,
     defaultCooldownMs: config.submission.defaultCooldownMs,
+    flagPattern: compileFlagPattern(config.submission.flagPattern),
     inject,
     onAutoSubmitDisabled: (challengeId) => {
       bus.publish({ type: "AUTO_SUBMIT_DISABLED", challengeId, payload: { reason: "max wrong reached" } });

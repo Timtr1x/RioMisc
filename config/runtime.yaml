@@ -22,6 +22,7 @@ submission:
   confidenceThreshold: 0.85
   localMaxWrong: 3         # after 3 wrong: AUTO_SUBMIT_DISABLED → manual review
   defaultCooldownMs: 60000
+  flagPattern: null        # null = prefix{payload} (flag / cumtctf / DASCTF / …)
 
 workers:
   solverConcurrency: 4     # 8-core host → max 4 concurrent solvers

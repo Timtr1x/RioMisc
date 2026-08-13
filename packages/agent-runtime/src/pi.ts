@@ -191,7 +191,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
       agentDir: this.piDir,
       modelRuntime,
       model,
-      thinkingLevel: "medium",
+      thinkingLevel: "high",
       sessionManager,
       resourceLoader: loader,
       customTools: tools,
@@ -260,16 +260,18 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
               api: API_MAP[spec.protocol],
               compat: {
                 supportsDeveloperRole: false,
-                supportsReasoningEffort: false,
-                // zai thinking 格式：Pi 会发送 thinking:{type:"disabled"} 关闭思考。
-                // 实测 opencode.ai/zen/go 的 reasoning 模型在 thinking 模式下
-                // 禁止工具调用，且要求回传 reasoning_content——关闭后一切正常。
-                thinkingFormat: "zai",
+                // DeepSeek: Pi sends thinking:{type:"enabled"|"disabled"} plus
+                // reasoning_effort when the session thinkingLevel is not off.
+                supportsReasoningEffort: true,
+                thinkingFormat: "deepseek",
+                // Replay assistant turns must include reasoning_content or some
+                // DeepSeek-compatible endpoints reject the next request.
+                requiresReasoningContentOnAssistantMessages: true,
               },
               models: [
                 {
                   id: spec.modelId,
-                  reasoning: true, // 配合 thinkingFormat:"zai"：无 reasoning_effort 时 Pi 发 thinking disabled
+                  reasoning: true,
                   contextWindow: spec.contextWindow,
                   maxTokens: spec.maxOutputTokens,
                 },

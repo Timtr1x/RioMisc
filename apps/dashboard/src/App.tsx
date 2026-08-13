@@ -1,8 +1,59 @@
 // RioMisc Dashboard — single page with tabs: Overview / Challenges / Detail / Providers.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, useEvents, fmtMs, type Status, type ChallengeRow, type ChallengeDetail } from "./api.js";
 
 type Tab = "overview" | "challenges" | "detail" | "providers";
+
+const TAB_LABEL: Record<Tab, string> = {
+  overview: "总览",
+  challenges: "题目",
+  detail: "详情",
+  providers: "模型",
+};
+
+const STATUS_ZH: Record<string, string> = {
+  DISCOVERED: "已发现",
+  PREPARING: "准备中",
+  READY: "就绪",
+  QUEUED: "排队",
+  ACTIVE: "解题中",
+  VERIFYING: "校验中",
+  SUBMITTING: "提交中",
+  SOLVED: "已解出",
+  PAUSED: "已暂停",
+  PARKED: "已搁置",
+  UNSUPPORTED: "不支持",
+  ERROR: "错误",
+  UNKNOWN: "未知",
+  ACTIVE_PROGRESS: "进行中",
+  STALLED: "停滞",
+  LOCKED: "未解锁",
+  ELIGIBLE: "可领取",
+  FETCHING: "获取中",
+  FETCHED: "已获取",
+  DECLINED: "已拒绝",
+  NOT_SUPPORTED: "不支持",
+  HEALTHY: "正常",
+  DEGRADED: "降级",
+  DOWN: "不可用",
+  PENDING: "待确认",
+  VERIFIED: "已验证",
+  REJECTED_LOCAL: "本地拒绝",
+  SUBMITTED: "已提交",
+  WRONG: "错误",
+  CORRECT: "正确",
+  SUBMISSION_UNKNOWN: "结果未知",
+  RATE_LIMITED: "限速",
+  SENDING: "发送中",
+  QUEUED_SUB: "排队提交",
+};
+
+function zh(code: string | null | undefined, fallback?: string): string {
+  if (!code) return fallback ?? "—";
+  return STATUS_ZH[code] ?? fallback ?? code;
+}
+
+const HEALTH_CLASS: Record<string, string> = { HEALTHY: "ok", DOWN: "err", DEGRADED: "warn" };
 
 export function App() {
   const [tab, setTab] = useState<Tab>("overview");
@@ -14,9 +65,14 @@ export function App() {
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
   useEffect(() => {
-    void api<Status>("/status").then(setStatus).catch(() => setStatus(null));
-    void api<ChallengeRow[]>("/challenges").then(setChallenges).catch(() => {});
-  }, [refreshKey, tab]);
+    const tick = () => {
+      void api<Status>("/status").then(setStatus).catch(() => setStatus(null));
+      void api<ChallengeRow[]>("/challenges").then(setChallenges).catch(() => {});
+    };
+    tick();
+    const timer = setInterval(tick, 2000);
+    return () => clearInterval(timer);
+  }, [refreshKey]);
 
   useEffect(() => {
     return useEvents((e) => {
@@ -30,13 +86,13 @@ export function App() {
       <header>
         <h1>⚡ RioMisc</h1>
         <span className="sub">
-          CTF Misc/Crypto Autonomous Runtime · adapter={status?.adapter ?? "…"} · agent={status?.agentRuntime ?? "…"} · workers {status?.workers ?? 0}/{status?.workerSlots ?? 0} · disk {status?.diskFreeGb ?? "…"}GB free
+          CTF Misc/Crypto 自动解题 · 适配器={status?.adapter ?? "…"} · 引擎={status?.agentRuntime === "pi" ? "真实模型" : status?.agentRuntime === "mock" ? "Mock" : "…"} · 工人 {status?.workers ?? 0}/{status?.workerSlots ?? 0} · 磁盘剩余 {status?.diskFreeGb ?? "…"}GB
         </span>
       </header>
       <nav>
         {(["overview", "challenges", "detail", "providers"] as Tab[]).map((t) => (
           <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
-            {t}
+            {TAB_LABEL[t]}
           </button>
         ))}
       </nav>
@@ -98,20 +154,20 @@ function Overview({
     }
   };
 
-  if (!status) return <div className="muted">server not reachable</div>;
+  if (!status) return <div className="muted">服务器未连接</div>;
   const cards: [string, number | string][] = [
-    ["Total", status.total],
-    ["Solved", status.solved],
-    ["Active", status.active],
-    ["Queued", status.queued],
-    ["Preparing", status.preparing],
-    ["Paused", status.paused],
-    ["Parked", status.parked],
-    ["Unsupported", status.unsupported],
-    ["Errors", status.error],
-    ["Misc solved", status.miscSolved],
-    ["Crypto solved", status.cryptoSolved],
-    ["Workers", `${status.workers}/${status.workerSlots}`],
+    ["题目总数", status.total],
+    ["已解出", status.solved],
+    ["解题中", status.active],
+    ["排队", status.queued],
+    ["准备中", status.preparing],
+    ["已暂停", status.paused],
+    ["已搁置", status.parked],
+    ["不支持", status.unsupported],
+    ["错误", status.error],
+    ["Misc 已解", status.miscSolved],
+    ["Crypto 已解", status.cryptoSolved],
+    ["工人", `${status.workers}/${status.workerSlots}`],
   ];
   return (
     <>
@@ -132,7 +188,7 @@ function Overview({
         {taskMsg && <div className={taskMsg.ok ? "ok" : "err"} style={{ marginTop: 8 }}>{taskMsg.text}</div>}
         {status.agentRuntime === "mock" && (
           <div className="warn" style={{ marginTop: 8 }}>
-            当前是 Mock Agent，不会调用大模型。在 Providers 里添加模型后重启，就会自动走真实 LLM。
+            当前是 Mock Agent，不会调用大模型。在「模型」页添加 Provider 后重启，就会自动走真实 LLM。
           </div>
         )}
         {status.adapter === "mock" && (
@@ -151,18 +207,18 @@ function Overview({
       </div>
       <div className="detail-grid">
         <div className="panel">
-          <h3>Provider health</h3>
-          {status.providers.length === 0 && <div className="muted">no providers configured</div>}
+          <h3>模型健康</h3>
+          {status.providers.length === 0 && <div className="muted">尚未配置 Provider</div>}
           {status.providers.map((p) => (
             <div key={p.id}>
-              {p.name} <span className={`badge ${p.health === "HEALTHY" ? "ok" : p.health === "DOWN" ? "err" : "warn"}`}>{p.health}</span>
+              {p.name} <span className={`badge ${HEALTH_CLASS[p.health] ?? "warn"}`}>{zh(p.health)}</span>
             </div>
           ))}
         </div>
         <div className="panel">
-          <h3>Recent events (SSE)</h3>
+          <h3>最近事件</h3>
           <div className="timeline">
-            {events.length === 0 && <div className="muted">waiting for events…</div>}
+            {events.length === 0 && <div className="muted">等待事件…</div>}
             {events.map((e, i) => (
               <div key={i} className="muted">{e}</div>
             ))}
@@ -173,7 +229,16 @@ function Overview({
   );
 }
 
-const FILTERS = ["ALL", "MISC", "CRYPTO", "SOLVED", "ACTIVE", "QUEUED", "UNSUPPORTED", "ERROR"];
+const FILTERS: { value: string; label: string }[] = [
+  { value: "ALL", label: "全部" },
+  { value: "MISC", label: "MISC" },
+  { value: "CRYPTO", label: "CRYPTO" },
+  { value: "SOLVED", label: "已解出" },
+  { value: "ACTIVE", label: "解题中" },
+  { value: "QUEUED", label: "排队" },
+  { value: "UNSUPPORTED", label: "不支持" },
+  { value: "ERROR", label: "错误" },
+];
 
 function Challenges({ challenges, onSelect }: { challenges: ChallengeRow[]; onSelect: (id: string) => void }) {
   const [filter, setFilter] = useState("ALL");
@@ -187,10 +252,12 @@ function Challenges({ challenges, onSelect }: { challenges: ChallengeRow[]; onSe
   return (
     <>
       <form style={{ marginBottom: 10 }}>
-        <label>Filter</label>
+        <label>筛选</label>
         <select value={filter} onChange={(e) => setFilter(e.target.value)}>
           {FILTERS.map((f) => (
-            <option key={f}>{f}</option>
+            <option key={f.value} value={f.value}>
+              {f.label}
+            </option>
           ))}
         </select>
       </form>
@@ -198,15 +265,15 @@ function Challenges({ challenges, onSelect }: { challenges: ChallengeRow[]; onSe
         <thead>
           <tr>
             <th>ID</th>
-            <th>Title</th>
-            <th>Cat</th>
-            <th>Score</th>
-            <th>Status</th>
-            <th>Prio</th>
-            <th>Elapsed</th>
-            <th>Progress</th>
-            <th>Hint</th>
-            <th>Wrong</th>
+            <th>标题</th>
+            <th>类型</th>
+            <th>分值</th>
+            <th>状态</th>
+            <th>优先级</th>
+            <th>耗时</th>
+            <th>进度</th>
+            <th>提示</th>
+            <th>错交</th>
             <th>Solver</th>
           </tr>
         </thead>
@@ -217,11 +284,11 @@ function Challenges({ challenges, onSelect }: { challenges: ChallengeRow[]; onSe
               <td>{c.title}</td>
               <td>{c.category}</td>
               <td>{c.score ?? "-"}</td>
-              <td><span className={`status s-${c.status}`}>{c.status}</span>{c.blockedReason ? <span className="err" title={c.blockedReason}> ⚠</span> : null}</td>
+              <td><span className={`status s-${c.status}`}>{zh(c.status)}</span>{c.blockedReason ? <span className="err" title={c.blockedReason}> ⚠</span> : null}</td>
               <td>{c.priorityScore ?? "-"}</td>
               <td>{fmtMs(c.elapsedMs)}</td>
-              <td>{c.progress}</td>
-              <td>{c.hint}</td>
+              <td>{c.progress === "UNKNOWN" ? "—" : zh(c.progress)}</td>
+              <td>{zh(c.hint)}</td>
               <td>{c.wrong}</td>
               <td>{c.solver ?? "-"}</td>
             </tr>
@@ -238,11 +305,16 @@ function Detail({ id, refresh }: { id: string; refresh: () => void }) {
   const [err, setErr] = useState("");
   useEffect(() => {
     if (!id) return;
-    void api<ChallengeDetail>(`/challenges/${id}`).then(setD).catch(() => setD(null));
+    const load = () => {
+      void api<ChallengeDetail>(`/challenges/${id}`).then(setD).catch(() => setD(null));
+    };
+    load();
+    const timer = setInterval(load, 2000);
+    return () => clearInterval(timer);
   }, [id, refresh]);
 
-  if (!id) return <div className="muted">select a challenge</div>;
-  if (!d) return <div className="muted">loading…</div>;
+  if (!id) return <div className="muted">请先选择一道题</div>;
+  if (!d) return <div className="muted">加载中…</div>;
 
   const act = async (path: string, method = "POST", body?: unknown) => {
     try {
@@ -257,82 +329,86 @@ function Detail({ id, refresh }: { id: string; refresh: () => void }) {
   return (
     <>
       <div className="panel">
-        <h3>{d.title} <span className={`status s-${d.lifecycleStatus}`}>{d.lifecycleStatus}</span> <span className="badge">{d.category}</span></h3>
+        <h3>{d.title} <span className={`status s-${d.lifecycleStatus}`}>{zh(d.lifecycleStatus)}</span> <span className="badge">{d.category}</span></h3>
         <p>{d.description}</p>
         <div className="buttons">
-          {d.lifecycleStatus === "ACTIVE" && <button onClick={() => act(`/challenges/${id}/pause`)}>Pause</button>}
-          {(d.lifecycleStatus === "PAUSED") && <button onClick={() => act(`/challenges/${id}/resume`)}>Resume</button>}
-          {d.lifecycleStatus === "ACTIVE" && <button onClick={() => act(`/challenges/${id}/park`)}>Park</button>}
-          {d.lifecycleStatus === "PARKED" && <button onClick={() => act(`/challenges/${id}/unpark`)}>Unpark</button>}
-          <button onClick={() => act(`/challenges/${id}/restart`)} className="danger">Restart Solver</button>
-          <button onClick={() => act(`/challenges/${id}/hint`)}>Force Hint</button>
-          <button onClick={() => act(`/challenges/${id}/reflection`)}>Reflection</button>
-          <button onClick={() => act(`/challenges/${id}/priority`, "POST", { priority: "HIGH" })}>Prio HIGH</button>
+          {d.lifecycleStatus === "ACTIVE" && <button onClick={() => act(`/challenges/${id}/pause`)}>暂停</button>}
+          {(d.lifecycleStatus === "PAUSED") && <button onClick={() => act(`/challenges/${id}/resume`)}>继续</button>}
+          {d.lifecycleStatus === "ACTIVE" && <button onClick={() => act(`/challenges/${id}/park`)}>搁置</button>}
+          {d.lifecycleStatus === "PARKED" && <button onClick={() => act(`/challenges/${id}/unpark`)}>取消搁置</button>}
+          <button onClick={() => act(`/challenges/${id}/restart`)} className="danger">重启 Solver</button>
+          <button onClick={() => act(`/challenges/${id}/hint`)}>强制取 Hint</button>
+          <button onClick={() => act(`/challenges/${id}/reflection`)}>反思</button>
+          <button onClick={() => act(`/challenges/${id}/priority`, "POST", { priority: "HIGH" })}>优先级：高</button>
         </div>
         <form>
-          <input placeholder="manual flag candidate" value={candidate} onChange={(e) => setCandidate(e.target.value)} />
-          <button type="button" onClick={() => { void act(`/challenges/${id}/candidate`, "POST", { value: candidate, confidence: 0.9, reason: "manual dashboard candidate" }); setCandidate(""); }}>Add Candidate</button>
+          <input placeholder="手动输入候选 Flag" value={candidate} onChange={(e) => setCandidate(e.target.value)} />
+          <button type="button" onClick={() => { void act(`/challenges/${id}/candidate`, "POST", { value: candidate, confidence: 0.9, reason: "dashboard 手动候选" }); setCandidate(""); }}>添加候选</button>
         </form>
         {err && <div className="err">{err}</div>}
       </div>
 
       <div className="detail-grid">
         <div className="panel">
-          <h3>Attachments</h3>
+          <h3>附件</h3>
           {d.attachments.map((a) => (
             <div key={a.id}>{a.name} <span className="muted">({a.sizeBytes ?? "?"}B, {a.downloadStatus})</span></div>
           ))}
-          {d.attachments.length === 0 && <div className="muted">none</div>}
-          <h3 style={{ marginTop: 10 }}>Artifacts</h3>
+          {d.attachments.length === 0 && <div className="muted">无</div>}
+          <h3 style={{ marginTop: 10 }}>产物</h3>
           {d.artifacts.slice(-10).map((a) => (
             <div key={a.id} className="muted">{a.operation}: {a.path} ({a.size}B)</div>
           ))}
-          <h3 style={{ marginTop: 10 }}>Hints</h3>
+          <h3 style={{ marginTop: 10 }}>官方 Hint</h3>
           {d.hints.map((h, i) => (
             <div key={i} className="warn">💡 {h.content}</div>
           ))}
         </div>
 
         <div className="panel">
-          <h3>Latest progress</h3>
-          {d.progress.length === 0 && <div className="muted">no progress yet</div>}
+          <h3>最新进度</h3>
+          {d.progress.length === 0 && <div className="muted">暂无进度</div>}
           {d.progress.slice(-3).reverse().map((p) => (
             <div key={p.id} style={{ marginBottom: 8 }}>
               <div>{p.summary}</div>
-              <div className="muted">confidence={p.confidence} stalled={p.stalled ? "yes" : "no"} · {new Date(p.createdAt).toLocaleTimeString()}</div>
+              <div className="muted">置信度={p.confidence} 停滞={p.stalled ? "是" : "否"} · {new Date(p.createdAt).toLocaleTimeString()}</div>
             </div>
           ))}
-          <h3 style={{ marginTop: 10 }}>Flag candidates</h3>
+          <h3 style={{ marginTop: 10 }}>候选 Flag</h3>
+          <div className="muted" style={{ marginBottom: 8 }}>
+            没有官方裁判时请人工选择：对 → 收题；错 → 告诉 Agent 继续跑。
+          </div>
           {d.candidates.map((c) => (
-            <div key={c.id}>
+            <div key={c.id} style={{ marginBottom: 6 }}>
               <span className={c.status === "CORRECT" ? "ok" : c.status === "WRONG" ? "err" : ""}>{c.value}</span>{" "}
-              <span className="badge">{c.status}</span> <span className="muted">conf={c.confidence}</span>
-              {(c.status === "VERIFIED" || c.status === "PENDING" || c.status === "SUBMISSION_UNKNOWN") && (
-                <>
+              <span className="badge">{zh(c.status)}</span> <span className="muted">置信度={c.confidence}</span>
+              {c.status !== "WRONG" && (
+                <span className="buttons" style={{ display: "inline", marginLeft: 8 }}>
                   {c.status === "VERIFIED" && (
-                    <button style={{ marginLeft: 6 }} onClick={() => act(`/challenges/${id}/submit`, "POST", { candidateId: c.id })}>
-                      Submit
-                    </button>
+                    <button onClick={() => act(`/challenges/${id}/submit`, "POST", { candidateId: c.id })}>提交裁判</button>
                   )}
-                  <button style={{ marginLeft: 6 }} onClick={() => act(`/challenges/${id}/accept`, "POST", { candidateId: c.id })}>
-                    Mark Solved
+                  {c.status !== "CORRECT" && (
+                    <button onClick={() => act(`/challenges/${id}/accept`, "POST", { candidateId: c.id })}>对，收题</button>
+                  )}
+                  <button className="danger" onClick={() => act(`/challenges/${id}/reject`, "POST", { candidateId: c.id })}>
+                    错，继续跑
                   </button>
-                </>
+                </span>
               )}
             </div>
           ))}
-          {d.candidates.length === 0 && <div className="muted">none</div>}
-          <h3 style={{ marginTop: 10 }}>Submissions</h3>
+          {d.candidates.length === 0 && <div className="muted">暂无</div>}
+          <h3 style={{ marginTop: 10 }}>提交记录</h3>
           {d.submissions.map((s) => (
             <div key={s.id}>
-              <span className={s.status === "CORRECT" ? "ok" : s.status === "WRONG" ? "err" : ""}>{s.flagValue}</span> <span className="badge">{s.status}</span>
+              <span className={s.status === "CORRECT" ? "ok" : s.status === "WRONG" ? "err" : ""}>{s.flagValue}</span> <span className="badge">{zh(s.status)}</span>
             </div>
           ))}
         </div>
       </div>
 
       <div className="panel">
-        <h3>Timeline</h3>
+        <h3>时间线</h3>
         <div className="timeline">
           {d.timeline.map((e) => (
             <div key={e.id ?? e.createdAt + e.type} className="muted">
@@ -381,43 +457,43 @@ function Providers({ refresh }: { refresh: () => void }) {
   return (
     <>
       <div className="panel">
-        <h3>Add provider</h3>
+        <h3>添加 Provider</h3>
         <form>
-          <input placeholder="display name" value={name} onChange={(e) => setName(e.target.value)} />
+          <input placeholder="显示名称" value={name} onChange={(e) => setName(e.target.value)} />
           <select value={protocol} onChange={(e) => setProtocol(e.target.value)}>
             <option>OPENAI_CHAT_COMPLETIONS</option>
             <option>OPENAI_RESPONSES</option>
             <option>ANTHROPIC_MESSAGES</option>
           </select>
-          <input placeholder="base url" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
-          <input placeholder="api key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
-          <button type="button" onClick={addProvider}>Add Provider</button>
+          <input placeholder="接口地址" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+          <input placeholder="API Key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+          <button type="button" onClick={addProvider}>添加 Provider</button>
         </form>
       </div>
       <div className="panel">
-        <h3>Providers</h3>
+        <h3>已配置的 Provider</h3>
         {data?.providers.filter((p) => p.enabled !== 0).map((p) => (
           <div key={p.id} style={{ marginBottom: 8 }}>
-            <b>{p.displayName}</b> <span className="badge">{p.protocol}</span> <span className={`badge ${p.health === "HEALTHY" ? "ok" : p.health === "DOWN" ? "err" : "warn"}`}>{p.health}</span>
+            <b>{p.displayName}</b> <span className="badge">{p.protocol}</span> <span className={`badge ${HEALTH_CLASS[p.health] ?? "warn"}`}>{zh(p.health)}</span>
             <span className="muted"> {p.baseUrl}</span>
             <div className="buttons">
-              <button onClick={() => test(p.id)}>Test Connection</button>
-              <button onClick={() => addModel(p.id)}>Add Model ({modelName || "model name"})</button>
-              <input placeholder="model name" value={modelName} onChange={(e) => setModelName(e.target.value)} style={{ width: 180 }} />
+              <button onClick={() => test(p.id)}>测试连接</button>
+              <button onClick={() => addModel(p.id)}>添加模型（{modelName || "先填模型名"}）</button>
+              <input placeholder="模型名称" value={modelName} onChange={(e) => setModelName(e.target.value)} style={{ width: 180 }} />
             </div>
             {data.models.filter((m) => m.providerId === p.id).map((m) => (
               <div key={m.id} className="muted">
-                model: {m.modelName} ({m.role})
+                模型：{m.modelName}（{m.role === "PRIMARY" ? "主模型" : m.role === "FALLBACK" ? "备用" : "普通"}）
                 {m.role !== "PRIMARY" && (
                   <button style={{ marginLeft: 8 }} onClick={() => void api(`/models/${m.id}/role`, { method: "POST", body: { role: "PRIMARY" } }).then(refresh).catch((e) => setMsg(String((e as Error).message)))}>
-                    Set PRIMARY
+                    设为主模型
                   </button>
                 )}
               </div>
             ))}
           </div>
         ))}
-        {data?.providers.length === 0 && <div className="muted">none</div>}
+        {data?.providers.length === 0 && <div className="muted">暂无</div>}
       </div>
       {msg && <div className="warn">{msg}</div>}
     </>

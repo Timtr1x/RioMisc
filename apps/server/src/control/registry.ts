@@ -95,13 +95,13 @@ export class ModelRegistry {
       return out;
     }
 
-    // Phase 2: tool call — probe how to disable thinking on this endpoint
-    // (some reasoning models forbid tool calls while thinking is on).
+    // Phase 2: tool call — keep thinking on first. DeepSeek needs to think
+    // AND call tools; only fall back to "off" probes if the endpoint rejects that.
     const probes: { label: string; extra: Record<string, unknown> }[] = [
-      { label: "thinking.disabled", extra: { thinking: { type: "disabled" } } },
-      { label: "reasoning_effort.none", extra: { reasoning_effort: "none" } },
-      { label: "thinkingConfig.0", extra: { thinkingConfig: { thinkingBudget: 0 } } },
+      { label: "thinking.enabled", extra: { thinking: { type: "enabled" }, reasoning_effort: "high" } },
+      { label: "thinking.enabled-only", extra: { thinking: { type: "enabled" } } },
       { label: "no-param", extra: {} },
+      { label: "thinking.disabled", extra: { thinking: { type: "disabled" } } },
     ];
     out.toolCall = false;
     let probeNote = "";
@@ -128,7 +128,7 @@ export class ModelRegistry {
         const toolCalls = Array.isArray(choice?.message?.tool_calls) ? choice.message.tool_calls : [];
         if (toolCalls.length > 0) {
           out.toolCall = true;
-          probeNote = ` (thinking 关闭方式: ${probe.label})`;
+          probeNote = ` (tool+thinking 探测: ${probe.label})`;
           break;
         }
         const finish = choice?.message ? (response?.choices as { finish_reason?: string }[] | undefined)?.[0]?.finish_reason : "?";

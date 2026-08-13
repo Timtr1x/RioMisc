@@ -127,10 +127,21 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     await control.manualSubmit((req.params as { id: string }).id, String(body.candidateId));
     return { ok: true };
   });
+  fastify.post("/api/challenges/:id/reverify", async (req) => {
+    const { id } = req.params as { id: string };
+    const result = await control.reconsiderRejected(id);
+    return { ok: true, ...result };
+  });
   fastify.post("/api/challenges/:id/accept", async (req) => {
     const { id } = req.params as { id: string };
     const body = req.body as { candidateId: string };
     await control.acceptCandidate(id, String(body.candidateId));
+    return { ok: true };
+  });
+  fastify.post("/api/challenges/:id/reject", async (req) => {
+    const { id } = req.params as { id: string };
+    const body = req.body as { candidateId: string };
+    await control.rejectCandidate(id, String(body.candidateId));
     return { ok: true };
   });
 
@@ -206,8 +217,17 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     const send = (e: { type: string; challengeId?: string | null; payload: Record<string, unknown>; createdAt: number }) => {
       reply.raw.write(`data: ${JSON.stringify(e)}\n\n`);
     };
+    reply.raw.write(`: connected\n\n`);
+    const heartbeat = setInterval(() => {
+      try {
+        reply.raw.write(`: ping\n\n`);
+      } catch {
+        /* closed */
+      }
+    }, 15_000);
     const unsubscribe = bus.subscribe(send);
     req.raw.on("close", () => {
+      clearInterval(heartbeat);
       unsubscribe();
       reply.raw.end();
     });

@@ -9,7 +9,14 @@ import { hashHex } from "@rio/shared";
 import type { EventBus } from "./bus.js";
 import type { StateMachine } from "../state-machine.js";
 
-const FLAG_PATTERN = /^flag\{[^}\n]+\}$/i;
+/** Default: any `prefix{payload}` used by real CTFs (flag{}, FLAG{}, cumtctf{}, DASCTF{}, …). */
+export const DEFAULT_FLAG_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,31}\{[^\r\n}]{1,400}\}$/;
+
+export function looksLikeCtfFlag(value: string, custom?: RegExp | null): boolean {
+  const v = value.trim();
+  if (custom) return custom.test(v);
+  return DEFAULT_FLAG_PATTERN.test(v);
+}
 
 export interface CandidateMsg {
   challengeId: string;
@@ -35,6 +42,7 @@ export class SubmissionManager {
       confidenceThreshold: number;
       localMaxWrong: number;
       defaultCooldownMs: number;
+      flagPattern?: RegExp | null;
       inject: (challengeId: string, message: string) => void;
       onAutoSubmitDisabled: (challengeId: string) => void;
       onCorrect: (challengeId: string) => void;
@@ -74,9 +82,16 @@ export class SubmissionManager {
     const autoDisabled = challenge.blockedReason === "MANUAL_REVIEW_REQUIRED";
     const willAutoSubmit = this.deps.autoSubmit && msg.confidence >= this.deps.confidenceThreshold && !autoDisabled;
 
-    repos.candidates.update(candidate.id, { status: willAutoSubmit ? "VERIFIED" : "PENDING" });
-    this.deps.bus.publish({ type: "FLAG_CANDIDATE_FOUND", challengeId: challenge.id, payload: { candidateId: candidate.id, value: msg.value, confidence: msg.confidence, status: willAutoSubmit ? "VERIFIED" : "PENDING" } });
+    const holdForHuman = !this.hasOfficialJudge(challenge);
+    const shown = holdForHuman || willAutoSubmit ? "VERIFIED" : "PENDING";
+    repos.candidates.update(candidate.id, { status: shown });
+    this.deps.bus.publish({ type: "FLAG_CANDIDATE_FOUND", challengeId: challenge.id, payload: { candidateId: candidate.id, value: msg.value, confidence: msg.confidence, status: shown } });
 
+    if (holdForHuman) {
+      this.deps.logger.info({ event: "flag_needs_review", challengeId: challenge.id, candidateId: candidate.id }, "no official judge — waiting for human accept/reject");
+      this.deps.bus.publish({ type: "FLAG_NEEDS_REVIEW", challengeId: challenge.id, payload: { candidateId: candidate.id, value: msg.value } });
+      return;
+    }
     if (willAutoSubmit) {
       this.deps.stateMachine.transition(challenge.id, "CANDIDATE_FOUND", { payload: { candidateId: candidate.id } });
       await this.submitCandidate(candidate, challenge);
@@ -85,14 +100,70 @@ export class SubmissionManager {
     }
   }
 
+  /** Idle / URL-injected challenges have no contest judge. */
+  hasOfficialJudge(challenge: Challenge): boolean {
+    const adapter = this.deps.adapter as { kind: string; getFixtureFlag?: (id: string) => string | null };
+    if (adapter.kind === "idle") return false;
+    if (typeof adapter.getFixtureFlag === "function") {
+      const known = adapter.getFixtureFlag(challenge.remoteId ?? "");
+      if (known === "") return false;
+    }
+    return true;
+  }
+
+  /**
+   * Re-run local verify on REJECTED_LOCAL candidates (e.g. after widening
+   * the flag-format regex). Passing ones follow the normal auto-submit path.
+   */
+  async reconsiderRejectedLocal(challengeId: string): Promise<{ reconsidered: number; passed: number }> {
+    const challenge = this.deps.repos.challenges.get(challengeId);
+    if (!challenge || challenge.lifecycleStatus === "SOLVED") return { reconsidered: 0, passed: 0 };
+    const rejected = this.deps.repos.candidates.listByChallenge(challengeId).filter((c) => c.status === "REJECTED_LOCAL");
+    let passed = 0;
+    for (const cand of rejected) {
+      let evidence: { type: string; path?: string; text?: string }[] = [];
+      try {
+        evidence = JSON.parse(cand.evidenceJson) as { type: string; path?: string; text?: string }[];
+      } catch {
+        evidence = [];
+      }
+      const verify = this.verifyLocal(challenge, {
+        challengeId,
+        sessionId: cand.sessionId ?? "",
+        value: cand.value,
+        confidence: cand.confidence,
+        reason: cand.reason,
+        evidence,
+      });
+      if (!verify.pass) continue;
+      passed += 1;
+      const autoDisabled = challenge.blockedReason === "MANUAL_REVIEW_REQUIRED";
+      const willAutoSubmit = this.deps.autoSubmit && cand.confidence >= this.deps.confidenceThreshold && !autoDisabled;
+      this.deps.repos.candidates.update(cand.id, { status: willAutoSubmit ? "VERIFIED" : "PENDING" });
+      this.deps.bus.publish({
+        type: "FLAG_CANDIDATE_FOUND",
+        challengeId,
+        payload: { candidateId: cand.id, value: cand.value, confidence: cand.confidence, status: willAutoSubmit ? "VERIFIED" : "PENDING", reconsidered: true },
+      });
+      if (willAutoSubmit) {
+        const fresh = this.deps.repos.challenges.get(challengeId);
+        if (fresh && fresh.lifecycleStatus !== "SOLVED") {
+          const ok = this.deps.stateMachine.transition(challengeId, "CANDIDATE_FOUND", { payload: { candidateId: cand.id } });
+          if (ok.allowed) await this.submitCandidate(cand, fresh);
+        }
+      }
+    }
+    return { reconsidered: rejected.length, passed };
+  }
+
   /** Local verifier (§73). */
   verifyLocal(challenge: Challenge, msg: CandidateMsg): { pass: boolean; reason: string } {
     const value = msg.value.trim();
     if (value.length === 0) return { pass: false, reason: "empty flag" };
     if (value.length > 500) return { pass: false, reason: "implausibly long flag" };
     if (/[\r\n]/.test(value)) return { pass: false, reason: "contains CR/LF" };
-    if (!FLAG_PATTERN.test(value)) {
-      return { pass: false, reason: `does not match flag format ${FLAG_PATTERN}` };
+    if (!looksLikeCtfFlag(value, this.deps.flagPattern)) {
+      return { pass: false, reason: `does not look like a CTF flag (expected prefix{payload}, got ${JSON.stringify(value.slice(0, 80))})` };
     }
     if (!msg.reason || msg.reason.trim().length < 5) return { pass: false, reason: "missing justification (reason required)" };
     // example detection: candidate appears verbatim in description/hint without evidence
@@ -208,7 +279,7 @@ export class SubmissionManager {
       case "ERROR":
       default: {
         const raw = (result.raw ?? {}) as { needsManualReview?: boolean };
-        if (raw.needsManualReview) {
+        if (raw.needsManualReview || !this.hasOfficialJudge(challenge) || /unknown challenge/i.test(result.message ?? "")) {
           // URL / idle tasks have no official judge — keep the candidate for the dashboard.
           if (candidate) repos.candidates.update(candidate.id, { status: "VERIFIED" });
           this.deps.bus.publish({
@@ -263,6 +334,12 @@ Treat the rejection as negative evidence.`;
   async recoverSubmitting(challengeId: string): Promise<void> {
     const challenge = this.deps.repos.challenges.get(challengeId);
     if (!challenge || challenge.lifecycleStatus !== "SUBMITTING") return;
+
+    if (!this.hasOfficialJudge(challenge)) {
+      this.deps.logger.info({ event: "recovery_hold_for_review", challengeId }, "no official judge — not retrying submit");
+      this.deps.stateMachine.transition(challengeId, "SUBMIT_WRONG", { payload: { reason: "no official judge" } });
+      return;
+    }
 
     // 1. a submission was sent but its outcome is unknown → resubmit once
     const unknown = this.deps.repos.submissions.findUnknownOutcome(challengeId);

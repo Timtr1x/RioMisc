@@ -71,6 +71,19 @@ describe("StateMachine", () => {
     expect(c.currentSolverType).toBe("MISC");
   });
 
+  it("reopens SOLVED when a human rejects the flag", () => {
+    sm.transition("ch_test", "PREPARE_START");
+    sm.transition("ch_test", "PREPARE_DONE");
+    sm.transition("ch_test", "QUEUE");
+    sm.transition("ch_test", "SCHEDULE", { solverType: "MISC", sessionId: "s1" });
+    sm.transition("ch_test", "CANDIDATE_FOUND");
+    sm.transition("ch_test", "VERIFY_OK");
+    sm.transition("ch_test", "SUBMIT_CORRECT");
+    expect(repos.challenges.get("ch_test")!.lifecycleStatus).toBe("SOLVED");
+    expect(sm.transition("ch_test", "REOPEN").to).toBe("QUEUED");
+    expect(repos.challenges.get("ch_test")!.lifecycleStatus).toBe("QUEUED");
+  });
+
   it("rejects invalid transitions and keeps state", () => {
     // SOLVED is terminal
     expect(sm.transition("ch_test", "PREPARE_START").to).toBe("PREPARING");

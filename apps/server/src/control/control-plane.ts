@@ -1,7 +1,7 @@
 // ControlPlane — the orchestrator (§3). Decides how the contest is played.
 // Polls → syncs challenges → prepares → triages → schedules → supervises
 // workers → verifies/submits → reacts to hints/feedback/recovery.
-import type { RioLogger, RuntimeConfig } from "@rio/shared";
+import { hashHex, type RioLogger, type RuntimeConfig } from "@rio/shared";
 import type { Repositories } from "@rio/database";
 import { SOLVER_CATEGORIES, type Challenge, type SolverType, type ModelRef } from "@rio/domain";
 import type { ContestAdapter } from "@rio/contest";
@@ -399,9 +399,11 @@ Re-evaluate assumptions affected by this change.`;
     return null;
   }
 
-  /** Idle mode ignores leftover mock/url rows from previous runs so they cannot steal workers. */
+  /** Idle mode skips leftover mock fixtures. URL / this-session tasks always run. */
   #schedulable(c: Challenge): boolean {
     if (this.deps.adapter.kind !== "idle") return true;
+    const remote = c.remoteId ?? "";
+    if (remote.startsWith("url_") || c.id.includes("_url_")) return true;
     return c.discoveredAt >= this.bootAt;
   }
 
@@ -718,6 +720,77 @@ Re-evaluate assumptions affected by this change.`;
       attachments: fetched.attachments.length,
       description: fetched.description,
     };
+  }
+
+  async reconsiderRejected(challengeId: string): Promise<{ reconsidered: number; passed: number }> {
+    return this.deps.submission.reconsiderRejectedLocal(challengeId);
+  }
+
+  /**
+   * Human says this candidate is wrong: mark it, tell the live solver (or
+   * requeue so the next session sees it in challenge.txt), keep solving.
+   */
+  async rejectCandidate(challengeId: string, candidateId: string): Promise<void> {
+    const { repos } = this.deps;
+    const challenge = repos.challenges.get(challengeId);
+    const candidate = repos.candidates.get(candidateId);
+    if (!challenge || !candidate) throw new Error("unknown challenge/candidate");
+    if (candidate.challengeId !== challengeId) throw new Error("candidate does not belong to this challenge");
+
+    if (candidate.status !== "WRONG") {
+      repos.candidates.update(candidateId, { status: "WRONG", submittedAt: Date.now() });
+      const sub = repos.submissions.createOrGet({
+        challengeId,
+        candidateId,
+        flagHash: hashHex(candidate.value),
+        flagValue: candidate.value,
+        status: "WRONG",
+      });
+      if (sub.status !== "WRONG") {
+        repos.submissions.update(sub.id, { status: "WRONG", submittedAt: Date.now(), error: "rejected by human reviewer" });
+      }
+      const wrongCount = repos.submissions.countWrong(challengeId);
+      repos.challenges.update(challengeId, { wrongSubmissionCount: wrongCount });
+    }
+
+    const status = repos.challenges.get(challengeId)!.lifecycleStatus;
+    if (status === "SOLVED") {
+      this.deps.stateMachine.transition(challengeId, "REOPEN", { payload: { reason: "human rejected flag" } });
+    } else if (status === "SUBMITTING") {
+      this.deps.stateMachine.transition(challengeId, "SUBMIT_WRONG", { payload: { reason: "human rejected flag" } });
+    } else if (status === "VERIFYING") {
+      this.deps.stateMachine.transition(challengeId, "VERIFY_FAIL", { payload: { reason: "human rejected flag" } });
+    } else if (status === "PAUSED") {
+      this.deps.stateMachine.transition(challengeId, "RESUME");
+    }
+
+    this.deps.preparation.refreshChallengeFile(challengeId);
+    this.deps.bus.publish({
+      type: "FLAG_REJECTED_BY_HUMAN",
+      challengeId,
+      payload: { candidateId, value: candidate.value },
+    });
+
+    const msg = `OFFICIAL SUBMISSION FEEDBACK
+
+A human reviewer rejected the following candidate:
+
+<${candidate.value}>
+
+Do not submit this exact candidate again.
+
+Re-evaluate the derivation that produced it.
+Treat the rejection as negative evidence and continue solving.`;
+    const injected = this.injectWorker(challengeId, msg);
+    if (!injected) {
+      // No live worker — put it back on the queue so a new session starts
+      // with the rejection listed in challenge.txt.
+      const now = repos.challenges.get(challengeId);
+      if (now && now.lifecycleStatus === "ACTIVE") {
+        this.deps.stateMachine.transition(challengeId, "SOLVER_STOPPED", { payload: { reason: "requeue after human reject" } });
+      }
+    }
+    this.deps.logger.info({ event: "flag_rejected_by_human", challengeId, candidateId, injected }, "human rejected candidate — solver continues");
   }
 
   async acceptCandidate(challengeId: string, candidateId: string): Promise<void> {

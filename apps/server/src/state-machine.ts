@@ -28,7 +28,8 @@ export type TransitionEvent =
   | "SUBMIT_RATE_LIMIT"
   | "SOLVER_ERROR"
   | "SOLVER_STOPPED"
-  | "RESTART_SOLVER";
+  | "RESTART_SOLVER"
+  | "REOPEN";
 
 export type LifecycleEventName =
   | "CHALLENGE_DISCOVERED"
@@ -61,6 +62,7 @@ const T: Partial<Record<ChallengeLifecycleStatus, Partial<Record<TransitionEvent
     QUEUE: "QUEUED",
     PAUSE: "PAUSED",
     UNSUPPORTED: "UNSUPPORTED",
+    CANDIDATE_FOUND: "VERIFYING",
   },
   QUEUED: {
     SCHEDULE: "ACTIVE",
@@ -68,6 +70,7 @@ const T: Partial<Record<ChallengeLifecycleStatus, Partial<Record<TransitionEvent
     PARK: "PARKED",
     UNSUPPORTED: "UNSUPPORTED",
     SOLVER_ERROR: "QUEUED",
+    CANDIDATE_FOUND: "VERIFYING",
   },
   ACTIVE: {
     PAUSE: "PAUSED",
@@ -97,7 +100,10 @@ const T: Partial<Record<ChallengeLifecycleStatus, Partial<Record<TransitionEvent
   PARKED: {
     UNPARK: "QUEUED",
   },
-  // ERROR, UNSUPPORTED, SOLVED are terminal.
+  SOLVED: {
+    REOPEN: "QUEUED",
+  },
+  // ERROR, UNSUPPORTED are terminal.
 };
 
 export const EVENT_FOR_TRANSITION: Partial<Record<TransitionEvent, LifecycleEventName>> = {
@@ -119,6 +125,7 @@ export const EVENT_FOR_TRANSITION: Partial<Record<TransitionEvent, LifecycleEven
   SOLVER_ERROR: "CHALLENGE_QUEUED",
   SOLVER_STOPPED: "CHALLENGE_QUEUED",
   RESTART_SOLVER: "CHALLENGE_QUEUED",
+  REOPEN: "CHALLENGE_QUEUED",
 };
 
 export interface TransitionContext {
@@ -174,10 +181,10 @@ export class StateMachine {
       patch.pausedReason = null;
       patch.parkedReason = null;
     }
-    if (event === "SOLVER_ERROR" || event === "SOLVER_STOPPED" || event === "RESTART_SOLVER") {
+    if (event === "SOLVER_ERROR" || event === "SOLVER_STOPPED" || event === "RESTART_SOLVER" || event === "REOPEN") {
       patch.currentSessionId = null;
       patch.currentSolverType = null;
-      if (event === "RESTART_SOLVER") patch.solverRestartCount = (challenge.solverRestartCount ?? 0) + 1;
+      if (event === "RESTART_SOLVER" || event === "REOPEN") patch.solverRestartCount = (challenge.solverRestartCount ?? 0) + 1;
     }
 
     const eventName = EVENT_FOR_TRANSITION[event];

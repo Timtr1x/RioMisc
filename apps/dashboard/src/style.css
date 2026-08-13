@@ -23,7 +23,7 @@ nav button.active { background: var(--blue); color: #0b0d12; border-color: var(-
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
 .card .num { font-size: 22px; font-weight: 700; }
-.card .lbl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.card .lbl { color: var(--muted); font-size: 11px; letter-spacing: 0.5px; }
 table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 th { background: #1b1f2a; color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; }

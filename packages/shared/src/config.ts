@@ -36,6 +36,8 @@ export const runtimeConfigSchema = z.object({
     confidenceThreshold: z.number().min(0).max(1).default(0.85),
     localMaxWrong: z.number().int().min(0).max(50).default(3),
     defaultCooldownMs: z.number().int().min(0).default(60_000),
+    /** Optional override. Default accepts prefix{payload} (flag{}, cumtctf{}, DASCTF{}, …). */
+    flagPattern: z.string().min(1).max(400).nullable().default(null),
   }).default({}),
 
   workers: z.object({

@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createRepositories } from "@rio/database";
 import { hashHex } from "@rio/shared";
+import { looksLikeCtfFlag } from "../../apps/server/src/control/submission.ts";
 
 describe("priority score", () => {
   const base = {
@@ -204,6 +205,18 @@ describe("fixtures validity", () => {
     expect(s.packetCount).toBe(2);
     expect(s.hasHttp).toBe(true);
     expect(s.sampleText).toContain("flag{pcap_ok}");
+  });
+});
+
+describe("flag format", () => {
+  it("accepts common CTF prefixes, not only flag{}", () => {
+    expect(looksLikeCtfFlag("flag{hello}")).toBe(true);
+    expect(looksLikeCtfFlag("FLAG{HELLO}")).toBe(true);
+    expect(looksLikeCtfFlag("cumtctf{1sb_i4_s0_Ea4y}")).toBe(true);
+    expect(looksLikeCtfFlag("DASCTF{abc}")).toBe(true);
+    expect(looksLikeCtfFlag("not a flag")).toBe(false);
+    expect(looksLikeCtfFlag("flag{}")).toBe(false);
+    expect(looksLikeCtfFlag("flag{has\nnewline}")).toBe(false);
   });
 });
 
