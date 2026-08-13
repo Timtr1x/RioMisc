@@ -1,6 +1,7 @@
 // Server bootstrap: config → DB → repos → services → control plane → API.
 import { resolve, join } from "node:path";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { createLogger, loadConfig, FileSecretStore, type RuntimeConfig } from "@rio/shared";
 import { createRepositories } from "@rio/database";
 import { MockContestAdapter, LocalContestAdapter, DiskManager, type ContestAdapter } from "@rio/contest";
@@ -40,7 +41,27 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
 
   const repos = createRepositories(join(dataDir, "database", "rio.sqlite"));
   const bus = new EventBus();
-  const secrets = new FileSecretStore(join(dataDir, "secrets.enc"), process.env.CTF_RUNTIME_MASTER_KEY);
+
+  // Master key for the encrypted secrets file (§56). Priority:
+  // env CTF_RUNTIME_MASTER_KEY > data/.master_key (auto-generated, persisted)
+  let masterKey = process.env.CTF_RUNTIME_MASTER_KEY ?? "";
+  const masterKeyFile = join(dataDir, ".master_key");
+  if (!masterKey) {
+    try {
+      masterKey = readFileSync(masterKeyFile, "utf8").trim();
+    } catch {
+      masterKey = randomBytes(32).toString("hex");
+      try {
+        writeFileSync(masterKeyFile, masterKey, { mode: 0o600 });
+        logger.info({ event: "master_key_generated" }, "generated persistent master key at data/.master_key");
+      } catch {
+        logger.warn({ event: "master_key_write_failed" }, "could not persist master key — secrets will not survive restarts");
+      }
+    }
+  }
+  const secrets = new FileSecretStore(join(dataDir, "secrets.enc"), masterKey);
+  // worker 子进程通过 env 继承 master key 以解密 API key
+  process.env.CTF_RUNTIME_MASTER_KEY = masterKey;
   const workspacesRoot = join(dataDir, "workspaces");
   const sessionsRoot = join(dataDir, "sessions");
   const workspace = new WorkspaceManager(workspacesRoot);

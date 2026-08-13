@@ -148,6 +148,20 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     return { ok: true, result };
   });
 
+  fastify.delete("/api/providers/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const provider = repos.providers.get(id);
+    if (!provider) return reply.code(404).send({ error: "unknown provider" });
+    // also drop the stored secret
+    try {
+      await secrets.delete(provider.apiKeyRef);
+    } catch {
+      /* no master key or missing secret — ignore */
+    }
+    repos.providers.update(id, { enabled: false });
+    return { ok: true };
+  });
+
   fastify.post("/api/models", async (req) => {
     const body = modelCreateSchema.parse(req.body);
     const model = await registry.addModel(body);

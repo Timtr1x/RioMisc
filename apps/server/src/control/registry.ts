@@ -61,6 +61,20 @@ export class ModelRegistry {
     if (!provider) throw new Error("unknown provider");
     const apiKey = await this.secrets.get(provider.apiKeyRef);
     if (!apiKey) throw new Error("no stored API key for this provider");
+
+    // Use a real model registered for this provider, never a hardcoded name.
+    const models = this.repos.models.listByProvider(providerId).filter((m) => m.enabled);
+    const modelName = models.find((m) => m.role === "PRIMARY")?.modelName ?? models[0]?.modelName;
+    if (!modelName) {
+      return {
+        authentication: false,
+        textApi: false,
+        toolCall: false,
+        latencyMs: 0,
+        message: "该 provider 还没有注册模型 — 请先在 Dashboard 添加模型（如 deepseek-v4-flash）",
+      };
+    }
+
     const started = Date.now();
     const out: TestConnectionResult = { authentication: false, textApi: false, toolCall: false, latencyMs: 0 };
 
@@ -69,7 +83,7 @@ export class ModelRegistry {
       const text = await this.#request(provider, apiKey, {
         messages: [{ role: "user", content: "Respond exactly with OK." }],
         max_tokens: 16,
-      });
+      }, false, modelName);
       out.authentication = true;
       out.textApi = typeof text === "string" && text.trim().toUpperCase() === "OK";
       if (!out.textApi) out.message = `text API replied: ${JSON.stringify(text).slice(0, 100)}`;
@@ -94,7 +108,7 @@ export class ModelRegistry {
           },
         ],
         tool_choice: "auto",
-      }, true)) as Record<string, unknown> | null;
+      }, true, modelName)) as Record<string, unknown> | null;
       out.toolCall = Array.isArray(response?.tool_calls) && response.tool_calls.length > 0;
       if (!out.toolCall) out.message = (out.message ?? "") + " | no tool call returned";
     } catch (e) {
@@ -115,15 +129,16 @@ export class ModelRegistry {
     apiKey: string,
     body: Record<string, unknown>,
     wantToolCalls = false,
+    modelName = "gpt-5",
   ): Promise<Record<string, unknown> | string | null> {
     const url = this.#endpoint(provider);
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (provider.protocol === "ANTHROPIC_MESSAGES") {
       headers["x-api-key"] = apiKey;
       headers["anthropic-version"] = "2023-06-01";
-      const payload = { ...body, model: "claude-sonnet-4-5" };
+      const payload = { ...body, model: modelName };
       const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
       const json = (await res.json()) as Record<string, unknown>;
       const blocks = (json.content as { type: string; text?: string; id?: string }[]) ?? [];
       const text = blocks.filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
@@ -132,9 +147,9 @@ export class ModelRegistry {
     }
     // OpenAI-style (completions or responses)
     headers["authorization"] = `Bearer ${apiKey}`;
-    const payload = provider.protocol === "OPENAI_RESPONSES" ? { ...body, model: "gpt-5" } : { ...body, model: "gpt-5" };
+    const payload = { ...body, model: modelName };
     const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const json = (await res.json()) as Record<string, unknown>;
     if (wantToolCalls) return json;
     const choices = (json.choices as { message?: { content?: string | null | { type: string; text: string }[] } }[]) ?? [];
@@ -144,15 +159,21 @@ export class ModelRegistry {
     return "";
   }
 
+  /**
+   * Endpoint resolution: baseUrl may or may not already include /v1
+   * (e.g. https://api.openai.com vs https://opencode.ai/zen/go/v1).
+   */
   #endpoint(provider: ModelProviderConfig): string {
+    const base = provider.baseUrl.replace(/\/+$/, "");
+    const hasV1 = /\/v\d+$/i.test(base) || /\/v\d+\/[a-z]+$/i.test(base);
     switch (provider.protocol) {
       case "ANTHROPIC_MESSAGES":
-        return `${provider.baseUrl}/v1/messages`;
+        return hasV1 ? `${base}/messages` : `${base}/v1/messages`;
       case "OPENAI_RESPONSES":
-        return `${provider.baseUrl}/v1/responses`;
+        return hasV1 ? `${base}/responses` : `${base}/v1/responses`;
       case "OPENAI_CHAT_COMPLETIONS":
       default:
-        return `${provider.baseUrl}/v1/chat/completions`;
+        return hasV1 ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
     }
   }
 
