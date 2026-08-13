@@ -14,6 +14,7 @@
     "solve": "tsx apps/cli/src/index.ts solve",
     "pi-smoke": "tsx scripts/pi-sdk-smoke.ts",
     "pi-e2e": "tsx scripts/pi-e2e.ts",
+    "url-fetch-test": "tsx scripts/url-fetch-test.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b",

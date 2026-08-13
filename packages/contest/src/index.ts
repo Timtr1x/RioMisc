@@ -5,3 +5,4 @@ export * from "./disk.js";
 export * from "./fixtures.js";
 export * from "./mock.js";
 export * from "./local.js";
+export * from "./url.js";

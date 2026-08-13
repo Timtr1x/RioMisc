@@ -16,8 +16,7 @@ async function api(path: string, opts: { method?: string; body?: unknown } = {})
   return res.json();
 }
 
-function table(rows: Record<string, unknown>[]): void {
-  if (rows.length === 0) {
+function table(rows: Record<string, unknown>[]): void {  if (rows.length === 0) {
     console.log("(empty)");
     return;
   }
@@ -27,6 +26,10 @@ function table(rows: Record<string, unknown>[]): void {
   console.log(fmt(rows[0]!));
   console.log(cols.map((c, i) => "-".repeat(widths[i]!)).join("  "));
   for (const r of rows.slice(1)) console.log(fmt(r));
+}
+
+function sanitize(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 80) || "challenge";
 }
 
 export async function main(argv: string[]): Promise<void> {
@@ -160,12 +163,41 @@ export async function main(argv: string[]): Promise<void> {
     });
 
   program
+    .command("solve-url <url>")
+    .description("Fetch a challenge from a URL (page / CTFd / direct attachment) and solve it")
+    .option("--out <dir>", "where to cache the fetched challenge", undefined)
+    .option("--timeout <seconds>", "max wait in seconds", "600")
+    .action(async (url, opts) => {
+      const { fetchChallengeFromUrl, writeChallengeToDir } = await import("@rio/contest");
+      const { resolve, join } = await import("node:path");
+      const { basename } = await import("node:path");
+      console.log(`🌐 抓取题目: ${url}`);
+      const fetched = await fetchChallengeFromUrl(url);
+      console.log(`   标题: ${fetched.title} | 分类: ${fetched.category} | 附件: ${fetched.attachments.length} 个`);
+      if (fetched.description) console.log(`   描述: ${fetched.description.slice(0, 300)}${fetched.description.length > 300 ? "…" : ""}`);
+      const outDir = opts.out ? resolve(opts.out) : resolve(process.cwd(), "challenges", sanitize(fetched.title));
+      await writeChallengeToDir(fetched, outDir);
+      console.log(`   已缓存到: ${outDir}`);
+
+      // 复用单题模式全流程
+      const { spawn } = await import("node:child_process");
+      const child = spawn(
+        process.execPath,
+        ["--import", "tsx", resolve(process.cwd(), "apps/cli/src/index.ts"), "solve", outDir, "--timeout", String(opts.timeout)],
+        { stdio: "inherit", env: { ...process.env } },
+      );
+      child.on("exit", (code) => process.exit(code ?? 1));
+    });
+
+  program
     .command("solve <folder>")
-    .description("Solve a single local challenge (challenge.json + attachments/ + answer.json)")
+    .description("Solve a single local challenge folder (challenge.json + attachments/ are enough; answer.json optional)")
     .option("--timeout <seconds>", "max wait in seconds", "600")
     .action(async (folder, opts) => {
       const { startRuntime } = await import("@rio/server");
       const { resolve } = await import("node:path");
+      const { existsSync } = await import("node:fs");
+      const hasAnswer = existsSync(resolve(folder, "answer.json"));
       const runtime = await startRuntime({
         skipApi: true,
         configOverrides: {
@@ -180,6 +212,17 @@ export async function main(argv: string[]): Promise<void> {
         await new Promise((r) => setTimeout(r, 2000));
         const c = runtime.repos.challenges.list()[0];
         if (!c) continue;
+        // No local answer: report the first credible candidate for manual verification.
+        if (!hasAnswer) {
+          const candidates = runtime.repos.candidates.listByChallenge(c.id);
+          const pending = candidates.find((k) => k.status !== "REJECTED_LOCAL");
+          if (pending) {
+            console.log(`\n🔑 候选 FLAG: ${pending.value}`);
+            console.log(`   (本地无 answer.json，无法自动验证 — 请到题目平台人工提交确认)`);
+            await runtime.close();
+            process.exit(0);
+          }
+        }
         if (c.lifecycleStatus === "SOLVED") {
           const flag = runtime.repos.submissions
             .listByChallenge(c.id)

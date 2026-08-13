@@ -1,10 +1,11 @@
 // LocalContestAdapter — single-challenge mode (`rio solve ./challenge`).
-// Directory layout:
-//   challenge/challenge.json   { title, category, description, score? }
-//   challenge/attachments/*    optional files
-//   challenge/answer.json      { flag: "..." } — used by submitFlag for verification
+// Works with raw downloaded CTF challenge folders (no answer.json needed):
+//   challenge/
+//   ├── challenge.json   { title, category, description, score? }   (optional — auto-generated from folder name)
+//   ├── attachments/     optional files
+//   └── answer.json      { flag: "..." }                             (optional — auto verification)
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, resolve, basename } from "node:path";
 import { createHash } from "node:crypto";
 import type {
   ContestCapabilities,
@@ -28,6 +29,8 @@ const answerJsonSchema = z.object({
   flag: z.string().min(1),
 });
 
+const META_NAMES = new Set(["challenge.json", "answer.json"]);
+
 export class LocalContestAdapter implements ContestAdapter {
   readonly kind = "local";
   private readonly root: string;
@@ -37,17 +40,34 @@ export class LocalContestAdapter implements ContestAdapter {
 
   constructor(challengeDir: string) {
     this.root = resolve(challengeDir);
-    this.meta = challengeJsonSchema.parse(JSON.parse(readFileSync(join(this.root, "challenge.json"), "utf8")));
-    const attDir = join(this.root, "attachments");
-    this.attachments = [];
+    // challenge.json is optional: raw downloaded folders work out of the box.
+    let metaRaw: unknown = {};
     try {
-      for (const name of readdirSync(attDir)) {
-        const p = join(attDir, name);
+      metaRaw = JSON.parse(readFileSync(join(this.root, "challenge.json"), "utf8"));
+    } catch {
+      metaRaw = { title: basename(this.root), category: "MISC", description: "" };
+    }
+    this.meta = challengeJsonSchema.parse(metaRaw);
+
+    // attachments: everything under attachments/, plus stray files in the root
+    // (excluding challenge.json / answer.json).
+    this.attachments = [];
+    const collect = (dir: string, metaFilesOnly = false) => {
+      let entries: string[] = [];
+      try {
+        entries = readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const name of entries) {
+        if (metaFilesOnly && META_NAMES.has(name)) continue;
+        const p = join(dir, name);
         if (statSync(p).isFile()) this.attachments.push({ name, path: p });
       }
-    } catch {
-      // no attachments dir
-    }
+    };
+    collect(join(this.root, "attachments"));
+    collect(this.root, true);
+
     try {
       this.flag = answerJsonSchema.parse(JSON.parse(readFileSync(join(this.root, "answer.json"), "utf8"))).flag;
     } catch {
@@ -93,7 +113,14 @@ export class LocalContestAdapter implements ContestAdapter {
 
   async submitFlag(_remoteId: string, flag: string): Promise<SubmissionResult> {
     if (this.flag === null) {
-      return { ok: false, correct: false, status: "ERROR", message: "no answer.json — verification impossible", raw: {} };
+      // No local answer to compare against: report the candidate for manual review.
+      return {
+        ok: false,
+        correct: false,
+        status: "UNKNOWN",
+        message: `no answer.json — candidate "${flag}" cannot be auto-verified (manual review)`,
+        raw: { needsManualReview: true },
+      };
     }
     if (flag === this.flag) {
       return { ok: true, correct: true, status: "CORRECT", raw: {} };
