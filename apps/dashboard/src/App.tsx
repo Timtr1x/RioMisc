@@ -1,6 +1,7 @@
 // RioMisc Dashboard — single page with tabs: Overview / Challenges / Detail / Providers.
 import { useCallback, useEffect, useState } from "react";
 import { api, useEvents, fmtMs, type Status, type ChallengeRow, type ChallengeDetail } from "./api.js";
+import { applyTheme, readTheme, type Theme } from "./theme.js";
 
 type Tab = "overview" | "challenges" | "detail" | "providers";
 
@@ -80,6 +81,22 @@ function zhHealth(code: string | null | undefined): string {
 
 const HEALTH_CLASS: Record<string, string> = { HEALTHY: "ok", DOWN: "err", DEGRADED: "warn" };
 
+function shortId(id: string): string {
+  if (id.startsWith("ch_url_") && id.length > 18) return `url…${id.slice(-6)}`;
+  if (id.length > 18) return `${id.slice(0, 8)}…${id.slice(-4)}`;
+  return id;
+}
+
+function shortTitle(title: string): string {
+  if (title.length > 36 && /^[a-f0-9]{32,}$/i.test(title)) return `${title.slice(0, 10)}…${title.slice(-8)}`;
+  return title;
+}
+
+function shortPath(path: string): string {
+  const parts = path.replaceAll("\\", "/").split("/");
+  return parts.length <= 3 ? parts.join("/") : parts.slice(-3).join("/");
+}
+
 function contestLabel(status: Status | null): string {
   if (!status) return "…";
   const c = status.contest;
@@ -89,8 +106,27 @@ function contestLabel(status: Status | null): string {
   return "未接入";
 }
 
+function tabFromHash(): Tab {
+  const h = window.location.hash.replace("#", "") as Tab;
+  return h in TAB_LABEL ? h : "overview";
+}
+
+function ThemeToggle() {
+  const [theme, setTheme] = useState<Theme>(() => (document.documentElement.getAttribute("data-theme") as Theme) || readTheme());
+  const toggle = () => {
+    const next: Theme = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    applyTheme(next);
+  };
+  return (
+    <button type="button" className="ghost" onClick={toggle} aria-pressed={theme === "light"} aria-label={theme === "dark" ? "切换到浅色模式" : "切换到深色模式"}>
+      {theme === "dark" ? "浅色模式" : "深色模式"}
+    </button>
+  );
+}
+
 export function App() {
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>(tabFromHash);
   const [status, setStatus] = useState<Status | null>(null);
   const [challenges, setChallenges] = useState<ChallengeRow[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -110,22 +146,33 @@ export function App() {
 
   useEffect(() => {
     return useEvents((e) => {
-      setEvents((prev) => [new Date(e.createdAt).toLocaleTimeString() + " " + e.type, ...prev].slice(0, 60));
+      const flag = typeof e.payload?.value === "string" ? ` ${e.payload.value}` : "";
+      const title = e.type === "FLAG_CANDIDATE_FOUND" ? `出 Flag${flag}` : e.type;
+      setEvents((prev) => [`${new Date(e.createdAt).toLocaleTimeString()} ${title}`, ...prev].slice(0, 60));
       setRefreshKey((k) => k + 1);
     });
   }, []);
 
   return (
     <>
-      <header>
-        <h1>⚡ RioMisc</h1>
-        <span className="sub">
-          CTF Misc/Crypto 自动解题 · 比赛={contestLabel(status)} · 引擎={status?.agentRuntime === "pi" ? "真实模型" : status?.agentRuntime === "mock" ? "Mock" : "…"} · 执行={status?.executionMode === "NATIVE_TRUSTED" ? "Native / Trusted" : status?.executionMode ?? "…"} · 工人 {status?.workers ?? 0}/{status?.workerSlots ?? 0} · 磁盘剩余 {status?.diskFreeGb ?? "…"}GB
-        </span>
+      <header className="app-header">
+        <div>
+          <h1>RioMisc</h1>
+          <div className="header-meta">
+            <span className="chip">比赛 <b>{contestLabel(status)}</b></span>
+            <span className="chip">引擎 <b>{status?.agentRuntime === "pi" ? "真实模型" : status?.agentRuntime === "mock" ? "Mock" : "…"}</b></span>
+            <span className="chip">执行 <b>{status?.executionMode === "NATIVE_TRUSTED" ? "Native / Trusted" : status?.executionMode ?? "…"}</b></span>
+            <span className="chip">工人 <b>{status?.workers ?? 0}/{status?.workerSlots ?? 0}</b></span>
+            <span className="chip">磁盘 <b>{status?.diskFreeGb ?? "…"}GB</b></span>
+          </div>
+        </div>
+        <div className="header-actions">
+          <ThemeToggle />
+        </div>
       </header>
       <nav>
         {(["overview", "challenges", "detail", "providers"] as Tab[]).map((t) => (
-          <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
+          <button key={t} className={tab === t ? "active" : ""} onClick={() => { setTab(t); window.location.hash = t; }}>
             {TAB_LABEL[t]}
           </button>
         ))}
@@ -167,7 +214,7 @@ export function App() {
           }}
         />
       )}
-      {tab === "providers" && <Providers refresh={refresh} />}
+      {tab === "providers" && <Providers refresh={refresh} refreshKey={refreshKey} />}
     </>
   );
 }
@@ -248,58 +295,69 @@ function Overview({
     }
   };
 
-  if (!status) return <div className="muted">服务器未连接</div>;
-  const cards: [string, number | string][] = [
-    ["题目总数", status.total],
-    ["已解出", status.solved],
+  if (!status) return <div className="panel empty">服务器未连接。确认 API 已在 127.0.0.1:3000 启动。</div>;
+  const pipeline: [string, number | string][] = [
     ["解题中", status.active],
     ["排队", status.queued],
     ["准备中", status.preparing],
     ["已暂停", status.paused],
     ["已搁置", status.parked],
-    ["不支持", status.unsupported],
-    ["错误", status.error],
     ["Blocked", status.blocked ?? 0],
     ["Unknown 提交", status.unknownSubmissions ?? 0],
+  ];
+  const results: [string, number | string][] = [
+    ["题目总数", status.total],
+    ["已解出", status.solved],
     ["Misc 已解", status.miscSolved],
     ["Crypto 已解", status.cryptoSolved],
+    ["不支持", status.unsupported],
+    ["错误", status.error],
     ["工人", `${status.workers}/${status.workerSlots}`],
   ];
   return (
     <>
       <div className="panel">
-        <h3>▶ 接入比赛 — 全自动拉题 / 下载 / 派工 / 交 flag</h3>
-        <p className="muted" style={{ margin: "0 0 10px" }}>
+        <h3>接入比赛 — 全自动拉题 / 下载 / 派工 / 交 flag</h3>
+        <p className="muted">
           连上之后 Poller 会周期性拉题单，新题自动进解题流水线。没有赛事 API 时先点「接入演示比赛」。
         </p>
         <div className="buttons" style={{ marginTop: 0 }}>
-          <button type="button" onClick={() => void connectContest("mock")} disabled={contestBusy || connected}>
+          <button type="button" className="primary" onClick={() => void connectContest("mock")} disabled={contestBusy || connected}>
             {contestBusy && !contestUrl ? "接入中…" : "接入演示比赛（Mock，无需平台）"}
           </button>
           <button type="button" className="danger" onClick={() => void disconnectContest()} disabled={contestBusy || !connected}>
             断开比赛
           </button>
         </div>
-        <form style={{ marginTop: 10 }}>
-          <input
-            style={{ flex: 1, minWidth: 260 }}
-            placeholder="CTFd / DASCTF 地址，如 https://ctf.example.com"
-            value={contestUrl}
-            onChange={(e) => setContestUrl(e.target.value)}
-          />
-          <input
-            type="password"
-            style={{ minWidth: 180 }}
-            placeholder="Access Token（可选）"
-            value={contestToken}
-            onChange={(e) => setContestToken(e.target.value)}
-          />
-          <input
-            style={{ minWidth: 180 }}
-            placeholder="Cookie（可选）"
-            value={contestCookie}
-            onChange={(e) => setContestCookie(e.target.value)}
-          />
+        <form className="field-row">
+          <div className="field">
+            <label htmlFor="contest-url">比赛地址</label>
+            <input
+              id="contest-url"
+              placeholder="https://ctf.example.com"
+              value={contestUrl}
+              onChange={(e) => setContestUrl(e.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="contest-token">Access Token（可选）</label>
+            <input
+              id="contest-token"
+              type="password"
+              placeholder="Token"
+              value={contestToken}
+              onChange={(e) => setContestToken(e.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="contest-cookie">Cookie（可选）</label>
+            <input
+              id="contest-cookie"
+              placeholder="Cookie"
+              value={contestCookie}
+              onChange={(e) => setContestCookie(e.target.value)}
+            />
+          </div>
           <button type="button" onClick={() => void connectContest("ctfd")} disabled={contestBusy || !contestUrl.trim()}>
             {contestBusy ? "连接中…" : "接入 CTFd"}
           </button>
@@ -325,22 +383,39 @@ function Overview({
       </div>
       <div className="panel">
         <h3>单题模式 — 粘贴一道题的网址（自动抓取题面+附件并解题）</h3>
-        <form>
-          <input
-            style={{ flex: 1, minWidth: 320 }}
-            placeholder="https://example.com/challenge 或 直接附件链接 .zip/.png/..."
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && startTask()}
-          />
-          <button type="button" onClick={startTask} disabled={taskBusy}>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void startTask();
+          }}
+        >
+          <div className="field">
+            <label htmlFor="task-url">题目或附件 URL</label>
+            <input
+              id="task-url"
+              placeholder="https://example.com/challenge 或 直接附件链接 .zip/.png/..."
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+            />
+          </div>
+          <button type="submit" className="primary" disabled={taskBusy}>
             {taskBusy ? "抓取中…" : "开始任务"}
           </button>
         </form>
-        {taskMsg && <div className={taskMsg.ok ? "ok" : "err"} style={{ marginTop: 8 }}>{taskMsg.text}</div>}
+        {taskMsg && <div className={taskMsg.ok ? "ok" : "err"}>{taskMsg.text}</div>}
       </div>
+      <p className="section-label">当前流水线</p>
       <div className="cards">
-        {cards.map(([lbl, num]) => (
+        {pipeline.map(([lbl, num]) => (
+          <div className="card" key={lbl}>
+            <div className="num">{num}</div>
+            <div className="lbl">{lbl}</div>
+          </div>
+        ))}
+      </div>
+      <p className="section-label">累计结果</p>
+      <div className="cards">
+        {results.map(([lbl, num]) => (
           <div className="card" key={lbl}>
             <div className="num">{num}</div>
             <div className="lbl">{lbl}</div>
@@ -350,7 +425,7 @@ function Overview({
       <div className="detail-grid">
         <div className="panel">
           <h3>模型健康</h3>
-          {status.providers.length === 0 && <div className="muted">尚未配置 Provider</div>}
+          {status.providers.length === 0 && <div className="empty">尚未配置 Provider</div>}
           {status.providers.map((p) => (
             <div key={p.id}>
               {p.name} <span className={`badge ${HEALTH_CLASS[p.health] ?? "warn"}`}>{zhHealth(p.health)}</span>
@@ -360,7 +435,7 @@ function Overview({
         <div className="panel">
           <h3>最近事件</h3>
           <div className="timeline">
-            {events.length === 0 && <div className="muted">等待事件…</div>}
+            {events.length === 0 && <div className="empty">等待事件…</div>}
             {events.map((e, i) => (
               <div key={i} className="muted">{e}</div>
             ))}
@@ -401,65 +476,76 @@ function Challenges({
   });
   return (
     <>
-      <form style={{ marginBottom: 10 }}>
-        <label>筛选</label>
-        <select value={filter} onChange={(e) => setFilter(e.target.value)}>
+      <form>
+        <div className="field" style={{ flex: "0 0 180px" }}>
+        <label htmlFor="challenge-filter">筛选</label>
+        <select id="challenge-filter" value={filter} onChange={(e) => setFilter(e.target.value)}>
           {FILTERS.map((f) => (
             <option key={f.value} value={f.value}>
               {f.label}
             </option>
           ))}
         </select>
+        </div>
       </form>
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>标题</th>
-            <th>类型</th>
-            <th>分值</th>
-            <th>状态</th>
-            <th>优先级</th>
-            <th>耗时</th>
-            <th>进度</th>
-            <th>提示</th>
-            <th>错交</th>
-            <th>Solver</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((c) => (
-            <tr key={c.id} className={c.status === "SOLVED" ? "solved" : ""} onClick={() => onSelect(c.id)} style={{ cursor: "pointer" }}>
-              <td>{c.id}</td>
-              <td>{c.title}</td>
-              <td>{c.category}</td>
-              <td>{c.score ?? "-"}</td>
-              <td><span className={`status s-${c.status}`}>{zhLife(c.status)}</span>{c.blockedReason ? <span className="err" title={c.blockedReason}> ⚠</span> : null}</td>
-              <td>{c.priorityScore ?? "-"}</td>
-              <td>{fmtMs(c.elapsedMs)}</td>
-              <td>{zhProgress(c.progress)}</td>
-              <td>{zhHint(c.hint)}</td>
-              <td>{c.wrong}</td>
-              <td>{c.solver ?? "-"}</td>
-              <td>
-                <button
-                  className="danger"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (!window.confirm(`删除「${c.title}」？会停掉 Solver、清掉 workspace，并且不会再自动拉回。`)) return;
-                    void api(`/challenges/${c.id}`, { method: "DELETE" })
-                      .then(() => onDeleted(c.id))
-                      .catch((err) => window.alert(String((err as Error).message)));
-                  }}
-                >
-                  删除
-                </button>
-              </td>
+      {rows.length === 0 ? (
+        <div className="panel empty">没有符合筛选的题目。</div>
+      ) : (
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th className="clip">ID</th>
+              <th className="wrap">标题</th>
+              <th>类型</th>
+              <th>状态</th>
+              <th>耗时</th>
+              <th className="wrap">Flag</th>
+              <th>进度</th>
+              <th>错交</th>
+              <th></th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((c) => (
+              <tr key={c.id} className={c.status === "SOLVED" ? "solved" : ""} onClick={() => onSelect(c.id)} style={{ cursor: "pointer" }}>
+                <td className="clip" title={c.id}>{shortId(c.id)}</td>
+                <td className="wrap" title={c.title}>{shortTitle(c.title)}</td>
+                <td>{c.category}</td>
+                <td><span className={`status s-${c.status}`}>{zhLife(c.status)}</span>{c.blockedReason ? <span className="err" title={c.blockedReason}> ⚠</span> : null}</td>
+                <td>{fmtMs(c.elapsedMs)}</td>
+                <td className="flag-cell">
+                  {c.flag ? (
+                    <>
+                      <span className={c.flagStatus === "CORRECT" || c.flagStatus === "VERIFIED" ? "ok" : ""}>{c.flag}</span>
+                      <div className="muted">{zhFlag(c.flagStatus)}{c.flagAt ? ` · ${new Date(c.flagAt).toLocaleTimeString()}` : ""}</div>
+                    </>
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
+                <td>{zhProgress(c.progress)}</td>
+                <td>{c.wrong}</td>
+                <td>
+                  <button
+                    className="danger"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!window.confirm(`删除「${c.title}」？会停掉 Solver、清掉 workspace，并且不会再自动拉回。`)) return;
+                      void api(`/challenges/${c.id}`, { method: "DELETE" })
+                        .then(() => onDeleted(c.id))
+                        .catch((err) => window.alert(String((err as Error).message)));
+                    }}
+                  >
+                    删除
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      )}
     </>
   );
 }
@@ -525,8 +611,8 @@ function Detail({
     return () => clearInterval(timer);
   }, [load, refreshKey]);
 
-  if (!id) return <div className="muted">请先选择一道题</div>;
-  if (!d) return <div className="muted">加载中…</div>;
+  if (!id) return <div className="panel empty">请先在「题目」里选一道题</div>;
+  if (!d) return <div className="panel empty">加载中…</div>;
 
   const act = async (path: string, method = "POST", body?: unknown) => {
     setBusy(true);
@@ -632,6 +718,36 @@ function Detail({
         {err && <div className="err">{err}</div>}
       </div>
 
+      {d.candidates.length > 0 && (
+        <div className="panel flag-banner">
+          <h3>Agent 给出了 Flag</h3>
+          {[...d.candidates].reverse().slice(0, 3).map((c) => (
+            <div key={c.id} style={{ marginBottom: 8 }}>
+              <code>{c.value}</code>
+              <div className="muted">
+                {zhFlag(c.status)} · 置信度={c.confidence} · {new Date(c.createdAt).toLocaleTimeString()}
+                {c.reason ? ` · ${c.reason}` : ""}
+              </div>
+              {c.status !== "WRONG" && c.status !== "CORRECT" && (
+                <div className="buttons" style={{ marginTop: 6 }}>
+                  {c.status === "VERIFIED" && (
+                    <button disabled={busy} onClick={() => act(`/challenges/${id}/submit`, "POST", { candidateId: c.id })}>
+                      提交裁判
+                    </button>
+                  )}
+                  <button disabled={busy} onClick={() => act(`/challenges/${id}/accept`, "POST", { candidateId: c.id })}>
+                    对，收题
+                  </button>
+                  <button className="danger" disabled={busy} onClick={() => act(`/challenges/${id}/reject`, "POST", { candidateId: c.id })}>
+                    错，继续跑
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {reflection && (
         <div className="panel">
           <h3>反思结果</h3>
@@ -674,7 +790,7 @@ function Detail({
         if (!unknownSub && !unknownCand && d.blockedReason !== "SUBMISSION_OUTCOME_UNKNOWN") return null;
         const flag = unknownCand?.value ?? unknownSub?.flagValue ?? "";
         return (
-          <div className="panel" style={{ borderColor: "#c90", background: "rgba(200,140,0,0.08)" }}>
+          <div className="panel warn-banner">
             <h3>提交结果未知</h3>
             <p>
               Flag: <code>{flag}</code>
@@ -704,12 +820,12 @@ function Detail({
         <div className="panel">
           <h3>附件</h3>
           {d.attachments.map((a) => (
-            <div key={a.id}>{a.name} <span className="muted">({a.sizeBytes ?? "?"}B, {a.downloadStatus})</span></div>
+            <div key={a.id} className="break">{a.name} <span className="muted">({a.sizeBytes ?? "?"}B, {a.downloadStatus})</span></div>
           ))}
           {d.attachments.length === 0 && <div className="muted">无</div>}
           <h3 style={{ marginTop: 10 }}>产物</h3>
           {d.artifacts.slice(-10).map((a) => (
-            <div key={a.id} className="muted">{a.operation}: {a.path} ({a.size}B)</div>
+            <div key={a.id} className="muted break" title={a.path}>{a.operation}: {shortPath(a.path)} ({a.size}B)</div>
           ))}
           <h3 style={{ marginTop: 10 }}>Session</h3>
           {(d.sessions ?? []).length === 0 && <div className="muted">无</div>}
@@ -720,7 +836,7 @@ function Detail({
           ))}
           <h3 style={{ marginTop: 10 }}>官方 Hint</h3>
           {d.hints.map((h, i) => (
-            <div key={i} className="warn">💡 {h.content}</div>
+            <div key={i} className="warn">{h.content}</div>
           ))}
         </div>
 
@@ -778,81 +894,241 @@ function Detail({
   );
 }
 
-function Providers({ refresh }: { refresh: () => void }) {
-  const [data, setData] = useState<{ providers: { id: string; displayName: string; protocol: string; baseUrl: string; health: string; enabled: number }[]; models: { id: string; providerId: string; modelName: string; role: string }[] } | null>(null);
+type ProviderRow = {
+  id: string;
+  displayName: string;
+  protocol: string;
+  baseUrl: string;
+  health: string;
+  enabled: number | boolean;
+};
+type ModelRow = { id: string; providerId: string; modelName: string; role: string; enabled?: number | boolean };
+
+function isOn(v: number | boolean | undefined): boolean {
+  return v !== 0 && v !== false;
+}
+
+function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: number }) {
+  const [data, setData] = useState<{ providers: ProviderRow[]; models: ModelRow[] } | null>(null);
   const [name, setName] = useState("");
   const [protocol, setProtocol] = useState("OPENAI_CHAT_COMPLETIONS");
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com");
   const [apiKey, setApiKey] = useState("");
-  const [modelName, setModelName] = useState("");
-  const [msg, setMsg] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const load = useCallback(() => {
+    void api<{ providers: ProviderRow[]; models: ModelRow[] }>("/providers")
+      .then(setData)
+      .catch((e) => setMsg({ ok: false, text: String((e as Error).message) }));
+  }, []);
+
   useEffect(() => {
-    void api("/providers").then(setData).catch(() => {});
-  }, [refresh]);
+    load();
+  }, [load, refreshKey]);
+
+  const done = () => {
+    load();
+    refresh();
+  };
 
   const addProvider = async () => {
+    if (!name.trim() || !baseUrl.trim() || !apiKey.trim()) {
+      setMsg({ ok: false, text: "名称、接口地址和 API Key 都要填" });
+      return;
+    }
+    setBusy(true);
     try {
-      await api("/providers", { method: "POST", body: { displayName: name, protocol, baseUrl, apiKey } });
-      setName(""); setApiKey("");
-      refresh();
-    } catch (e) { setMsg(String((e as Error).message)); }
+      await api("/providers", { method: "POST", body: { displayName: name.trim(), protocol, baseUrl: baseUrl.trim(), apiKey } });
+      setName("");
+      setApiKey("");
+      setMsg({ ok: true, text: "Provider 已添加" });
+      done();
+    } catch (e) {
+      setMsg({ ok: false, text: String((e as Error).message) });
+    } finally {
+      setBusy(false);
+    }
   };
+
   const addModel = async (providerId: string) => {
+    const modelName = (drafts[providerId] ?? "").trim();
+    if (!modelName) {
+      setMsg({ ok: false, text: "先填模型名再点添加" });
+      return;
+    }
+    setBusy(true);
     try {
       await api("/models", { method: "POST", body: { providerId, modelName, contextWindow: 200000, maxOutputTokens: 8192 } });
-      refresh();
-    } catch (e) { setMsg(String((e as Error).message)); }
+      setDrafts((s) => ({ ...s, [providerId]: "" }));
+      setMsg({ ok: true, text: `已添加模型 ${modelName}` });
+      done();
+    } catch (e) {
+      setMsg({ ok: false, text: String((e as Error).message) });
+    } finally {
+      setBusy(false);
+    }
   };
+
   const test = async (providerId: string) => {
+    setBusy(true);
+    setMsg({ ok: true, text: "正在测试连接…" });
     try {
-      const r = await api<{ result: { authentication: boolean; textApi: boolean; toolCall: boolean; latencyMs: number; message?: string } }>(`/providers/${providerId}/test`, { method: "POST" });
-      setMsg(`test: auth=${r.result.authentication} text=${r.result.textApi} tool=${r.result.toolCall} ${r.result.latencyMs}ms${r.result.message ? " · " + r.result.message : ""}`);
-      refresh();
-    } catch (e) { setMsg(String((e as Error).message)); }
+      const r = await api<{ result: { authentication: boolean; textApi: boolean; toolCall: boolean; latencyMs: number; message?: string } }>(
+        `/providers/${providerId}/test`,
+        { method: "POST" },
+      );
+      const ok = r.result.authentication && r.result.textApi && r.result.toolCall;
+      setMsg({
+        ok,
+        text: `测试连接：鉴权=${r.result.authentication} 文本=${r.result.textApi} 工具=${r.result.toolCall} ${r.result.latencyMs}ms${r.result.message ? " · " + r.result.message : ""}`,
+      });
+      done();
+    } catch (e) {
+      setMsg({ ok: false, text: String((e as Error).message) });
+    } finally {
+      setBusy(false);
+    }
   };
+
+  const setPrimary = async (modelId: string) => {
+    setBusy(true);
+    try {
+      await api(`/models/${modelId}/role`, { method: "POST", body: { role: "PRIMARY" } });
+      setMsg({ ok: true, text: "已设为主模型" });
+      done();
+    } catch (e) {
+      setMsg({ ok: false, text: String((e as Error).message) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeProvider = async (id: string, label: string) => {
+    if (!window.confirm(`停用 Provider「${label}」？`)) return;
+    setBusy(true);
+    try {
+      await api(`/providers/${id}`, { method: "DELETE" });
+      setMsg({ ok: true, text: "已停用 Provider" });
+      done();
+    } catch (e) {
+      setMsg({ ok: false, text: String((e as Error).message) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeModel = async (id: string, label: string) => {
+    if (!window.confirm(`移除模型「${label}」？`)) return;
+    setBusy(true);
+    try {
+      await api(`/models/${id}`, { method: "DELETE" });
+      setMsg({ ok: true, text: `已移除 ${label}` });
+      done();
+    } catch (e) {
+      setMsg({ ok: false, text: String((e as Error).message) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const providers = (data?.providers ?? []).filter((p) => isOn(p.enabled));
+  const modelsOf = (providerId: string) => (data?.models ?? []).filter((m) => m.providerId === providerId && isOn(m.enabled));
 
   return (
     <>
       <div className="panel">
         <h3>添加 Provider</h3>
-        <form>
-          <input placeholder="显示名称" value={name} onChange={(e) => setName(e.target.value)} />
-          <select value={protocol} onChange={(e) => setProtocol(e.target.value)}>
-            <option>OPENAI_CHAT_COMPLETIONS</option>
-            <option>OPENAI_RESPONSES</option>
-            <option>ANTHROPIC_MESSAGES</option>
-          </select>
-          <input placeholder="接口地址" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
-          <input placeholder="API Key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
-          <button type="button" onClick={addProvider}>添加 Provider</button>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void addProvider();
+          }}
+        >
+          <div className="field">
+            <label htmlFor="prov-name">显示名称</label>
+            <input id="prov-name" placeholder="opencode" value={name} onChange={(e) => setName(e.target.value)} />
+          </div>
+          <div className="field">
+            <label htmlFor="prov-protocol">协议</label>
+            <select id="prov-protocol" value={protocol} onChange={(e) => setProtocol(e.target.value)}>
+              <option>OPENAI_CHAT_COMPLETIONS</option>
+              <option>OPENAI_RESPONSES</option>
+              <option>ANTHROPIC_MESSAGES</option>
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="prov-url">接口地址</label>
+            <input id="prov-url" placeholder="https://api.openai.com" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+          </div>
+          <div className="field">
+            <label htmlFor="prov-key">API Key</label>
+            <input id="prov-key" placeholder="sk-…" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+          </div>
+          <button type="submit" className="primary" disabled={busy}>添加 Provider</button>
         </form>
       </div>
       <div className="panel">
         <h3>已配置的 Provider</h3>
-        {data?.providers.filter((p) => p.enabled !== 0).map((p) => (
-          <div key={p.id} style={{ marginBottom: 8 }}>
-            <b>{p.displayName}</b> <span className="badge">{p.protocol}</span> <span className={`badge ${HEALTH_CLASS[p.health] ?? "warn"}`}>{zhHealth(p.health)}</span>
-            <span className="muted"> {p.baseUrl}</span>
-            <div className="buttons">
-              <button onClick={() => test(p.id)}>测试连接</button>
-              <button onClick={() => addModel(p.id)}>添加模型（{modelName || "先填模型名"}）</button>
-              <input placeholder="模型名称" value={modelName} onChange={(e) => setModelName(e.target.value)} style={{ width: 180 }} />
-            </div>
-            {data.models.filter((m) => m.providerId === p.id).map((m) => (
-              <div key={m.id} className="muted">
-                模型：{m.modelName}（{m.role === "PRIMARY" ? "主模型" : m.role === "FALLBACK" ? "备用" : "普通"}）
-                {m.role !== "PRIMARY" && (
-                  <button style={{ marginLeft: 8 }} onClick={() => void api(`/models/${m.id}/role`, { method: "POST", body: { role: "PRIMARY" } }).then(refresh).catch((e) => setMsg(String((e as Error).message)))}>
-                    设为主模型
-                  </button>
-                )}
+        {providers.map((p) => {
+          const models = modelsOf(p.id);
+          const hasPrimary = models.some((m) => m.role === "PRIMARY");
+          return (
+            <div key={p.id} style={{ marginBottom: 16 }}>
+              <div>
+                <b>{p.displayName}</b> <span className="badge">{p.protocol}</span>{" "}
+                <span className={`badge ${HEALTH_CLASS[p.health] ?? "warn"}`}>{zhHealth(p.health)}</span>
+                <span className="muted break"> {p.baseUrl}</span>
               </div>
-            ))}
-          </div>
-        ))}
-        {data?.providers.length === 0 && <div className="muted">暂无</div>}
+              {!hasPrimary && models.length > 0 && <div className="warn">还没有主模型，调度会用列表里第一个</div>}
+              {models.length === 0 && <div className="muted">还没有模型。先填名称再点添加。</div>}
+              {models.map((m) => (
+                <div key={m.id} style={{ margin: "6px 0" }}>
+                  <span className={m.role === "PRIMARY" ? "ok" : ""}>
+                    {m.modelName}
+                  </span>{" "}
+                  <span className="badge">{m.role === "PRIMARY" ? "主模型" : m.role === "FALLBACK" ? "备用" : "普通"}</span>
+                  <span className="buttons" style={{ display: "inline", marginLeft: 8 }}>
+                    {m.role !== "PRIMARY" && (
+                      <button disabled={busy} onClick={() => void setPrimary(m.id)}>
+                        设为主模型
+                      </button>
+                    )}
+                    <button className="danger" disabled={busy} onClick={() => void removeModel(m.id, m.modelName)}>
+                      移除
+                    </button>
+                  </span>
+                </div>
+              ))}
+              <form
+                className="buttons"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void addModel(p.id);
+                }}
+              >
+                <div className="field">
+                  <label htmlFor={`model-${p.id}`}>模型名称</label>
+                  <input
+                    id={`model-${p.id}`}
+                    placeholder="deepseek-v4-flash"
+                    value={drafts[p.id] ?? ""}
+                    onChange={(e) => setDrafts((s) => ({ ...s, [p.id]: e.target.value }))}
+                  />
+                </div>
+                <button type="submit" className="primary" disabled={busy}>添加模型</button>
+                <button type="button" disabled={busy} onClick={() => void test(p.id)}>测试连接</button>
+                <button type="button" className="danger" disabled={busy} onClick={() => void removeProvider(p.id, p.displayName)}>
+                  停用
+                </button>
+              </form>
+            </div>
+          );
+        })}
+        {providers.length === 0 && <div className="muted">暂无可用 Provider</div>}
       </div>
-      {msg && <div className="warn">{msg}</div>}
+      {msg && <div className={msg.ok ? "ok" : "err"}>{msg.text}</div>}
     </>
   );
 }

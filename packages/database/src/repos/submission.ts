@@ -51,6 +51,14 @@ export class FlagCandidateRepository {
     );
   }
 
+  /** Last candidate per challenge (by createdAt). */
+  latestPerChallenge(): Map<string, FlagCandidate> {
+    const rows = this.db.all<FlagCandidate>(`SELECT ${CAND_COLUMNS} FROM flag_candidates ORDER BY created_at ASC`);
+    const out = new Map<string, FlagCandidate>();
+    for (const row of rows) out.set(row.challengeId, row);
+    return out;
+  }
+
   existsByValue(challengeId: string, value: string): boolean {
     return (
       this.db.get<{ id: string }>(

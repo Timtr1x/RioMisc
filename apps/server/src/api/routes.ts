@@ -72,22 +72,29 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     if (q.status) list = list.filter((c) => c.lifecycleStatus === q.status!.toUpperCase());
     if (q.solved === "true") list = list.filter((c) => c.lifecycleStatus === "SOLVED");
     if (q.solved === "false") list = list.filter((c) => c.lifecycleStatus !== "SOLVED");
-    return list.map((c) => ({
-      id: c.id,
-      title: c.title,
-      category: c.category,
-      score: c.score,
-      status: c.lifecycleStatus,
-      priority: c.priority,
-      priorityScore: c.lastPriorityScore,
-      elapsedMs: c.wallClockSolveMs,
-      progress: c.progressStatus,
-      hint: c.hintStatus,
-      wrong: c.wrongSubmissionCount,
-      solver: c.currentSolverType,
-      difficulty: c.difficultyEstimate,
-      blockedReason: c.blockedReason,
-    }));
+    const latestFlag = repos.candidates.latestPerChallenge();
+    return list.map((c) => {
+      const flag = latestFlag.get(c.id);
+      return {
+        id: c.id,
+        title: c.title,
+        category: c.category,
+        score: c.score,
+        status: c.lifecycleStatus,
+        priority: c.priority,
+        priorityScore: c.lastPriorityScore,
+        elapsedMs: c.wallClockSolveMs,
+        progress: c.progressStatus,
+        hint: c.hintStatus,
+        wrong: c.wrongSubmissionCount,
+        solver: c.currentSolverType,
+        difficulty: c.difficultyEstimate,
+        blockedReason: c.blockedReason,
+        flag: flag?.value ?? null,
+        flagStatus: flag?.status ?? null,
+        flagAt: flag?.createdAt ?? null,
+      };
+    });
   });
 
   fastify.get("/api/challenges/:id", async (req, reply) => {
@@ -258,6 +265,14 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
         if (other.id !== id && other.role === "PRIMARY") repos.models.update(other.id, { role: "GENERAL" });
       }
     }
+    return { ok: true };
+  });
+
+  fastify.delete("/api/models/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const model = repos.models.get(id);
+    if (!model) return reply.code(404).send({ error: "unknown model" });
+    repos.models.update(id, { enabled: false });
     return { ok: true };
   });
 

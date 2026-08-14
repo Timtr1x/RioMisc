@@ -4,6 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RioMisc 控制台</title>
+    <script>
+      (function () {
+        try {
+          var q = new URLSearchParams(location.search).get("theme");
+          var t = q === "light" || q === "dark" ? q : localStorage.getItem("rio-theme");
+          if (t !== "light" && t !== "dark") {
+            t = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+          }
+          document.documentElement.setAttribute("data-theme", t);
+          document.documentElement.style.colorScheme = t;
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>

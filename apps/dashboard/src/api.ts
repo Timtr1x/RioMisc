@@ -69,6 +69,9 @@ export interface ChallengeRow {
   solver: string | null;
   difficulty: number | null;
   blockedReason: string | null;
+  flag?: string | null;
+  flagStatus?: string | null;
+  flagAt?: number | null;
 }
 
 export interface ChallengeDetail {
