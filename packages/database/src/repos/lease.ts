@@ -63,7 +63,7 @@ export class LeaseRepository {
 // ---------------------------------------------------------------------------
 
 const PROV_COLUMNS =
-  "id, display_name AS displayName, protocol, base_url AS baseUrl, api_key_ref AS apiKeyRef, enabled, health, consecutive_failures AS consecutiveFailures, last_tested_at AS lastTestedAt, created_at AS createdAt";
+  "id, display_name AS displayName, protocol, base_url AS baseUrl, api_key_ref AS apiKeyRef, enabled, health, consecutive_failures AS consecutiveFailures, last_tested_at AS lastTestedAt, created_at AS createdAt, COALESCE(compat_profile, 'AUTO') AS compatProfile";
 
 function mapProvider(r: Record<string, unknown>): ModelProviderConfig {
   return {
@@ -77,6 +77,7 @@ function mapProvider(r: Record<string, unknown>): ModelProviderConfig {
     consecutiveFailures: (r.consecutiveFailures as number) ?? 0,
     lastTestedAt: (r.lastTestedAt as number | null) ?? null,
     createdAt: r.createdAt as number,
+    compatProfile: (r.compatProfile as ModelProviderConfig["compatProfile"]) ?? "AUTO",
   };
 }
 
@@ -89,12 +90,13 @@ const PROV_UPDATE: Record<string, string> = {
   health: "health",
   consecutiveFailures: "consecutive_failures",
   lastTestedAt: "last_tested_at",
+  compatProfile: "compat_profile",
 };
 
 export class ProviderRepository {
   constructor(private db: RioDb) {}
 
-  create(p: Omit<ModelProviderConfig, "id" | "createdAt" | "health" | "consecutiveFailures" | "lastTestedAt">): ModelProviderConfig {
+  create(p: Omit<ModelProviderConfig, "id" | "createdAt" | "health" | "consecutiveFailures" | "lastTestedAt" | "compatProfile"> & { compatProfile?: ModelProviderConfig["compatProfile"] }): ModelProviderConfig {
     const rec: ModelProviderConfig = {
       ...p,
       id: `prov_${Math.random().toString(36).slice(2, 14)}`,
@@ -102,10 +104,11 @@ export class ProviderRepository {
       consecutiveFailures: 0,
       lastTestedAt: null,
       createdAt: Date.now(),
+      compatProfile: p.compatProfile ?? "AUTO",
     };
     this.db.run(
-      `INSERT INTO model_providers (id, display_name, protocol, base_url, api_key_ref, enabled, health, consecutive_failures, last_tested_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO model_providers (id, display_name, protocol, base_url, api_key_ref, enabled, health, consecutive_failures, last_tested_at, created_at, compat_profile)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       rec.id,
       rec.displayName,
       rec.protocol,
@@ -116,6 +119,7 @@ export class ProviderRepository {
       rec.consecutiveFailures,
       rec.lastTestedAt,
       rec.createdAt,
+      rec.compatProfile,
     );
     return rec;
   }

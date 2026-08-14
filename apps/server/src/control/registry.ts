@@ -26,6 +26,7 @@ export class ModelRegistry {
     baseUrl: string;
     apiKey: string;
     enabled?: boolean;
+    compatProfile?: ModelProviderConfig["compatProfile"];
   }): Promise<ModelProviderConfig> {
     const apiKeyRef = `provider.apiKey.${Math.random().toString(36).slice(2, 10)}`;
     if (this.secrets.hasMasterKey()) {
@@ -39,6 +40,7 @@ export class ModelRegistry {
       baseUrl: input.baseUrl.replace(/\/+$/, ""),
       apiKeyRef,
       enabled: input.enabled ?? true,
+      compatProfile: input.compatProfile ?? "AUTO",
     });
   }
 

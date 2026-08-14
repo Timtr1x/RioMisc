@@ -119,6 +119,23 @@ function fileNameFromUrl(url: string): string {
   }
 }
 
+export function parseCtfdFiles(files: unknown, challengeId: number, baseUrl: string): RemoteChallengeDetail["attachments"] {
+  if (!Array.isArray(files)) return [];
+  return files.map((f, i) => {
+    const url = typeof f === "string" ? f : String((f as { url?: string; location?: string }).url ?? (f as { location?: string }).location ?? "");
+    const name =
+      typeof f === "object" && f && "name" in f && (f as { name?: string }).name
+        ? String((f as { name: string }).name)
+        : fileNameFromUrl(url);
+    return {
+      remoteId: `file-${challengeId}-${i}`,
+      name: name || `attachment-${i}`,
+      url: url ? new URL(url, baseUrl).toString() : null,
+      sizeBytes: null as number | null,
+    };
+  });
+}
+
 type CachedDetail = { fetchedAt: number; detail: RemoteChallengeDetail; hintIds: { id: number; cost: number }[] };
 
 export class CtfdContestAdapter implements ContestAdapter {
@@ -175,13 +192,17 @@ export class CtfdContestAdapter implements ContestAdapter {
       if (this.miscCryptoOnly && !isMiscOrCryptoCategory(category)) continue;
       const id = Number(item.id);
       if (!Number.isFinite(id)) continue;
-      const detail = await this.getChallenge(this.#remoteId(id));
+      const description = item.description != null ? stripHtml(String(item.description)) : "";
       out.push({
-        ...detail,
-        title: String(item.name ?? detail.title),
-        category: category || detail.category,
-        score: typeof item.value === "number" ? item.value : detail.score,
-        solveCount: typeof item.solves === "number" ? item.solves : detail.solveCount,
+        remoteId: this.#remoteId(id),
+        title: String(item.name ?? `challenge-${id}`),
+        description,
+        category,
+        score: typeof item.value === "number" ? item.value : null,
+        solveCount: typeof item.solves === "number" ? item.solves : null,
+        createdAt: null,
+        updatedAt: Date.now(),
+        attachments: parseCtfdFiles(item.files, id, this.baseUrl),
       });
     }
     for (const extra of this.extras.values()) out.push(extra.remote);
@@ -196,20 +217,7 @@ export class CtfdContestAdapter implements ContestAdapter {
     if (cached && Date.now() - cached.fetchedAt < DETAIL_TTL_MS) return cached.detail;
     const json = await this.#getJson(`/api/v1/challenges/${id}`);
     const d = (json?.data ?? json) as Record<string, unknown>;
-    const files = Array.isArray(d.files) ? d.files : [];
-    const attachments = files.map((f, i) => {
-      const url = typeof f === "string" ? f : String((f as { url?: string; location?: string }).url ?? (f as { location?: string }).location ?? "");
-      const name =
-        typeof f === "object" && f && "name" in f && (f as { name?: string }).name
-          ? String((f as { name: string }).name)
-          : fileNameFromUrl(url);
-      return {
-        remoteId: `file-${id}-${i}`,
-        name: name || `attachment-${i}`,
-        url: url ? new URL(url, this.baseUrl).toString() : null,
-        sizeBytes: null as number | null,
-      };
-    });
+    const attachments = parseCtfdFiles(d.files, id, this.baseUrl);
     let description = stripHtml(String(d.description ?? ""));
     if (d.connection_info) description = `${description}\n\n连接信息：${d.connection_info}`.trim();
     const hints = Array.isArray(d.hints) ? d.hints : [];

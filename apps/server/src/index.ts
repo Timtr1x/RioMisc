@@ -200,6 +200,7 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     registry,
     recovery,
     pythonExecutable: python.path,
+    secrets,
   });
 
   await control.start();

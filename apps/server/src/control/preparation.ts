@@ -63,6 +63,15 @@ export class PreparationService {
     }
 
     upsertRemoteAttachments(repos, challenge.id, detail.attachments);
+    if (detail.title || detail.description) {
+      repos.challenges.update(challenge.id, {
+        title: detail.title || challenge.title,
+        description: detail.description || challenge.description,
+        score: detail.score ?? challenge.score,
+        solveCount: detail.solveCount ?? challenge.solveCount,
+      });
+      challenge = repos.challenges.get(challenge.id) ?? challenge;
+    }
     await this.downloadPending(challenge, detail);
     const layout = this.deps.workspace.ensure(challenge.id);
 

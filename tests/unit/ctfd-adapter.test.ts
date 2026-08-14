@@ -35,6 +35,29 @@ describe("ctfd helpers", () => {
 });
 
 describe("CtfdContestAdapter", () => {
+  it("lists from the index only — no per-item getChallenge", async () => {
+    const hits: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      hits.push(url);
+      if (url.endsWith("/api/v1/challenges") || url.includes("/api/v1/challenges?page=")) {
+        return json({
+          success: true,
+          data: [
+            { id: 1, name: "stego", category: "Misc", value: 100, solves: 3, solved_by_me: false },
+            { id: 2, name: "xor", category: "Crypto", value: 200, solves: 1, solved_by_me: false },
+          ],
+        });
+      }
+      return new Response("nope", { status: 404 });
+    };
+    const adapter = new CtfdContestAdapter({ baseUrl: "https://ctf.example.com", token: "tok", fetchImpl });
+    const list = await adapter.listChallenges();
+    expect(list.map((c) => c.title)).toEqual(["stego", "xor"]);
+    expect(hits.every((u) => !/\/api\/v1\/challenges\/\d+/.test(u))).toBe(true);
+    expect(list[0]!.attachments).toEqual([]);
+  });
+
   it("lists only misc/crypto, downloads, and maps submit", async () => {
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);

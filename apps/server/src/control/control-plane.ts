@@ -1,7 +1,7 @@
 // ControlPlane — the orchestrator (§3). Decides how the contest is played.
 // Polls → syncs challenges → prepares → triages → schedules → supervises
 // workers → verifies/submits → reacts to hints/feedback/recovery.
-import { hashHex, type RioLogger, type RuntimeConfig } from "@rio/shared";
+import { hashHex, type RioLogger, type RuntimeConfig, type SecretStore } from "@rio/shared";
 import type { Repositories } from "@rio/database";
 import { SOLVER_CATEGORIES, type Challenge, type SolverType, type ModelRef } from "@rio/domain";
 import type { ContestAdapter } from "@rio/contest";
@@ -28,6 +28,7 @@ import { rememberDeletedRemoteId } from "./deleted.js";
 import { ChallengeStartService, isRetryableContestError } from "./start-policy.js";
 import { isRetryablePrepareError, prepareBackoffMs } from "./prepare-retry.js";
 import { syncRemoteChallenge } from "./challenge-sync.js";
+import { loadContestProfile, saveContestProfile } from "./contest-profile.js";
 
 export interface ControlPlaneDeps {
   repos: Repositories;
@@ -48,6 +49,7 @@ export interface ControlPlaneDeps {
   registry: ModelRegistry;
   recovery: RecoveryManager;
   pythonExecutable: string;
+  secrets?: SecretStore | null;
 }
 
 export class ControlPlane {  private poller: Poller;
@@ -129,10 +131,28 @@ export class ControlPlane {  private poller: Poller;
   }
 
   async start(): Promise<void> {
+    const restored = await this.#restoreContestProfile();
     const { adapter, logger } = this.deps;
     await adapter.authenticate();
     const caps = await adapter.getCapabilities();
     logger.info({ event: "contest_connected", adapter: adapter.kind, caps }, "contest adapter ready");
+    // yaml / env boot only. A restored Dashboard session already saved creds;
+    // empty token: "" in yaml must not wipe secrets.enc.
+    if (!restored && (adapter.kind === "ctfd" || adapter.kind === "mock")) {
+      await saveContestProfile(
+        this.deps.repos,
+        this.deps.secrets ?? null,
+        {
+          kind: adapter.kind,
+          baseUrl: adapter instanceof CtfdContestAdapter ? adapter.baseUrl : adapter.kind === "mock" ? "mock://demo" : this.contestMeta.baseUrl,
+          miscCryptoOnly: adapter instanceof CtfdContestAdapter ? adapter.miscCryptoOnly : true,
+        },
+        {
+          token: this.deps.config.contest.token || process.env.CTFD_TOKEN || undefined,
+          cookie: this.deps.config.contest.cookie || process.env.CTFD_COOKIE || undefined,
+        },
+      );
+    }
 
     // single-shot adapter (local mode) → poll once
     if (!caps.polling) {
@@ -209,6 +229,7 @@ export class ControlPlane {  private poller: Poller;
         changed = true;
       }
     }
+    await this.#refreshLiveChallengeDetails();
     if (this.deps.config.challenge.startPolicy === "ON_DISCOVERY") {
       for (const c of repos.challenges.list()) {
         if (c.startStatus !== "NOT_STARTED" || !this.#schedulable(c)) continue;
@@ -236,6 +257,37 @@ Re-evaluate assumptions affected by this change.`;
       this.workerPool.inject(challengeId, msg);
     }
     this.deps.preparation.refreshChallengeFile(challengeId);
+  }
+
+  /** Detail refresh for in-play challenges only — never N+1 the whole list. */
+  async #refreshLiveChallengeDetails(): Promise<void> {
+    const { adapter, repos, bus, logger } = this.deps;
+    if (adapter.kind !== "ctfd") return;
+    const live = repos
+      .challenges.list()
+      .filter(
+        (c) =>
+          (c.lifecycleStatus === "ACTIVE" || c.lifecycleStatus === "QUEUED" || c.lifecycleStatus === "READY") &&
+          c.remoteId &&
+          !c.remoteId.startsWith("url_"),
+      )
+      .slice(0, 8);
+    for (const c of live) {
+      try {
+        const detail = await adapter.getChallenge(c.remoteId!);
+        const result = syncRemoteChallenge({ repos, remote: detail, bus });
+        if (!result) continue;
+        if (result.metadataChanged) this.injectUpdate(result.challengeId, result.previousDescription ?? "", result.description);
+        if (result.attachmentChanged) {
+          this.injectAttachmentUpdate(result.challengeId, result.attachmentSummary);
+          void this.deps.preparation.downloadPending(repos.challenges.get(result.challengeId) ?? c).catch((e) =>
+            logger.warn({ event: "attachment_redownload_failed", challengeId: c.id, err: String(e) }),
+          );
+        }
+      } catch (e) {
+        logger.warn({ event: "live_detail_refresh_failed", challengeId: c.id, err: String(e) });
+      }
+    }
   }
 
   private injectAttachmentUpdate(challengeId: string, summary: string): void {
@@ -512,6 +564,7 @@ depended on the previous files.`;
           modelId: m.modelName,
           contextWindow: m.contextWindow,
           maxOutputTokens: m.maxOutputTokens,
+          compatProfile: p.compatProfile ?? "AUTO",
         });
       }
     }
@@ -863,6 +916,16 @@ depended on the previous files.`;
       { event: "contest_connected", kind: status.kind, baseUrl: status.baseUrl, listed: status.lastListed },
       "contest connected",
     );
+    await saveContestProfile(
+      this.deps.repos,
+      this.deps.secrets ?? null,
+      {
+        kind: status.kind === "ctfd" || status.kind === "mock" ? status.kind : "idle",
+        baseUrl: status.baseUrl,
+        miscCryptoOnly: status.miscCryptoOnly,
+      },
+      { token: opts.token, cookie: opts.cookie },
+    );
     return status;
   }
 
@@ -872,7 +935,39 @@ depended on the previous files.`;
     await this.#replaceAdapter(idle, { baseUrl: null, miscCryptoOnly: true, connected: false });
     this.deps.bus.publish({ type: "CONTEST_DISCONNECTED", challengeId: null, payload: {} });
     this.deps.logger.info({ event: "contest_disconnected" }, "contest disconnected — idle mode");
+    await saveContestProfile(this.deps.repos, this.deps.secrets ?? null, {
+      kind: "idle",
+      baseUrl: null,
+      miscCryptoOnly: true,
+    });
     return this.contestStatus();
+  }
+
+  async #restoreContestProfile(): Promise<boolean> {
+    if (this.deps.adapter.kind !== "idle") return false;
+    if (this.deps.config.contest.adapter !== "none") return false;
+    const profile = await loadContestProfile(this.deps.repos, this.deps.secrets ?? null);
+    if (!profile || profile.kind === "idle") return false;
+    try {
+      await this.connectContest({
+        kind: profile.kind,
+        baseUrl: profile.baseUrl,
+        token: profile.token,
+        cookie: profile.cookie,
+        miscCryptoOnly: profile.miscCryptoOnly,
+      });
+      this.deps.logger.info(
+        { event: "contest_profile_restored", kind: profile.kind, baseUrl: profile.baseUrl },
+        "restored last contest connection",
+      );
+      return true;
+    } catch (e) {
+      this.deps.logger.warn(
+        { event: "contest_profile_restore_failed", kind: profile.kind, err: String(e) },
+        "could not restore contest connection — staying in single-challenge mode",
+      );
+      return false;
+    }
   }
 
   async #replaceAdapter(

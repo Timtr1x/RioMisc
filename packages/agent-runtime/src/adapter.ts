@@ -1,6 +1,6 @@
 // AgentRuntimeAdapter — the ONLY place business code may touch an agent harness
 // (Pi SDK, mock, or future harness). Everything else talks to this interface.
-import type { SolverType, ModelRef, ProviderProtocol } from "@rio/domain";
+import type { SolverType, ModelRef, ProviderProtocol, CompatProfile } from "@rio/domain";
 import type { ToolContext } from "@rio/tool-runtime";
 
 export type { ModelRef };
@@ -18,6 +18,7 @@ export interface PiProviderSpec {
   modelId: string;
   contextWindow: number;
   maxOutputTokens: number;
+  compatProfile?: CompatProfile;
 }
 
 export interface ToolSpec {

@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { TOOL_IMPLS, runTool, formatToolResultForModel, type ToolContext } from "@rio/tool-runtime";
 import type { ModelRef } from "@rio/domain";
 import type { AgentRuntimeAdapter, PiProviderSpec, SolverSessionConfig, SolverSessionHandle } from "./adapter.js";
+import { compatFlagsFor, resolveCompatProfile, selectPiProvider } from "./compat.js";
 import type { AgentSession, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 const API_MAP: Record<PiProviderSpec["protocol"], string> = {
@@ -219,11 +220,10 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
 
   async switchModel(session: SolverSessionHandle, modelRef: ModelRef): Promise<void> {
     const h = session as PiSessionHandle;
-    if (!modelRef.modelId) return;
-    const { ModelRuntime } = await getSdk();
-    const runtime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
-    const model = runtime.getModel("*", modelRef.modelId);
-    if (model) await h.piSession.setModel(model);
+    if (!modelRef?.modelId) throw new Error("switchModel requires modelId");
+    const spec = this.#pickProvider({ modelRef, piProviders: this.providers } as SolverSessionConfig);
+    const { model } = await this.#buildModelRuntime(spec);
+    await h.piSession.setModel(model);
   }
 
   async abort(session: SolverSessionHandle): Promise<void> {
@@ -246,14 +246,14 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
     if (providers.length === 0) {
       throw new Error("Pi runtime: no model providers configured. Add one via Dashboard/CLI first.");
     }
-    const preferred = config.modelRef?.modelId;
-    return (preferred ? providers.find((p) => p.modelId === preferred) : undefined) ?? providers[0]!;
+    return selectPiProvider(providers, config.modelRef?.modelId);
   }
 
   async #buildModelRuntime(spec: PiProviderSpec) {
     const { ModelRuntime } = await getSdk();
     mkdirSync(this.piDir, { recursive: true });
     const modelsPath = join(this.piDir, "models.json");
+    const profile = resolveCompatProfile(spec.compatProfile ?? "AUTO", spec);
     writeFileSync(
       modelsPath,
       JSON.stringify(
@@ -263,20 +263,11 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
               name: spec.displayName,
               baseUrl: spec.baseUrl,
               api: API_MAP[spec.protocol],
-              compat: {
-                supportsDeveloperRole: false,
-                // DeepSeek: Pi sends thinking:{type:"enabled"|"disabled"} plus
-                // reasoning_effort when the session thinkingLevel is not off.
-                supportsReasoningEffort: true,
-                thinkingFormat: "deepseek",
-                // Replay assistant turns must include reasoning_content or some
-                // DeepSeek-compatible endpoints reject the next request.
-                requiresReasoningContentOnAssistantMessages: true,
-              },
+              compat: compatFlagsFor(profile),
               models: [
                 {
                   id: spec.modelId,
-                  reasoning: true,
+                  reasoning: profile === "DEEPSEEK" || profile === "ZAI",
                   contextWindow: spec.contextWindow,
                   maxTokens: spec.maxOutputTokens,
                 },

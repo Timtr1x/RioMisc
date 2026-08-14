@@ -98,6 +98,8 @@ export type ModelRole = "PRIMARY" | "FALLBACK" | "GENERAL";
 
 export type ProviderHealth = "HEALTHY" | "DEGRADED" | "DOWN" | "UNKNOWN";
 
+export type CompatProfile = "AUTO" | "OPENAI" | "DEEPSEEK" | "ZAI" | "ANTHROPIC";
+
 export type StartPolicy = "ON_DISCOVERY" | "ON_PREPARATION" | "ON_SOLVER_ASSIGNMENT";
 
 // ---------------------------------------------------------------------------
@@ -308,6 +310,8 @@ export interface ModelProviderConfig {
   consecutiveFailures: number;
   lastTestedAt: number | null;
   createdAt: number;
+  /** How to talk to this provider. AUTO infers from URL / protocol / model. */
+  compatProfile: CompatProfile;
 }
 
 export interface ModelConfig {

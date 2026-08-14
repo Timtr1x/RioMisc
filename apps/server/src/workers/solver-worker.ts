@@ -133,7 +133,11 @@ process.on("message", async (msg: { type: string; [k: string]: unknown }) => {
     if (msg.type === "inject" && sessionHandle && currentConfig) {
       await runtimeAdapter?.inject(sessionHandle, String(msg.message ?? ""));
     } else if (msg.type === "switch_model" && sessionHandle) {
-      await runtimeAdapter?.switchModel(sessionHandle, (msg.modelRef ?? null) as never);
+      try {
+        await runtimeAdapter?.switchModel(sessionHandle, (msg.modelRef ?? null) as never);
+      } catch (e) {
+        send({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      }
     } else if (msg.type === "abort") {
       if (sessionHandle && runtimeAdapter) {
         try {

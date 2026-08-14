@@ -45,6 +45,7 @@ export interface StartWorkerConfig {
       modelId: string;
       contextWindow: number;
       maxOutputTokens: number;
+      compatProfile?: "AUTO" | "OPENAI" | "DEEPSEEK" | "ZAI" | "ANTHROPIC";
     }[];
   };
 }

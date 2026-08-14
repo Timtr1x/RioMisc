@@ -78,6 +78,35 @@ describe("attachment revision", () => {
     expect(revs[0]!.attachment_metas_json).not.toBe("[]");
   });
 
+  it("list payload without files does not wipe a downloaded attachment or empty the description", () => {
+    const first = syncRemoteChallenge({
+      repos,
+      remote: remote({ remoteId: "ctfd:x:3", description: "full writeup" }),
+      bus,
+    });
+    const att = repos.attachments.listByChallenge(first!.challengeId)[0]!;
+    repos.attachments.update(att.id, { downloadStatus: "DOWNLOADED", localPath: "/tmp/pic.jpg" });
+    const second = syncRemoteChallenge({
+      repos,
+      remote: {
+        remoteId: "ctfd:x:3",
+        title: "stego",
+        description: "",
+        category: "Misc",
+        score: 100,
+        solveCount: 3,
+        createdAt: 1,
+        updatedAt: 1,
+        attachments: [],
+      },
+      bus,
+    });
+    expect(second?.attachmentChanged).toBe(false);
+    expect(second?.metadataChanged).toBe(false);
+    expect(repos.challenges.get(first!.challengeId)!.description).toBe("full writeup");
+    expect(repos.attachments.listByChallenge(first!.challengeId)[0]!.downloadStatus).toBe("DOWNLOADED");
+  });
+
   it("text-only change does not reset a downloaded attachment", () => {
     const first = syncRemoteChallenge({ repos, remote: remote({ remoteId: "ctfd:x:2" }), bus });
     const att = repos.attachments.listByChallenge(first!.challengeId)[0]!;

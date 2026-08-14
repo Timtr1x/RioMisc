@@ -1,5 +1,6 @@
 import { RioDb } from "./db.js";
 import { MIGRATION_DDL } from "./ddl.js";
+import { applySchemaMigrations } from "./schema-migrations.js";
 import { ChallengeRepository } from "./repos/challenge.js";
 import { EventLog } from "./repos/events.js";
 import { SubmissionRepository, FlagCandidateRepository } from "./repos/submission.js";
@@ -28,6 +29,7 @@ export function createRepositories(dbPath: string): Repositories {
   const db = new RioDb(dbPath);
   // auto-migrate (idempotent CREATE TABLE IF NOT EXISTS)
   db.sqlite.exec(MIGRATION_DDL);
+  applySchemaMigrations(db);
   return {
     db,
     challenges: new ChallengeRepository(db),

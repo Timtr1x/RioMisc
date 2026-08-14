@@ -40,13 +40,15 @@ export function attachmentMetasOf(remote: RemoteChallenge): AttachmentMeta[] {
 
 export function fingerprintRemote(remote: RemoteChallenge): RemoteFingerprint {
   const attachmentMetas = attachmentMetasOf(remote);
+  // List payloads often omit files. Hash metadata only unless attachments
+  // are actually present so a later detail fetch is not a false revision.
   const canonical = JSON.stringify({
     title: remote.title,
     description: remote.description,
     category: remote.category,
     score: remote.score,
     solveCount: remote.solveCount,
-    attachments: attachmentMetas,
+    ...(attachmentMetas.length > 0 ? { attachments: attachmentMetas } : {}),
   });
   return {
     hash: createHash("sha256").update(canonical).digest("hex"),
@@ -172,47 +174,50 @@ export function syncRemoteChallenge(opts: {
     };
   }
 
-  if (existing.contentHash === fp.hash) {
+  const incomingAtts = fp.attachmentMetas;
+  const title = remote.title || existing.title;
+  const description = remote.description || existing.description;
+  const category = remote.category ? normalizeCategory(remote.category) : existing.category;
+  const score = remote.score ?? existing.score;
+  const solveCount = remote.solveCount ?? existing.solveCount;
+  const stored = repos.attachments.listByChallenge(existing.id);
+  const attachmentChanged = incomingAtts.length > 0 && attachmentsDiffer(stored, incomingAtts);
+  const metadataChanged =
+    Boolean(remote.title && remote.title !== existing.title) ||
+    Boolean(remote.description && remote.description !== existing.description) ||
+    (Boolean(remote.category) && category !== existing.category) ||
+    (remote.score !== null && remote.score !== existing.score) ||
+    (remote.solveCount !== null && remote.solveCount !== existing.solveCount);
+
+  if (!metadataChanged && !attachmentChanged) {
     return {
       challengeId: existing.id,
       created: false,
       metadataChanged: false,
       attachmentChanged: false,
       previousDescription: existing.description,
-      description: remote.description,
-      attachmentSummary: fp.attachmentMetas.map((a) => a.name).join(", "),
+      description: existing.description,
+      attachmentSummary: incomingAtts.map((a) => a.name).join(", "),
     };
   }
 
-  const stored = repos.attachments.listByChallenge(existing.id);
-  const attachmentChanged =
-    fp.attachmentMetas.length > 0
-      ? attachmentsDiffer(stored, fp.attachmentMetas)
-      : false;
-  const metadataChanged =
-    existing.title !== remote.title ||
-    existing.description !== remote.description ||
-    existing.category !== normalizeCategory(remote.category) ||
-    existing.score !== remote.score ||
-    existing.solveCount !== remote.solveCount;
-
   repos.challenges.update(existing.id, {
-    title: remote.title,
-    description: remote.description,
-    category: normalizeCategory(remote.category),
-    score: remote.score,
-    solveCount: remote.solveCount,
+    title,
+    description,
+    category,
+    score,
+    solveCount,
     contentHash: fp.hash,
   });
   repos.challenges.recordRevision({
     id: `rev_${Math.random().toString(36).slice(2, 12)}`,
     challengeId: existing.id,
     contentHash: fp.hash,
-    title: remote.title,
-    description: remote.description,
-    category: remote.category,
-    score: remote.score,
-    attachmentMetasJson: fp.attachmentMetasJson,
+    title,
+    description,
+    category,
+    score,
+    attachmentMetasJson: incomingAtts.length > 0 ? fp.attachmentMetasJson : JSON.stringify(stored.map((a) => ({ remoteId: a.remoteId, name: a.name, url: a.remoteUrl, sizeBytes: a.sizeBytes }))),
   });
 
   let added: string[] = [];
@@ -228,7 +233,7 @@ export function syncRemoteChallenge(opts: {
     });
   }
   if (metadataChanged) {
-    bus.publish({ type: "CHALLENGE_UPDATED", challengeId: existing.id, payload: { title: remote.title } });
+    bus.publish({ type: "CHALLENGE_UPDATED", challengeId: existing.id, payload: { title } });
   }
 
   return {
@@ -237,7 +242,7 @@ export function syncRemoteChallenge(opts: {
     metadataChanged,
     attachmentChanged,
     previousDescription: existing.description,
-    description: remote.description,
+    description,
     attachmentSummary: [...added, ...updated].join(", ") || fp.attachmentMetas.map((a) => a.name).join(", "),
   };
 }

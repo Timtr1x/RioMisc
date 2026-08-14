@@ -183,7 +183,13 @@ CREATE TABLE IF NOT EXISTS model_providers (
   health TEXT NOT NULL DEFAULT 'UNKNOWN',
   consecutive_failures INTEGER NOT NULL DEFAULT 0,
   last_tested_at INTEGER,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  compat_profile TEXT NOT NULL DEFAULT 'AUTO'
+);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY,
+  applied_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS models (

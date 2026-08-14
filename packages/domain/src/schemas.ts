@@ -166,6 +166,7 @@ export const providerCreateSchema = z.object({
   baseUrl: z.string().url().max(1000),
   apiKey: z.string().min(1).max(2000),
   enabled: z.boolean().optional(),
+  compatProfile: z.enum(["AUTO", "OPENAI", "DEEPSEEK", "ZAI", "ANTHROPIC"]).optional(),
 });
 
 export const modelCreateSchema = z.object({
