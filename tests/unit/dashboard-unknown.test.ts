@@ -23,6 +23,8 @@ describe("dashboard UNKNOWN reconciliation", () => {
     expect(src).toContain("done()");
     expect(src).toContain("浅色模式");
     expect(src).toContain("data-theme");
+    expect(src).toContain("模型 API 连续失败");
+    expect(src).toContain("不会自动换备用模型");
   });
 });
 

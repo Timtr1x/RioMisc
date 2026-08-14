@@ -147,7 +147,14 @@ export function App() {
   useEffect(() => {
     return useEvents((e) => {
       const flag = typeof e.payload?.value === "string" ? ` ${e.payload.value}` : "";
-      const title = e.type === "FLAG_CANDIDATE_FOUND" ? `出 Flag${flag}` : e.type;
+      const failN = typeof e.payload?.consecutiveFailures === "number" ? e.payload.consecutiveFailures : null;
+      const failName = typeof e.payload?.name === "string" ? e.payload.name : "模型";
+      const err = typeof e.payload?.message === "string" ? String(e.payload.message).slice(0, 80) : "";
+      let title = e.type;
+      if (e.type === "FLAG_CANDIDATE_FOUND") title = `出 Flag${flag}`;
+      else if (e.type === "MODEL_PROVIDER_UNHEALTHY") {
+        title = `${failName} API 连续失败 ${failN ?? "多"} 次，已${e.payload?.health === "DOWN" ? "不可用" : "降级"}`;
+      } else if (e.type === "SOLVER_ERROR") title = `模型调用失败${err ? "：" + err : ""}`;
       setEvents((prev) => [`${new Date(e.createdAt).toLocaleTimeString()} ${title}`, ...prev].slice(0, 60));
       setRefreshKey((k) => k + 1);
     });
@@ -177,6 +184,13 @@ export function App() {
           </button>
         ))}
       </nav>
+      <ProviderHealthBanner
+        providers={status?.providers ?? []}
+        onOpen={() => {
+          setTab("providers");
+          window.location.hash = "providers";
+        }}
+      />
       {tab === "overview" && (
         <Overview
           status={status}
@@ -429,6 +443,9 @@ function Overview({
           {status.providers.map((p) => (
             <div key={p.id}>
               {p.name} <span className={`badge ${HEALTH_CLASS[p.health] ?? "warn"}`}>{zhHealth(p.health)}</span>
+              {(p.consecutiveFailures ?? 0) > 0 && (
+                <span className="muted"> · 连续失败 {p.consecutiveFailures} 次</span>
+              )}
             </div>
           ))}
         </div>
@@ -894,12 +911,41 @@ function Detail({
   );
 }
 
+function ProviderHealthBanner({
+  providers,
+  onOpen,
+}: {
+  providers: { id: string; name: string; health: string; consecutiveFailures?: number }[];
+  onOpen: () => void;
+}) {
+  const bad = providers.filter((p) => p.health === "DEGRADED" || p.health === "DOWN");
+  if (bad.length === 0) return null;
+  const down = bad.some((p) => p.health === "DOWN");
+  return (
+    <div className={`panel ${down ? "danger-banner" : "warn-banner"}`}>
+      <h3>模型 API 连续失败</h3>
+      {bad.map((p) => (
+        <p key={p.id}>
+          {p.name} 已连续失败 {p.consecutiveFailures ?? (p.health === "DOWN" ? 5 : 3)} 次，状态：{zhHealth(p.health)}。
+          不会自动换备用模型，解题可能卡住。
+        </p>
+      ))}
+      <div className="buttons">
+        <button type="button" className="primary" onClick={onOpen}>
+          去模型页测试 / 换主模型
+        </button>
+      </div>
+    </div>
+  );
+}
+
 type ProviderRow = {
   id: string;
   displayName: string;
   protocol: string;
   baseUrl: string;
   health: string;
+  consecutiveFailures?: number;
   enabled: number | boolean;
 };
 type ModelRow = { id: string; providerId: string; modelName: string; role: string; enabled?: number | boolean };
@@ -1079,8 +1125,19 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
               <div>
                 <b>{p.displayName}</b> <span className="badge">{p.protocol}</span>{" "}
                 <span className={`badge ${HEALTH_CLASS[p.health] ?? "warn"}`}>{zhHealth(p.health)}</span>
+                {(p.consecutiveFailures ?? 0) > 0 && (
+                  <span className={p.health === "DOWN" || p.health === "DEGRADED" ? "warn" : "muted"}>
+                    {" "}
+                    连续失败 {p.consecutiveFailures} 次
+                  </span>
+                )}
                 <span className="muted break"> {p.baseUrl}</span>
               </div>
+              {(p.health === "DEGRADED" || p.health === "DOWN") && (
+                <div className={p.health === "DOWN" ? "err" : "warn"}>
+                  模型 API 连续失败，当前不会自动切换备用模型。可点「测试连接」或换主模型。
+                </div>
+              )}
               {!hasPrimary && models.length > 0 && <div className="warn">还没有主模型，调度会用列表里第一个</div>}
               {models.length === 0 && <div className="muted">还没有模型。先填名称再点添加。</div>}
               {models.map((m) => (

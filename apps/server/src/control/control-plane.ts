@@ -662,7 +662,23 @@ Re-evaluate assumptions affected by this change.`;
         logger.warn({ event: "solver_error", challengeId, sessionId, message: String(msg.message ?? "") });
         bus.publish({ type: "SOLVER_ERROR", challengeId, payload: { sessionId, message: msg.message } });
         const providerId = repos.sessions.get(String(sessionId ?? ""))?.providerId ?? repos.models.primary()?.providerId;
-        if (providerId) this.deps.registry.recordModelFailure(providerId);
+        if (providerId) {
+          this.deps.registry.recordModelFailure(providerId);
+          const after = repos.providers.get(providerId);
+          if (after && (after.health === "DEGRADED" || after.health === "DOWN")) {
+            bus.publish({
+              type: "MODEL_PROVIDER_UNHEALTHY",
+              challengeId,
+              payload: {
+                providerId,
+                name: after.displayName,
+                health: after.health,
+                consecutiveFailures: after.consecutiveFailures,
+                message: msg.message,
+              },
+            });
+          }
+        }
         break;
       }
       case "info":
@@ -1241,7 +1257,12 @@ Treat the rejection as negative evidence and continue solving.`;
       executionMode: "NATIVE_TRUSTED",
       filesystemIsolation: false,
       networkIsolation: false,
-      providers: repos.providers.list().map((p) => ({ id: p.id, name: p.displayName, health: p.health })),
+      providers: repos.providers.list().map((p) => ({
+        id: p.id,
+        name: p.displayName,
+        health: p.health,
+        consecutiveFailures: p.consecutiveFailures,
+      })),
     };
   }
 

@@ -40,7 +40,7 @@ export interface Status {
   executionMode?: string;
   filesystemIsolation?: boolean;
   networkIsolation?: boolean;
-  providers: { id: string; name: string; health: string }[];
+  providers: { id: string; name: string; health: string; consecutiveFailures?: number }[];
 }
 
 export interface ContestStatus {
