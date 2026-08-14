@@ -74,6 +74,8 @@ export const runtimeConfigSchema = z.object({
     stallDetectMs: z.number().int().min(10_000).default(180_000),
     contextCompactThreshold: z.number().min(0.5).max(0.95).default(0.8),
     compactTriggerThreshold: z.number().min(0.5).max(0.95).default(0.7),
+    /** When false, missing providers block solvers instead of silently using Mock. */
+    allowMockFallback: z.boolean().default(true),
   }).default({}),
 
   watchdog: z.object({
@@ -91,6 +93,7 @@ export const runtimeConfigSchema = z.object({
   server: z.object({
     host: z.string().default(process.env.RIO_HOST ?? "127.0.0.1"),
     port: z.number().int().min(1).max(65535).default(Number(process.env.RIO_PORT ?? 3000)),
+    apiToken: z.string().nullable().default(process.env.RIO_API_TOKEN ?? null),
   }).default({}),
 
   paths: z.object({

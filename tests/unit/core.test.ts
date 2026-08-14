@@ -1,6 +1,6 @@
 // Priority score, rate limiter, path guard, zip, fixtures, submission dedup (§110).
 import { describe, it, expect } from "vitest";
-import { computePriorityScore } from "@rio/scheduler";
+import { computePriorityScore, scoreAndRankQueued } from "@rio/scheduler";
 import { ApiRateLimiter, buildFixtures, lsbEmbed, makePcapHttp, makeZip } from "@rio/contest";
 import { WorkspaceManager, extractZip, listZipEntries, pcapSummary, formatToolResultForModel, normalizeWorkPath, runTool, type ToolContext } from "@rio/tool-runtime";
 import { inflateSync } from "node:zlib";
@@ -44,6 +44,18 @@ describe("priority score", () => {
     const normal = computePriorityScore(base);
     const critical = computePriorityScore({ ...base, manualPriority: 100 });
     expect(critical - normal).toBe(100);
+  });
+
+  it("manual priority is applied once and ranking uses the fresh score", () => {
+    const items = [
+      { id: "low", priority: 0, lastPriorityScore: 999 },
+      { id: "high", priority: 100, lastPriorityScore: 0 },
+    ];
+    const ranked = scoreAndRankQueued(items, (c) => computePriorityScore({ ...base, challengeId: c.id, manualPriority: c.priority }));
+    expect(ranked[0]!.item.id).toBe("high");
+    const high = ranked.find((r) => r.item.id === "high")!.score;
+    const low = ranked.find((r) => r.item.id === "low")!.score;
+    expect(high - low).toBe(100);
   });
 
   it("restarts are penalized", () => {

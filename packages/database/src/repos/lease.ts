@@ -12,6 +12,7 @@ export class LeaseRepository {
   constructor(private db: RioDb) {}
 
   acquire(lease: Omit<WorkerLease, "id">): WorkerLease {
+    this.release(lease.challengeId);
     const rec: WorkerLease = { ...lease, id: `ls_${Math.random().toString(36).slice(2, 14)}` };
     this.db.run(
       "INSERT INTO worker_leases (id, challenge_id, worker_id, acquired_at, heartbeat_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -23,6 +24,10 @@ export class LeaseRepository {
       rec.expiresAt,
     );
     return rec;
+  }
+
+  list(): WorkerLease[] {
+    return this.db.all<WorkerLease>(`SELECT ${LEASE_COLUMNS} FROM worker_leases`);
   }
 
   getByChallenge(challengeId: string): WorkerLease | null {

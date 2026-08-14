@@ -55,6 +55,7 @@ agent:
   stallDetectMs: 180000
   contextCompactThreshold: 0.8
   compactTriggerThreshold: 0.7
+  allowMockFallback: true   # 正式比赛建议 false：没 Provider 时不要假装在解
 
 watchdog:
   checkMs: 30000

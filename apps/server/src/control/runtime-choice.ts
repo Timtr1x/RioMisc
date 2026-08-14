@@ -2,10 +2,19 @@
 // Adding a provider/key in the Dashboard must take effect on the next solver.
 import type { Repositories } from "@rio/database";
 
-export function resolveAgentRuntime(repos: Repositories): "mock" | "pi" {
+export function resolveAgentRuntime(
+  repos: Repositories,
+  opts?: { allowMockFallback?: boolean },
+): "mock" | "pi" | "unavailable" {
   const env = process.env.RIO_AGENT_RUNTIME;
-  if (env === "mock" || env === "pi") return env;
+  if (env === "pi") return "pi";
+  if (env === "mock") {
+    if (opts?.allowMockFallback === false) return "unavailable";
+    return "mock";
+  }
   const hasProvider = repos.providers.list().some((p) => p.enabled);
   const hasModel = repos.models.listEnabled().length > 0;
-  return hasProvider && hasModel ? "pi" : "mock";
+  if (hasProvider && hasModel) return "pi";
+  if (opts?.allowMockFallback === false) return "unavailable";
+  return "mock";
 }

@@ -259,15 +259,36 @@ describe("pi-resume e2e", () => {
     phase1 = null;
     await new Promise((r) => setTimeout(r, 200));
 
+    // Control-plane restart path: persist SDK ids in SQLite, then resume from the row.
+    const { createRepositories } = await import("@rio/database");
+    const { isResumableSession } = await import("../../apps/server/src/control/session-resume.ts");
+    const repos = createRepositories(join(dataDir, "rio.sqlite"));
+    repos.sessions.create({
+      challengeId: "ch_resume",
+      solverType: "MISC",
+      piSessionId: persisted.externalSessionId ?? null,
+      piSessionFile: persisted.sessionFile ?? null,
+      providerId: "fake-openai",
+      modelId: "fake-model",
+      status: "INTERRUPTED",
+      startedAt: Date.now(),
+      lastActiveAt: Date.now(),
+      endedAt: null,
+      inputTokens: 0,
+      outputTokens: 0,
+      toolCalls: 1,
+    });
+    const row = repos.sessions.latestForChallenge("ch_resume");
+    expect(isResumableSession(row)).toBe(true);
+    const persistedFromDb = { piSessionId: row!.piSessionId, piSessionFile: row!.piSessionFile };
+    repos.db.close();
+
     phase = 2;
     const adapter2 = new PiAgentRuntimeAdapter(join(dataDir, "pi")).withProviders([spec]);
     phase2 = await adapter2.resumeSolverSession({
       ...sessionConfigBase,
       initialMessage: buildResumeMessage({ newHints: [], wrongFlags: [], revisionSummary: null }),
-      persistedSession: {
-        piSessionId: persisted.externalSessionId,
-        piSessionFile: persisted.sessionFile,
-      },
+      persistedSession: persistedFromDb,
     });
     await Promise.race([phase2.waitForIdle(), new Promise((r) => setTimeout(r, 60_000))]);
 

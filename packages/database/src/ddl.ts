@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS worker_leases (
   heartbeat_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS worker_leases_challenge_idx ON worker_leases(challenge_id);
 
 CREATE TABLE IF NOT EXISTS domain_events (
   id TEXT PRIMARY KEY,

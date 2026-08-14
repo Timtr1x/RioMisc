@@ -17,6 +17,7 @@ import { ModelRegistry } from "./control/registry.js";
 import { ControlPlane } from "./control/control-plane.js";
 import { resolveAgentRuntime } from "./control/runtime-choice.js";
 import { buildApi } from "./api/routes.js";
+import { assertApiBindSafe } from "./api/bind-guard.js";
 import Fastify from "fastify";
 
 function compileFlagPattern(raw: string | null | undefined): RegExp | null {
@@ -187,7 +188,10 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     sessionsRoot,
     piDir: join(dataDir, "pi"),
     secretsFile: join(dataDir, "secrets.enc"),
-    agentRuntime: resolveAgentRuntime(repos),
+    agentRuntime: (() => {
+      const r = resolveAgentRuntime(repos, { allowMockFallback: config.agent.allowMockFallback !== false });
+      return r === "unavailable" ? "mock" : r;
+    })(),
     stateMachine,
     preparation,
     submission,
@@ -204,6 +208,7 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
 
   let api: Awaited<ReturnType<typeof buildApi>> | null = null;
   if (!opts.skipApi) {
+    assertApiBindSafe(config.server.host, config.server.apiToken ?? process.env.RIO_API_TOKEN);
     const fastify = Fastify({ logger: false });
     api = await buildApi({ fastify, control, repos, bus, registry, secrets, config, logger });
   }

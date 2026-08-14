@@ -120,12 +120,75 @@ describe("RecoveryManager startup matrix", () => {
     expect(repos.events.recent("ch_act").some((e) => e.type === "CHALLENGE_RECOVERY_REQUEUED")).toBe(true);
   });
 
-  it("VERIFYING is not left ACTIVE with zero workers", async () => {
+  it("VERIFYING without verified candidate goes QUEUED", async () => {
     repos.challenges.create(seedChallenge({ id: "ch_ver", lifecycleStatus: "VERIFYING" }));
     await recovery.start();
     expect(repos.challenges.get("ch_ver")!.lifecycleStatus).toBe("QUEUED");
     expect(repos.challenges.get("ch_ver")!.lifecycleStatus).not.toBe("ACTIVE");
     expect(repos.events.recent("ch_ver").some((e) => e.type === "CHALLENGE_RECOVERY_VERIFY_INTERRUPTED")).toBe(true);
+  });
+
+  it("VERIFYING with VERIFIED candidate drives submit pipeline", async () => {
+    repos.challenges.create(seedChallenge({ id: "ch_ver2", lifecycleStatus: "VERIFYING" }));
+    repos.candidates.create({
+      challengeId: "ch_ver2",
+      sessionId: null,
+      value: "flag{ok}",
+      confidence: 0.99,
+      reason: "verified locally",
+      evidenceJson: "[]",
+      status: "VERIFIED",
+    });
+    await recovery.start();
+    expect(repos.challenges.get("ch_ver2")!.lifecycleStatus).toBe("SUBMITTING");
+  });
+
+  it("QUEUED submission after crash is sent", async () => {
+    let submits = 0;
+    const sending = new SubmissionManager({
+      repos,
+      adapter: { kind: "mock", submitFlag: async () => { submits += 1; return { ok: true, correct: true, status: "CORRECT", raw: {} }; } } as never,
+      stateMachine: sm,
+      bus: new EventBus(),
+      logger: createLogger("silent"),
+      autoSubmit: true,
+      confidenceThreshold: 0.85,
+      localMaxWrong: 3,
+      defaultCooldownMs: 0,
+      inject: () => {},
+      onAutoSubmitDisabled: () => {},
+      onCorrect: () => {},
+    });
+    repos.challenges.create(seedChallenge({ id: "ch_qsub", lifecycleStatus: "SUBMITTING" }));
+    const cand = repos.candidates.create({
+      challengeId: "ch_qsub",
+      sessionId: null,
+      value: "flag{queued}",
+      confidence: 0.9,
+      reason: "ready",
+      evidenceJson: "[]",
+      status: "VERIFIED",
+    });
+    repos.submissions.createOrGet({
+      challengeId: "ch_qsub",
+      candidateId: cand.id,
+      flagHash: "qq",
+      flagValue: "flag{queued}",
+      status: "QUEUED",
+    });
+    const rec = new RecoveryManager({
+      repos,
+      stateMachine: sm,
+      bus: new EventBus(),
+      logger: createLogger("silent"),
+      submissionManager: sending,
+      preparation: { refreshChallengeFile: () => {} } as never,
+      workspacesRoot: join(dir, "ws"),
+    });
+    await rec.start();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(submits).toBeGreaterThanOrEqual(1);
+    sending.stop();
   });
 
   it("PAUSED / PARKED / SOLVED stay put", async () => {

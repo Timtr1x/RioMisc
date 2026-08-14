@@ -85,6 +85,7 @@ export class ModelRegistry {
         messages: [{ role: "user", content: "Respond exactly with OK." }],
         max_tokens: 256,
       }, false, modelName);
+      this.recordModelSuccess(providerId);
       out.authentication = true;
       // success = the API answered with *some* text; reasoning models may
       // reply from reasoning_content, not message.content
@@ -92,6 +93,7 @@ export class ModelRegistry {
       out.message = `text API replied: ${JSON.stringify(typeof text === "string" ? text.slice(0, 120) : text)}`;
       if (!out.textApi) out.message += " (empty reply — check the model's reasoning mode / response format)";
     } catch (e) {
+      this.recordModelFailure(providerId);
       out.message = `text API failed: ${(e as Error).message}`;
       return out;
     }

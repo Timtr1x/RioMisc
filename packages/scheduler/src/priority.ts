@@ -66,6 +66,13 @@ export function computePriorityScore(
   return Math.round(score);
 }
 
+/** Score once (manualPriority already inside computePriorityScore), sort in memory, then persist. */
+export function scoreAndRankQueued<T>(queued: T[], scoreOf: (item: T) => number): { item: T; score: number }[] {
+  const scored = queued.map((item) => ({ item, score: scoreOf(item) }));
+  scored.sort((a, b) => b.score - a.score);
+  return scored;
+}
+
 export const MANUAL_PRIORITY: Record<"LOW" | "NORMAL" | "HIGH" | "CRITICAL", number> = {
   LOW: -30,
   NORMAL: 0,

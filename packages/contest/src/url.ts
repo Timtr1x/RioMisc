@@ -15,7 +15,7 @@ export interface FetchedChallenge {
   attachments: { name: string; data: Buffer }[];
 }
 
-const UA = "rio-misc-agent/0.1 (CTF solver; authorized use)";
+import { ATTACHMENT_MAX_BYTES, HTML_MAX_BYTES, fetchBounded } from "./fetch-guard.js";
 
 const ATTACHMENT_EXT = new Set([
   "zip", "rar", "7z", "tar", "gz", "bz2", "xz",
@@ -24,10 +24,6 @@ const ATTACHMENT_EXT = new Set([
   "pcap", "pcapng", "wav", "mp3", "flac", "ogg",
   "pdf", "doc", "docx", "xls", "xlsx", "bin", "dat", "raw", "img", "iso",
   "sqlite", "db", "key", "pem", "crt", "der", "apk", "elf", "exe", "so", "dll",
-]);
-
-const BLOCKED_HOSTS = new Set([
-  "github.com", // 仓库页是 JS 渲染，且可能要求登录；raw 链接可以直接抓
 ]);
 
 interface ParsedHtml {
@@ -104,20 +100,19 @@ function parseHtml(html: string, baseUrl: string): ParsedHtml {
   return out;
 }
 
-async function download(url: string): Promise<{ data: Buffer; contentType: string; finalUrl: string }> {
-  const res = await fetch(url, {
-    redirect: "follow",
-    headers: { "user-agent": UA },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
-  const data = Buffer.from(await res.arrayBuffer());
-  return { data, contentType: res.headers.get("content-type") ?? "", finalUrl: res.url };
+async function downloadHtml(url: string): Promise<{ data: Buffer; contentType: string; finalUrl: string }> {
+  return fetchBounded(url, { maxBytes: HTML_MAX_BYTES });
+}
+
+async function downloadFile(url: string): Promise<{ data: Buffer; contentType: string; finalUrl: string }> {
+  return fetchBounded(url, { maxBytes: ATTACHMENT_MAX_BYTES });
 }
 
 function guessNameFromUrl(url: string): string {
   const path = new URL(url).pathname;
   const base = path.split("/").filter(Boolean).pop() ?? "attachment";
-  return decodeURIComponent(base);
+  const raw = decodeURIComponent(base).replace(/[\\/]/g, "_").replace(/^\.+/, "");
+  return raw || "attachment";
 }
 
 /**
@@ -130,17 +125,8 @@ export async function fetchChallengeFromUrl(url: string): Promise<FetchedChallen
   } catch {
     throw new Error(`不是合法 URL: ${url}`);
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error(`仅支持 http/https: ${url}`);
-  }
-  const host = parsed.hostname.replace(/^www\./, "");
-  if (BLOCKED_HOSTS.has(host)) {
-    throw new Error(
-      `${host} 是 JS 渲染页面，直接抓取不可靠。请改用 raw 文件直链（如 raw.githubusercontent.com/...）或把题目下载到本地后 rio solve <目录>`,
-    );
-  }
 
-  const { data, contentType, finalUrl } = await download(url);
+  const { data, contentType, finalUrl } = await downloadHtml(url);
   const base = finalUrl;
 
   // 1) 直接是文件（非 HTML/JSON）
@@ -164,7 +150,7 @@ export async function fetchChallengeFromUrl(url: string): Promise<FetchedChallen
     for (const f of files) {
       const fUrl = typeof f === "string" ? f : f.url;
       if (!fUrl) continue;
-      const dl = await download(new URL(fUrl, base).toString());
+      const dl = await downloadFile(new URL(fUrl, base).toString());
       attachments.push({ name: typeof f === "object" && f.name ? f.name : guessNameFromUrl(dl.finalUrl), data: dl.data });
     }
     return {
@@ -186,14 +172,14 @@ export async function fetchChallengeFromUrl(url: string): Promise<FetchedChallen
     if (idMatch) {
       const apiUrl = `${parsed.origin}/api/v1/challenges/${idMatch[1]}`;
       try {
-        const apiRes = await fetch(apiUrl, { headers: { "user-agent": UA } });
-        if (apiRes.ok) {
-          const json = (await apiRes.json()) as { data: Record<string, unknown> };
-          const d = json.data;
+        const api = await downloadHtml(apiUrl);
+        const json = JSON.parse(api.data.toString("utf8")) as { data: Record<string, unknown> };
+        const d = json.data;
+        if (d) {
           const files = Array.isArray(d.files) ? (d.files as string[]) : [];
           const attachments: { name: string; data: Buffer }[] = [];
           for (const f of files) {
-            const dl = await download(new URL(f, parsed.origin).toString());
+            const dl = await downloadFile(new URL(f, parsed.origin).toString());
             attachments.push({ name: guessNameFromUrl(dl.finalUrl), data: dl.data });
           }
           return {
@@ -214,7 +200,7 @@ export async function fetchChallengeFromUrl(url: string): Promise<FetchedChallen
   const attachments: { name: string; data: Buffer }[] = [];
   for (const link of page.links.slice(0, 10)) {
     try {
-      const dl = await download(link);
+      const dl = await downloadFile(link);
       attachments.push({ name: guessNameFromUrl(dl.finalUrl), data: dl.data });
     } catch {
       /* 单个附件失败不阻塞整体 */

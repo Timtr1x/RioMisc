@@ -2,7 +2,7 @@
 // Each challenge gets data/workspaces/<challenge-id>/{input,work,artifacts,results,state,agent}.
 // Solver tools resolve paths through safeResolve() and may never escape the workspace.
 import { mkdirSync, realpathSync, existsSync, rmSync } from "node:fs";
-import { join, resolve, sep, isAbsolute, normalize } from "node:path";
+import { join, resolve, sep, normalize } from "node:path";
 
 export interface WorkspaceLayout {
   root: string;
@@ -56,13 +56,12 @@ export class WorkspaceManager {
 
   /** Resolve a possibly-relative tool path inside the workspace, rejecting escapes. */
   safeResolve(workspaceRoot: string, requestedPath: string): string {
-    const root = realpathSync(workspaceRoot);
-    let candidate: string;
-    if (isAbsolute(requestedPath)) {
-      candidate = normalize(requestedPath);
-    } else {
-      candidate = resolve(root, requestedPath);
+    if (isUnsafeWorkspacePath(requestedPath)) {
+      throw new Error(`Path escape denied: ${requestedPath}`);
     }
+    const root = realpathSync(workspaceRoot);
+    const unified = requestedPath.replace(/\\/g, "/");
+    const candidate = posixLikeAbsolute(unified) ? normalize(requestedPath) : resolve(root, ...unified.split("/").filter((p) => p.length > 0));
     if (!candidate.startsWith(root + sep) && candidate !== root) {
       throw new Error(`Path escape denied: ${requestedPath}`);
     }
@@ -72,6 +71,18 @@ export class WorkspaceManager {
     }
     return real;
   }
+}
+
+/** Windows drive, UNC, or POSIX absolute — reject on every host OS. */
+export function isUnsafeWorkspacePath(requestedPath: string): boolean {
+  const p = String(requestedPath ?? "");
+  if (/^[a-zA-Z]:[\\/]/.test(p)) return true;
+  if (/^\\\\[^\\]/.test(p) || /^\/\/[^/]/.test(p)) return true;
+  return false;
+}
+
+function posixLikeAbsolute(unified: string): boolean {
+  return unified.startsWith("/") || /^[a-zA-Z]:\//.test(unified);
 }
 
 export function sanitizeId(id: string): string {

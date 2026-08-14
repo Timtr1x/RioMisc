@@ -122,7 +122,13 @@ while (Date.now() < deadline2) {
 const ok = submissionSeen && wrongSeen;
 console.log(ok ? "\n✅ 真实 Pi runtime 完整系统链路验证通过" : "\n❌ 失败");
 console.log("requests:", turn, "| submission:", submissionSeen, "| wrong feedback:", wrongSeen);
-server.close();
+await new Promise<void>((r) => server.close(() => r()));
 await runtime.close();
-rmSync(dataDir, { recursive: true, force: true });
-process.exit(ok ? 0 : 1);
+await new Promise((r) => setTimeout(r, 400));
+try {
+  rmSync(dataDir, { recursive: true, force: true });
+} catch {
+  /* windows lock */
+}
+process.exitCode = ok ? 0 : 1;
+setTimeout(() => process.exit(ok ? 0 : 1), 2500).unref();

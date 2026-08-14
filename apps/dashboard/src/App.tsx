@@ -259,6 +259,8 @@ function Overview({
     ["已搁置", status.parked],
     ["不支持", status.unsupported],
     ["错误", status.error],
+    ["Blocked", status.blocked ?? 0],
+    ["Unknown 提交", status.unknownSubmissions ?? 0],
     ["Misc 已解", status.miscSolved],
     ["Crypto 已解", status.cryptoSolved],
     ["工人", `${status.workers}/${status.workerSlots}`],
@@ -708,6 +710,13 @@ function Detail({
           <h3 style={{ marginTop: 10 }}>产物</h3>
           {d.artifacts.slice(-10).map((a) => (
             <div key={a.id} className="muted">{a.operation}: {a.path} ({a.size}B)</div>
+          ))}
+          <h3 style={{ marginTop: 10 }}>Session</h3>
+          {(d.sessions ?? []).length === 0 && <div className="muted">无</div>}
+          {(d.sessions ?? []).map((s) => (
+            <div key={s.id} className="muted">
+              {s.id} · {s.mode === "resumed" ? "resumed" : "fresh"} · {s.providerId ?? "—"} / {s.modelId ?? "—"} · {s.status}
+            </div>
           ))}
           <h3 style={{ marginTop: 10 }}>官方 Hint</h3>
           {d.hints.map((h, i) => (

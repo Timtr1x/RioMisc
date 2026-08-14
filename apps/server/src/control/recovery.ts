@@ -52,11 +52,20 @@ export class RecoveryManager {
         }
         case "VERIFYING": {
           this.#interruptSessions(c.id);
-          const res = this.deps.stateMachine.transition(c.id, "RECOVER_VERIFYING", {
-            payload: { reason: "recovery: verification interrupted" },
-          });
-          if (res.allowed) {
-            logger.info({ event: "recovery_verify_interrupted", challengeId: c.id }, "VERIFYING → QUEUED");
+          const verified = repos.candidates.listByChallenge(c.id).find((cand) => cand.status === "VERIFIED");
+          if (verified) {
+            const ok = this.deps.stateMachine.transition(c.id, "VERIFY_OK", { payload: { candidateId: verified.id, reason: "recovery: verified candidate" } });
+            if (ok.allowed) {
+              logger.info({ event: "recovery_verify_to_submit", challengeId: c.id, candidateId: verified.id }, "VERIFYING → SUBMITTING");
+              await this.deps.submissionManager.recoverSubmitting(c.id);
+            }
+          } else {
+            const res = this.deps.stateMachine.transition(c.id, "RECOVER_VERIFYING", {
+              payload: { reason: "recovery: verification interrupted" },
+            });
+            if (res.allowed) {
+              logger.info({ event: "recovery_verify_interrupted", challengeId: c.id }, "VERIFYING → QUEUED");
+            }
           }
           break;
         }

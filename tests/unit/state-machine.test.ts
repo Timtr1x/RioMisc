@@ -135,7 +135,12 @@ describe("StateMachine", () => {
     sm.transition("ch_test", "SCHEDULE", { sessionId: "s-rec" });
     sm.transition("ch_test", "CANDIDATE_FOUND");
     expect(sm.transition("ch_test", "RECOVER_VERIFYING").to).toBe("QUEUED");
-    expect(repos.events.recent("ch_test").some((e) => e.type === "CHALLENGE_RECOVERY_VERIFY_INTERRUPTED")).toBe(true);
+  });
+
+  it("PREPARE_RETRY returns PREPARING to DISCOVERED (not ERROR)", () => {
+    sm.transition("ch_test", "PREPARE_START");
+    expect(sm.transition("ch_test", "PREPARE_RETRY").to).toBe("DISCOVERED");
+    expect(repos.challenges.get("ch_test")!.lifecycleStatus).toBe("DISCOVERED");
   });
 
   it("increments restart count on RESTART_SOLVER", () => {

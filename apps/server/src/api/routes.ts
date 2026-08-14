@@ -44,13 +44,17 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
 
   fastify.get("/api/health", async () => {
     const s = control.status();
+    const degraded = Array.isArray(s.providers) && (s.providers as { health: string }[]).some((p) => p.health !== "HEALTHY" && p.health !== "UNKNOWN");
     return {
-      ok: true,
+      ok: !degraded,
+      degraded,
       db: "ok",
       workers: s.workers,
       workerSlots: s.workerSlots,
       diskFreeGb: s.diskFreeGb,
       adapter: s.adapter,
+      unknownSubmissions: s.unknownSubmissions ?? 0,
+      blockedChallenges: s.blocked ?? 0,
       executionMode: s.executionMode ?? "NATIVE_TRUSTED",
       filesystemIsolation: false,
       networkIsolation: false,
@@ -97,7 +101,10 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
       progress: repos.progress.listForChallenge(id, 50),
       candidates: repos.candidates.listByChallenge(id),
       submissions: repos.submissions.listByChallenge(id),
-      sessions: repos.sessions.listActive().filter((s) => s.challengeId === id),
+      sessions: repos.sessions.listByChallenge(id).map((s) => ({
+        ...s,
+        mode: s.piSessionFile ? "resumed" : "fresh",
+      })),
       hints: repos.hints.listForChallenge(id),
       timeline: repos.events.recent(id, 60),
     };

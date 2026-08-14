@@ -13,7 +13,7 @@ import { isResumableSession, buildResumeMessage } from "./session-resume.js";
 import { resolveAgentRuntime } from "./runtime-choice.js";
 import { readdirSync, readFileSync, statSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { ResourceSemaphore, computePriorityScore } from "@rio/scheduler";
+import { ResourceSemaphore, computePriorityScore, scoreAndRankQueued } from "@rio/scheduler";
 import { StateMachine } from "../state-machine.js";
 import { EventBus } from "./bus.js";
 import { WorkerPool } from "./worker-pool.js";
@@ -25,6 +25,8 @@ import { RecoveryManager } from "./recovery.js";
 import { ModelRegistry } from "./registry.js";
 import { acceptIntoSolved } from "./accept.js";
 import { isDeletedRemoteId, rememberDeletedRemoteId } from "./deleted.js";
+import { ensureChallengeStarted } from "./start-policy.js";
+import { isRetryablePrepareError, prepareBackoffMs } from "./prepare-retry.js";
 import { createHash } from "node:crypto";
 
 export interface ControlPlaneDeps {
@@ -65,6 +67,7 @@ export class ControlPlane {  private poller: Poller;
   private reflectCooldown = new Map<string, number>();
   /** Challenges discovered before this process started are ignored in idle mode. */
   private readonly bootAt = Date.now();
+  private prepareBackoff = new Map<string, { failures: number; nextAt: number }>();
   private contestMeta: {
     baseUrl: string | null;
     connectedAt: number | null;
@@ -222,6 +225,17 @@ export class ControlPlane {  private poller: Poller;
         bus.publish({ type: "CHALLENGE_DISCOVERED", challengeId: id, payload: { remoteId: r.remoteId, title: r.title } });
         logger.info({ event: "challenge_discovered", challengeId: id, title: r.title });
         changed = true;
+        const created = repos.challenges.get(id);
+        if (created) {
+          void ensureChallengeStarted({
+            policy: this.deps.config.challenge.startPolicy,
+            phase: "discovery",
+            challenge: created,
+            adapter: this.deps.adapter,
+            repos,
+            bus,
+          }).catch((e) => logger.warn({ event: "start_on_discovery_failed", challengeId: id, err: String(e) }));
+        }
       } else if (existing.contentHash !== hash) {
         repos.challenges.update(existing.id, {
           title: r.title,
@@ -280,6 +294,8 @@ Re-evaluate assumptions affected by this change.`;
       // 1. DISCOVERED → prepare (queue with triage concurrency)
       const discovered = repos.challenges.listByStatus("DISCOVERED").filter((c) => this.#schedulable(c));
       for (const c of discovered.slice(0, this.deps.config.workers.triageConcurrency)) {
+        const hold = this.prepareBackoff.get(c.id);
+        if (hold && Date.now() < hold.nextAt) continue;
         if (this.preparing.has(c.id)) continue;
         if (!SOLVER_CATEGORIES.includes(c.category)) {
           repos.challenges.update(c.id, { blockedReason: "UNSUPPORTED_CATEGORY" });
@@ -296,10 +312,11 @@ Re-evaluate assumptions affected by this change.`;
         this.deps.stateMachine.transition(c.id, "QUEUE");
       }
 
-      // 3. scores
+      // 3. scores — compute once (manualPriority is already inside the formula)
       const queued = repos.challenges.listByStatus("QUEUED").filter((c) => this.#schedulable(c));
-      for (const c of queued) {
-        const score = computePriorityScore(
+      const now = Date.now();
+      const ranked = scoreAndRankQueued(queued, (c) =>
+        computePriorityScore(
           {
             challengeId: c.id,
             category: c.category,
@@ -315,18 +332,27 @@ Re-evaluate assumptions affected by this change.`;
             discoveredAt: c.discoveredAt,
           },
           undefined,
-          Date.now(),
-        );
-        repos.challenges.update(c.id, { lastPriorityScore: score + c.priority });
+          now,
+        ),
+      );
+      for (const { item: c, score } of ranked) {
+        repos.challenges.update(c.id, { lastPriorityScore: score });
       }
 
-      // 4. schedule workers
+      // 4. schedule workers using the just-computed ranking
       const active = this.workerPool.activeCount();
       const capacity = this.deps.config.workers.solverConcurrency - active;
       if (capacity > 0) {
-        const sorted = [...queued].sort((a, b) => (b.lastPriorityScore ?? 0) - (a.lastPriorityScore ?? 0));
-        for (const c of sorted.slice(0, capacity)) {
+        for (const { item: c } of ranked.slice(0, capacity)) {
           if (c.pausedReason || c.blockedReason === "MANUAL_REVIEW_REQUIRED") continue;
+          const runtime = resolveAgentRuntime(repos, { allowMockFallback: this.deps.config.agent.allowMockFallback !== false });
+          if (runtime === "unavailable") {
+            if (c.blockedReason !== "MODEL_RUNTIME_UNAVAILABLE") {
+              repos.challenges.update(c.id, { blockedReason: "MODEL_RUNTIME_UNAVAILABLE" });
+              this.deps.bus.publish({ type: "MODEL_RUNTIME_UNAVAILABLE", challengeId: c.id, payload: {} });
+            }
+            continue;
+          }
           const slot = this.llmSlots.tryAcquire(["LLM"]);
           if (!slot) break;
           this.llmHeld.set(c.id, slot);
@@ -351,12 +377,28 @@ Re-evaluate assumptions affected by this change.`;
     try {
       const c = this.deps.repos.challenges.get(challengeId);
       if (!c) return;
+      await ensureChallengeStarted({
+        policy: this.deps.config.challenge.startPolicy,
+        phase: "preparation",
+        challenge: c,
+        adapter: this.deps.adapter,
+        repos: this.deps.repos,
+        bus: this.deps.bus,
+      });
       await this.deps.preparation.prepare(c);
+      this.prepareBackoff.delete(challengeId);
     } catch (e) {
       this.deps.logger.error({ event: "prepare_failed", challengeId, err: String(e) });
       const c = this.deps.repos.challenges.get(challengeId);
       if (c && c.lifecycleStatus === "PREPARING") {
-        this.deps.stateMachine.transition(challengeId, "PREPARE_FAILED", { payload: { reason: String(e) } });
+        if (isRetryablePrepareError(e)) {
+          const prev = this.prepareBackoff.get(challengeId)?.failures ?? 0;
+          const failures = prev + 1;
+          this.prepareBackoff.set(challengeId, { failures, nextAt: Date.now() + prepareBackoffMs(failures) });
+          this.deps.stateMachine.transition(challengeId, "PREPARE_RETRY", { payload: { reason: String(e), failures } });
+        } else {
+          this.deps.stateMachine.transition(challengeId, "PREPARE_FAILED", { payload: { reason: String(e) } });
+        }
       }
     } finally {
       this.preparing.delete(challengeId);
@@ -367,22 +409,14 @@ Re-evaluate assumptions affected by this change.`;
     const { repos, adapter, bus } = this.deps;
     void adapter;
 
-    // start challenge per policy
-    if (this.deps.config.challenge.startPolicy === "ON_SOLVER_ASSIGNMENT" && challenge.startStatus === "NOT_STARTED") {
-      repos.challenges.update(challenge.id, { startStatus: "STARTING" });
-      if (adapter.startChallenge && challenge.remoteId && challenge.remoteId !== "local") {
-        try {
-          await adapter.startChallenge(challenge.remoteId);
-          repos.challenges.update(challenge.id, { startStatus: "STARTED", startedAt: Date.now() });
-          bus.publish({ type: "CHALLENGE_STARTED", challengeId: challenge.id, payload: {} });
-        } catch (e) {
-          repos.challenges.update(challenge.id, { startStatus: "FAILED" });
-          throw new Error(`startChallenge failed: ${e}`);
-        }
-      } else {
-        repos.challenges.update(challenge.id, { startStatus: "STARTED", startedAt: Date.now() });
-      }
-    }
+    await ensureChallengeStarted({
+      policy: this.deps.config.challenge.startPolicy,
+      phase: "solver",
+      challenge,
+      adapter,
+      repos,
+      bus,
+    });
 
     const latest = repos.sessions.latestForChallenge(challenge.id);
     const resume = isResumableSession(latest);
@@ -428,7 +462,7 @@ Re-evaluate assumptions affected by this change.`;
       systemPrompt: systemPromptFor(solverType),
       initialMessage,
       modelRef,
-      runtime: resolveAgentRuntime(this.deps.repos),
+      runtime: this.#agentRuntime(),
       resume,
       persistedSession: resume
         ? { piSessionId: session.piSessionId, piSessionFile: session.piSessionFile }
@@ -446,6 +480,12 @@ Re-evaluate assumptions affected by this change.`;
     bus.publish({ type: "SOLVER_ASSIGNED", challengeId: challenge.id, payload: { sessionId: session.id, solverType, workerId: this.workerPool.get(challenge.id)?.workerId } });
     bus.publish({ type: "SOLVER_STARTED", challengeId: challenge.id, payload: { sessionId: session.id } });
     this.deps.logger.info({ event: "solver_started", challengeId: challenge.id, sessionId: session.id, solverType });
+  }
+
+  #agentRuntime(): "mock" | "pi" {
+    const runtime = resolveAgentRuntime(this.deps.repos, { allowMockFallback: this.deps.config.agent.allowMockFallback !== false });
+    if (runtime === "unavailable") throw new Error("MODEL_RUNTIME_UNAVAILABLE");
+    return runtime;
   }
 
   #resolveModelRef(): ModelRef | null {
@@ -613,12 +653,16 @@ Re-evaluate assumptions affected by this change.`;
         break;
       }
       case "idle": {
+        const providerId = repos.sessions.get(String(sessionId ?? ""))?.providerId ?? repos.models.primary()?.providerId;
+        if (providerId) this.deps.registry.recordModelSuccess(providerId);
         bus.publish({ type: "SOLVER_IDLE", challengeId, payload: { sessionId, usage: msg.usage } });
         break;
       }
       case "error": {
         logger.warn({ event: "solver_error", challengeId, sessionId, message: String(msg.message ?? "") });
         bus.publish({ type: "SOLVER_ERROR", challengeId, payload: { sessionId, message: msg.message } });
+        const providerId = repos.sessions.get(String(sessionId ?? ""))?.providerId ?? repos.models.primary()?.providerId;
+        if (providerId) this.deps.registry.recordModelFailure(providerId);
         break;
       }
       case "info":
@@ -713,7 +757,7 @@ Re-evaluate assumptions affected by this change.`;
       systemPrompt: systemPromptFor(target),
       initialMessage: this.#kickoff(layout.root, `A prior solver requested handoff to ${target}.\nPrior solver summary: ${summary}\nContinue with fresh eyes.`),
       modelRef: this.#resolveModelRef(),
-      runtime: resolveAgentRuntime(this.deps.repos),
+      runtime: this.#agentRuntime(),
       resume: false,
       pythonExecutable: this.deps.pythonExecutable,
       pi: this.#piWorkerConfig(),
@@ -1183,6 +1227,8 @@ Treat the rejection as negative evidence and continue solving.`;
       paused: countBy("PAUSED"),
       unsupported: countBy("UNSUPPORTED"),
       error: countBy("ERROR"),
+      blocked: all.filter((c) => Boolean(c.blockedReason)).length,
+      unknownSubmissions: Number(repos.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM submissions WHERE status = 'UNKNOWN'")?.n ?? 0),
       miscSolved: all.filter((c) => c.category === "MISC" && c.lifecycleStatus === "SOLVED").length,
       cryptoSolved: all.filter((c) => c.category === "CRYPTO" && c.lifecycleStatus === "SOLVED").length,
       workers: this.workerPool.activeCount(),

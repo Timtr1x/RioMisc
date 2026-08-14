@@ -27,6 +27,8 @@ export interface Status {
   paused: number;
   unsupported: number;
   error: number;
+  blocked?: number;
+  unknownSubmissions?: number;
   miscSolved: number;
   cryptoSolved: number;
   workers: number;
@@ -91,6 +93,7 @@ export interface ChallengeDetail {
   submissions: { id: string; flagValue: string; status: string; submittedAt: number | null; createdAt: number }[];
   hints: { content: string; fetchedAt: number }[];
   timeline: { type: string; createdAt: number; payloadJson: string }[];
+  sessions?: { id: string; providerId: string | null; modelId: string | null; status: string; piSessionFile: string | null; mode?: string }[];
 }
 
 /** SSE goes straight to the API so Vite's proxy cannot buffer live events. */

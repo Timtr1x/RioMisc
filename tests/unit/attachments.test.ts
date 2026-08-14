@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { WorkspaceManager, resolveAttachmentTarget, safeAttachmentFilename } from "@rio/tool-runtime";
+import { WorkspaceManager, resolveAttachmentTarget, safeAttachmentFilename, uniqueAttachmentFilename } from "@rio/tool-runtime";
 
 describe("attachment name sanitize", () => {
   it("traversal / drive / UNC / reserved names land under workspace/input or are rejected", () => {
@@ -37,5 +37,12 @@ describe("attachment name sanitize", () => {
     expect(safeAttachmentFilename("CON", "x")).toMatch(/^attachment_/);
     expect(safeAttachmentFilename(".", "y")).toMatch(/^attachment_/);
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it("disambiguates collisions as foo__2.zip", () => {
+    const used = new Set<string>();
+    expect(uniqueAttachmentFilename("foo.zip", used)).toBe("foo.zip");
+    expect(uniqueAttachmentFilename("foo.zip", used)).toBe("foo__2.zip");
+    expect(uniqueAttachmentFilename("foo.zip", used)).toBe("foo__3.zip");
   });
 });

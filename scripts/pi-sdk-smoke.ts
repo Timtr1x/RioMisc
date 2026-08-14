@@ -157,6 +157,22 @@ const ok =
 console.log(ok ? "\n✅ PI SDK 全链路验证通过" : "\n❌ 验证失败");
 console.log("session 文件:", readdirSync(join(dataDir, "sessions")).join(", "));
 
-server.close();
-rmSync(dataDir, { recursive: true, force: true });
-process.exit(ok ? 0 : 1);
+try {
+  await adapter.abort(handle);
+} catch {
+  /* ignore */
+}
+try {
+  (handle as unknown as { piSession?: { dispose?: () => void } }).piSession?.dispose?.();
+} catch {
+  /* ignore */
+}
+await new Promise((r) => setTimeout(r, 200));
+await new Promise<void>((r) => server.close(() => r()));
+try {
+  rmSync(dataDir, { recursive: true, force: true });
+} catch {
+  /* windows lock */
+}
+process.exitCode = ok ? 0 : 1;
+setTimeout(() => process.exit(ok ? 0 : 1), 2500).unref();

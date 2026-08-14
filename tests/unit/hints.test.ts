@@ -8,8 +8,16 @@ import { tmpdir } from "node:os";
 import { StateMachine } from "../../apps/server/src/state-machine.ts";
 import { HintManager } from "../../apps/server/src/control/hints.ts";
 import { EventBus } from "../../apps/server/src/control/bus.ts";
-import { isStalledForHint, lastMeaningfulActivityAt } from "../../apps/server/src/control/hint-policy.ts";
+import { isStalledForHint, lastMeaningfulActivityAt, hintBackoffMs } from "../../apps/server/src/control/hint-policy.ts";
 import { seedChallenge } from "../helpers.ts";
+
+describe("hint backoff", () => {
+  it("starts at 15s and caps at 5min", () => {
+    expect(hintBackoffMs(1)).toBe(15_000);
+    expect(hintBackoffMs(2)).toBe(30_000);
+    expect(hintBackoffMs(10)).toBe(5 * 60_000);
+  });
+});
 
 describe("hint safety", () => {
   const dirs: string[] = [];
