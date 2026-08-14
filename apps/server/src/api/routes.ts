@@ -321,6 +321,7 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
       token?: string;
       cookie?: string;
       miscCryptoOnly?: boolean;
+      trustedCredentialOrigins?: string[] | string;
     };
     const kind = body.kind === "ctfd" ? "ctfd" : body.kind === "mock" ? "mock" : body.baseUrl ? "ctfd" : "mock";
     try {
@@ -330,6 +331,7 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
         token: body.token ?? process.env.CTFD_TOKEN,
         cookie: body.cookie ?? process.env.CTFD_COOKIE,
         miscCryptoOnly: body.miscCryptoOnly,
+        trustedCredentialOrigins: body.trustedCredentialOrigins,
       });
       return { ok: true, ...status };
     } catch (e) {

@@ -18,6 +18,8 @@ export const runtimeConfigSchema = z.object({
     cookie: z.string().nullable().default(null),
     /** When true, only ingest Misc / Crypto (and 杂项 / 密码). */
     miscCryptoOnly: z.boolean().default(true),
+    /** Extra origins that may receive Token/Cookie (e.g. files.ctf.example.com). */
+    trustedCredentialOrigins: z.array(z.string().min(1)).default([]),
     poll: z.object({
       initialMs: z.number().int().min(1000).max(60000).default(5000),
       maxMs: z.number().int().min(1000).max(60000).default(15000),

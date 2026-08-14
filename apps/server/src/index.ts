@@ -105,6 +105,7 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
       token: config.contest.token ?? process.env.CTFD_TOKEN,
       cookie: config.contest.cookie ?? process.env.CTFD_COOKIE,
       miscCryptoOnly: config.contest.miscCryptoOnly,
+      trustedCredentialOrigins: config.contest.trustedCredentialOrigins,
     });
   } else {
     throw new Error(`unsupported contest adapter: ${config.contest.adapter}`);

@@ -2,6 +2,7 @@
 // Token/cookie stay in the encrypted SecretStore; SQLite only keeps non-secrets.
 import type { Repositories } from "@rio/database";
 import type { SecretStore } from "@rio/shared";
+import { normalizeTrustedOrigins } from "@rio/contest";
 
 export const CONTEST_PROFILE_KEY = "contest.profile";
 export const CONTEST_TOKEN_REF = "contest.token";
@@ -13,11 +14,20 @@ export interface PersistedContestProfile {
   kind: PersistedContestKind;
   baseUrl: string | null;
   miscCryptoOnly: boolean;
+  trustedCredentialOrigins: string[];
 }
 
 export interface LoadedContestProfile extends PersistedContestProfile {
   token: string | null;
   cookie: string | null;
+}
+
+function parseOrigins(raw: unknown): string[] {
+  try {
+    return normalizeTrustedOrigins(Array.isArray(raw) ? raw.map(String) : []);
+  } catch {
+    return [];
+  }
 }
 
 export function parseContestProfile(raw: string | null): PersistedContestProfile | null {
@@ -29,6 +39,7 @@ export function parseContestProfile(raw: string | null): PersistedContestProfile
       kind: v.kind,
       baseUrl: typeof v.baseUrl === "string" && v.baseUrl ? v.baseUrl : null,
       miscCryptoOnly: v.miscCryptoOnly !== false,
+      trustedCredentialOrigins: parseOrigins(v.trustedCredentialOrigins),
     };
   } catch {
     return null;
@@ -55,6 +66,7 @@ export async function saveContestProfile(
       kind: profile.kind,
       baseUrl: profile.baseUrl,
       miscCryptoOnly: profile.miscCryptoOnly,
+      trustedCredentialOrigins: profile.trustedCredentialOrigins ?? [],
     } satisfies PersistedContestProfile),
   );
   if (!secrets?.hasMasterKey()) return;

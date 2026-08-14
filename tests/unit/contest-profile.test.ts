@@ -32,7 +32,12 @@ describe("contest profile persistence", () => {
     await saveContestProfile(
       repos,
       secrets,
-      { kind: "ctfd", baseUrl: "https://ctf.example.com", miscCryptoOnly: true },
+      {
+        kind: "ctfd",
+        baseUrl: "https://ctf.example.com",
+        miscCryptoOnly: true,
+        trustedCredentialOrigins: ["https://files.ctf.example.com"],
+      },
       { token: "tok-secret", cookie: "sid=abc" },
     );
     const raw = repos.settings.get(CONTEST_PROFILE_KEY);
@@ -46,6 +51,7 @@ describe("contest profile persistence", () => {
       baseUrl: "https://ctf.example.com",
       token: "tok-secret",
       cookie: "sid=abc",
+      trustedCredentialOrigins: ["https://files.ctf.example.com"],
     });
     repos.db.close();
   });

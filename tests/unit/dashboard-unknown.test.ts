@@ -25,6 +25,7 @@ describe("dashboard UNKNOWN reconciliation", () => {
     expect(src).toContain("data-theme");
     expect(src).toContain("模型 API 连续失败");
     expect(src).toContain("不会自动换备用模型");
+    expect(src).toContain("信任的附件域名");
   });
 });
 

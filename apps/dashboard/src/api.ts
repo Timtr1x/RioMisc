@@ -52,6 +52,7 @@ export interface ContestStatus {
   lastListed: number;
   miscCryptoOnly: boolean;
   connectedAt: number | null;
+  trustedCredentialOrigins?: string[];
 }
 
 export interface ChallengeRow {

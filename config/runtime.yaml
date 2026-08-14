@@ -13,6 +13,8 @@ contest:
   # token: ""                # 或环境变量 CTFD_TOKEN
   # cookie: ""               # 或环境变量 CTFD_COOKIE
   # miscCryptoOnly: true     # 只拉 Misc / Crypto / 杂项 / 密码
+  # trustedCredentialOrigins:  # 附件 CDN 需要带 Cookie 时填写
+  #   - https://files.ctf.example.com
 
 challenge:
   startPolicy: ON_SOLVER_ASSIGNMENT   # ON_DISCOVERY | ON_PREPARATION | ON_SOLVER_ASSIGNMENT

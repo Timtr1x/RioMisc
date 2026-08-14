@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createServer, type Server } from "node:http";
 import { once } from "node:events";
-import { shouldAttachContestCredential, CtfdContestAdapter } from "@rio/contest";
+import { shouldAttachContestCredential, normalizeTrustedOrigins, CtfdContestAdapter } from "@rio/contest";
 
 function listen(): Promise<{ server: Server; origin: string; seen: Array<{ url: string; auth: string | undefined; cookie: string | undefined }> }> {
   const seen: Array<{ url: string; auth: string | undefined; cookie: string | undefined }> = [];
@@ -33,6 +33,17 @@ describe("contest credential boundary", () => {
   afterEach(() => {
     for (const s of servers) s.close();
     servers.length = 0;
+  });
+
+  it("normalizes yaml / Dashboard origin lists", () => {
+    expect(normalizeTrustedOrigins("files.ctf.example.com, https://cdn.other.net/path")).toEqual([
+      "https://files.ctf.example.com",
+      "https://cdn.other.net",
+    ]);
+    expect(normalizeTrustedOrigins(["https://files.ctf.example.com/", "https://files.ctf.example.com"])).toEqual([
+      "https://files.ctf.example.com",
+    ]);
+    expect(() => normalizeTrustedOrigins("ftp://x")).toThrow(/invalid trustedCredentialOrigins/);
   });
 
   it("same origin attaches, other origin does not, trusted origin does", () => {
@@ -78,6 +89,24 @@ describe("contest credential boundary", () => {
     expect(a.seen[0]?.auth).toBe("Token secret-token");
     expect(b.seen[0]?.auth).toBeUndefined();
     expect(b.seen[0]?.cookie).toBeUndefined();
+  });
+
+  it("trusted CDN origin receives Token/Cookie", async () => {
+    const a = await listen();
+    const b = await listen();
+    servers.push(a.server, b.server);
+    const adapter = new CtfdContestAdapter({
+      baseUrl: a.origin,
+      token: "secret-token",
+      cookie: "session=abc",
+      trustedCredentialOrigins: [b.origin],
+    });
+    const cross = await adapter.downloadAttachment(
+      { remoteId: "ctfd:x:1", title: "t", description: "", category: "Misc", score: 1, solveCount: 0, createdAt: 0, updatedAt: 0, attachments: [] },
+      { remoteId: "2", name: "b.bin", url: `${b.origin}/files/b.bin`, sizeBytes: 10 },
+    );
+    expect(cross.ok).toBe(true);
+    expect(b.seen.some((h) => h.auth === "Token secret-token" && h.cookie === "session=abc")).toBe(true);
   });
 
   it("stops after 5 redirects", async () => {

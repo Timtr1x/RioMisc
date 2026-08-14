@@ -5,7 +5,7 @@ import { hashHex, type RioLogger, type RuntimeConfig, type SecretStore } from "@
 import type { Repositories } from "@rio/database";
 import { SOLVER_CATEGORIES, type Challenge, type SolverType, type ModelRef } from "@rio/domain";
 import type { ContestAdapter } from "@rio/contest";
-import { Poller, ApiRateLimiter, DiskManager, CtfdContestAdapter, IdleContestAdapter, MockContestAdapter } from "@rio/contest";
+import { Poller, ApiRateLimiter, DiskManager, CtfdContestAdapter, IdleContestAdapter, MockContestAdapter, normalizeTrustedOrigins } from "@rio/contest";
 import type { WorkerMessage, StartWorkerConfig } from "./worker-pool.js";
 import { WorkspaceManager } from "@rio/tool-runtime";
 import { systemPromptFor, buildKickoffMessage } from "@rio/solver";
@@ -78,6 +78,7 @@ export class ControlPlane {  private poller: Poller;
     lastError: string | null;
     lastListed: number;
     miscCryptoOnly: boolean;
+    trustedCredentialOrigins: string[];
   } = {
     baseUrl: null,
     connectedAt: null,
@@ -85,6 +86,7 @@ export class ControlPlane {  private poller: Poller;
     lastError: null,
     lastListed: 0,
     miscCryptoOnly: true,
+    trustedCredentialOrigins: [],
   };
 
   constructor(private deps: ControlPlaneDeps) {
@@ -107,6 +109,7 @@ export class ControlPlane {  private poller: Poller;
       this.contestMeta.baseUrl = deps.adapter.baseUrl;
       this.contestMeta.connectedAt = Date.now();
       this.contestMeta.miscCryptoOnly = deps.adapter.miscCryptoOnly;
+      this.contestMeta.trustedCredentialOrigins = deps.adapter.trustedCredentialOrigins;
     } else if (deps.adapter.kind === "mock") {
       this.contestMeta.baseUrl = "mock://demo";
       this.contestMeta.connectedAt = Date.now();
@@ -146,6 +149,7 @@ export class ControlPlane {  private poller: Poller;
           kind: adapter.kind,
           baseUrl: adapter instanceof CtfdContestAdapter ? adapter.baseUrl : adapter.kind === "mock" ? "mock://demo" : this.contestMeta.baseUrl,
           miscCryptoOnly: adapter instanceof CtfdContestAdapter ? adapter.miscCryptoOnly : true,
+          trustedCredentialOrigins: adapter instanceof CtfdContestAdapter ? adapter.trustedCredentialOrigins : [],
         },
         {
           token: this.deps.config.contest.token || process.env.CTFD_TOKEN || undefined,
@@ -855,6 +859,7 @@ depended on the previous files.`;
     lastListed: number;
     miscCryptoOnly: boolean;
     connectedAt: number | null;
+    trustedCredentialOrigins: string[];
   } {
     const kind = this.deps.adapter.kind;
     return {
@@ -866,6 +871,7 @@ depended on the previous files.`;
       lastListed: this.contestMeta.lastListed,
       miscCryptoOnly: this.contestMeta.miscCryptoOnly,
       connectedAt: this.contestMeta.connectedAt,
+      trustedCredentialOrigins: this.contestMeta.trustedCredentialOrigins,
     };
   }
 
@@ -875,6 +881,7 @@ depended on the previous files.`;
     token?: string | null;
     cookie?: string | null;
     miscCryptoOnly?: boolean;
+    trustedCredentialOrigins?: string[] | string | null;
   }): Promise<ReturnType<ControlPlane["contestStatus"]>> {
     const kind = opts.kind ?? (opts.baseUrl?.trim() ? "ctfd" : "mock");
     if (kind === "mock") {
@@ -884,21 +891,25 @@ depended on the previous files.`;
         baseUrl: "mock://demo",
         miscCryptoOnly: true,
         connected: true,
+        trustedCredentialOrigins: [],
       });
     } else {
       const baseUrl = opts.baseUrl?.trim();
       if (!baseUrl) throw new Error("接入 CTFd 需要比赛平台地址");
+      const trustedCredentialOrigins = normalizeTrustedOrigins(opts.trustedCredentialOrigins);
       const adapter = new CtfdContestAdapter({
         baseUrl,
         token: opts.token,
         cookie: opts.cookie,
         miscCryptoOnly: opts.miscCryptoOnly,
+        trustedCredentialOrigins,
       });
       await adapter.authenticate();
       await this.#replaceAdapter(adapter, {
         baseUrl: adapter.baseUrl,
         miscCryptoOnly: adapter.miscCryptoOnly,
         connected: true,
+        trustedCredentialOrigins: adapter.trustedCredentialOrigins,
       });
     }
     try {
@@ -923,6 +934,7 @@ depended on the previous files.`;
         kind: status.kind === "ctfd" || status.kind === "mock" ? status.kind : "idle",
         baseUrl: status.baseUrl,
         miscCryptoOnly: status.miscCryptoOnly,
+        trustedCredentialOrigins: status.trustedCredentialOrigins,
       },
       { token: opts.token, cookie: opts.cookie },
     );
@@ -939,6 +951,7 @@ depended on the previous files.`;
       kind: "idle",
       baseUrl: null,
       miscCryptoOnly: true,
+      trustedCredentialOrigins: [],
     });
     return this.contestStatus();
   }
@@ -955,6 +968,7 @@ depended on the previous files.`;
         token: profile.token,
         cookie: profile.cookie,
         miscCryptoOnly: profile.miscCryptoOnly,
+        trustedCredentialOrigins: profile.trustedCredentialOrigins,
       });
       this.deps.logger.info(
         { event: "contest_profile_restored", kind: profile.kind, baseUrl: profile.baseUrl },
@@ -972,7 +986,7 @@ depended on the previous files.`;
 
   async #replaceAdapter(
     adapter: ContestAdapter,
-    meta: { baseUrl: string | null; miscCryptoOnly: boolean; connected: boolean },
+    meta: { baseUrl: string | null; miscCryptoOnly: boolean; connected: boolean; trustedCredentialOrigins?: string[] },
   ): Promise<void> {
     const old = this.deps.adapter;
     this.deps.adapter = adapter;
@@ -982,6 +996,7 @@ depended on the previous files.`;
     this.startService.replaceAdapter(adapter);
     this.contestMeta.baseUrl = meta.baseUrl;
     this.contestMeta.miscCryptoOnly = meta.miscCryptoOnly;
+    this.contestMeta.trustedCredentialOrigins = meta.trustedCredentialOrigins ?? [];
     this.contestMeta.connectedAt = meta.connected ? Date.now() : null;
     this.contestMeta.lastError = null;
     if (old !== adapter) {

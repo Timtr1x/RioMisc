@@ -249,6 +249,7 @@ function Overview({
   const [contestUrl, setContestUrl] = useState("");
   const [contestToken, setContestToken] = useState("");
   const [contestCookie, setContestCookie] = useState("");
+  const [contestOrigins, setContestOrigins] = useState("");
   const [contestMsg, setContestMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [contestBusy, setContestBusy] = useState(false);
 
@@ -264,7 +265,14 @@ function Overview({
         body:
           kind === "mock"
             ? { kind: "mock" }
-            : { kind: "ctfd", baseUrl: contestUrl.trim(), token: contestToken.trim() || undefined, cookie: contestCookie.trim() || undefined, miscCryptoOnly: true },
+            : {
+                kind: "ctfd",
+                baseUrl: contestUrl.trim(),
+                token: contestToken.trim() || undefined,
+                cookie: contestCookie.trim() || undefined,
+                miscCryptoOnly: true,
+                trustedCredentialOrigins: contestOrigins.trim() || undefined,
+              },
       });
       setContestMsg({
         ok: true,
@@ -333,7 +341,7 @@ function Overview({
       <div className="panel">
         <h3>接入比赛 — 全自动拉题 / 下载 / 派工 / 交 flag</h3>
         <p className="muted">
-          连上之后 Poller 会周期性拉题单，新题自动进解题流水线。没有赛事 API 时先点「接入演示比赛」。
+          连上之后 Poller 会周期性拉题单，新题自动进解题流水线。没有赛事 API 时先点「接入演示比赛」。附件在 files.ctf.example.com 这类 CDN 上且需要 Cookie 时，填「信任的附件域名」。
         </p>
         <div className="buttons" style={{ marginTop: 0 }}>
           <button type="button" className="primary" onClick={() => void connectContest("mock")} disabled={contestBusy || connected}>
@@ -372,6 +380,15 @@ function Overview({
               onChange={(e) => setContestCookie(e.target.value)}
             />
           </div>
+          <div className="field">
+            <label htmlFor="contest-origins">信任的附件域名（可选）</label>
+            <input
+              id="contest-origins"
+              placeholder="https://files.ctf.example.com"
+              value={contestOrigins}
+              onChange={(e) => setContestOrigins(e.target.value)}
+            />
+          </div>
           <button type="button" onClick={() => void connectContest("ctfd")} disabled={contestBusy || !contestUrl.trim()}>
             {contestBusy ? "连接中…" : "接入 CTFd"}
           </button>
@@ -382,6 +399,9 @@ function Overview({
               已接入：{contestLabel(status)}
               {typeof contest?.lastListed === "number" ? ` · 上次列出 ${contest.lastListed} 道` : ""}
               {contest?.lastPollAt ? ` · 拉取 ${new Date(contest.lastPollAt).toLocaleTimeString()}` : ""}
+              {contest?.trustedCredentialOrigins && contest.trustedCredentialOrigins.length > 0
+                ? ` · 信任域名 ${contest.trustedCredentialOrigins.join(", ")}`
+                : ""}
             </span>
           ) : (
             <span className="muted">当前未接入比赛，只会处理下面粘贴的单题。</span>

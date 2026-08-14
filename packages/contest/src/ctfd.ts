@@ -10,7 +10,7 @@ import type {
   DownloadResult,
 } from "@rio/domain";
 import type { ContestAdapter } from "./adapter.js";
-import { shouldAttachContestCredential } from "./credential.js";
+import { normalizeTrustedOrigins, shouldAttachContestCredential } from "./credential.js";
 import { MAX_REDIRECTS } from "./fetch-guard.js";
 import { streamResponseToSink } from "./stream-body.js";
 
@@ -145,7 +145,7 @@ export class CtfdContestAdapter implements ContestAdapter {
   private readonly token: string | null;
   private readonly cookie: string | null;
   private readonly fetchImpl: FetchLike;
-  private readonly trustedCredentialOrigins: string[];
+  readonly trustedCredentialOrigins: string[];
   private csrf: string | null = null;
   private cache = new Map<number, CachedDetail>();
   private extras = new Map<string, { remote: RemoteChallengeDetail; files: Map<string, Buffer> }>();
@@ -157,7 +157,7 @@ export class CtfdContestAdapter implements ContestAdapter {
     this.cookie = opts.cookie?.trim() || null;
     this.miscCryptoOnly = opts.miscCryptoOnly !== false;
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.trustedCredentialOrigins = opts.trustedCredentialOrigins ?? [];
+    this.trustedCredentialOrigins = normalizeTrustedOrigins(opts.trustedCredentialOrigins);
     this.hostKey = new URL(this.baseUrl).host.replace(/[^a-zA-Z0-9.-]/g, "_");
   }
 

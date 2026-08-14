@@ -22,6 +22,63 @@ const API_MAP: Record<PiProviderSpec["protocol"], string> = {
   ANTHROPIC_MESSAGES: "anthropic-messages",
 };
 
+export function buildPiModelsDocument(specs: PiProviderSpec[]): {
+  providers: Record<
+    string,
+    {
+      name: string;
+      baseUrl: string;
+      api: string;
+      compat: ReturnType<typeof compatFlagsFor>;
+      models: { id: string; reasoning: boolean; contextWindow: number; maxTokens: number }[];
+    }
+  >;
+} {
+  const providers: Record<
+    string,
+    {
+      name: string;
+      baseUrl: string;
+      api: string;
+      compat: ReturnType<typeof compatFlagsFor>;
+      models: { id: string; reasoning: boolean; contextWindow: number; maxTokens: number }[];
+    }
+  > = {};
+  for (const spec of specs) {
+    const profile = resolveCompatProfile(spec.compatProfile ?? "AUTO", spec);
+    const model = {
+      id: spec.modelId,
+      reasoning: profile === "DEEPSEEK" || profile === "ZAI",
+      contextWindow: spec.contextWindow,
+      maxTokens: spec.maxOutputTokens,
+    };
+    const existing = providers[spec.id];
+    if (!existing) {
+      providers[spec.id] = {
+        name: spec.displayName,
+        baseUrl: spec.baseUrl,
+        api: API_MAP[spec.protocol],
+        compat: compatFlagsFor(profile),
+        models: [model],
+      };
+    } else if (!existing.models.some((m) => m.id === spec.modelId)) {
+      existing.models.push(model);
+    }
+  }
+  return { providers };
+}
+
+export function resolveModelOnRuntime(
+  runtime: SessionModelRuntime,
+  spec: { id: string; modelId: string },
+): unknown {
+  const model = runtime.getModel(spec.id, spec.modelId);
+  if (!model) {
+    throw new Error(`Pi runtime: model ${spec.modelId} not found in current session runtime`);
+  }
+  return model;
+}
+
 /** Lazy SDK handle — the heavy package loads on first real use. */
 let sdkPromise: Promise<typeof import("@earendil-works/pi-coding-agent")> | null = null;
 function getSdk(): Promise<typeof import("@earendil-works/pi-coding-agent")> {
@@ -29,11 +86,18 @@ function getSdk(): Promise<typeof import("@earendil-works/pi-coding-agent")> {
   return sdkPromise;
 }
 
+/** Session-owned runtime: switchModel must reuse this, never ModelRuntime.create. */
+export interface SessionModelRuntime {
+  getModel(providerId: string, modelId: string): unknown;
+}
+
 class PiSessionHandle implements SolverSessionHandle {
   usage_ = { inputTokens: 0, outputTokens: 0, toolCalls: 0 };
   constructor(
     readonly sessionId: string,
     readonly piSession: AgentSession,
+    readonly modelRuntime: SessionModelRuntime,
+    readonly providers: PiProviderSpec[],
   ) {}
 
   waitForIdle(): Promise<void> {
@@ -179,8 +243,10 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
 
   async #create(config: SolverSessionConfig, resume: boolean): Promise<PiSessionHandle> {
     const { createAgentSession, DefaultResourceLoader, SessionManager } = await getSdk();
+    const specs = this.providers.length > 0 ? this.providers : (config.piProviders ?? []);
     const spec = this.#pickProvider(config);
-    const { modelRuntime, model } = await this.#buildModelRuntime(spec);
+    const modelRuntime = await this.#buildModelRuntime(specs);
+    const model = resolveModelOnRuntime(modelRuntime, spec) as Parameters<AgentSession["setModel"]>[0];
     const persistedFile = config.persistedSession?.piSessionFile;
     const sessionManager = resume && persistedFile
       ? SessionManager.open(persistedFile, config.sessionDir, config.cwd)
@@ -207,7 +273,7 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
       noTools: "builtin", // disable read/bash/edit/write — our tools only (§45)
     });
 
-    const handle = new PiSessionHandle(config.sessionId, session);
+    const handle = new PiSessionHandle(config.sessionId, session, modelRuntime, specs);
     session.subscribe((event) => this.#onEvent(event, handle, config));
     await session.prompt(config.initialMessage);
     return handle;
@@ -221,9 +287,11 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
   async switchModel(session: SolverSessionHandle, modelRef: ModelRef): Promise<void> {
     const h = session as PiSessionHandle;
     if (!modelRef?.modelId) throw new Error("switchModel requires modelId");
-    const spec = this.#pickProvider({ modelRef, piProviders: this.providers } as SolverSessionConfig);
-    const { model } = await this.#buildModelRuntime(spec);
-    await h.piSession.setModel(model);
+    if (!h.modelRuntime) throw new Error("switchModel: session has no ModelRuntime");
+    const specs = h.providers?.length ? h.providers : this.providers;
+    const spec = this.#pickProvider({ modelRef, piProviders: specs } as SolverSessionConfig);
+    const model = resolveModelOnRuntime(h.modelRuntime, spec);
+    await h.piSession.setModel(model as Parameters<AgentSession["setModel"]>[0]);
   }
 
   async abort(session: SolverSessionHandle): Promise<void> {
@@ -249,49 +317,27 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
     return selectPiProvider(providers, config.modelRef?.modelId);
   }
 
-  async #buildModelRuntime(spec: PiProviderSpec) {
+  async #buildModelRuntime(specs: PiProviderSpec[]) {
+    if (specs.length === 0) {
+      throw new Error("Pi runtime: no model providers configured. Add one via Dashboard/CLI first.");
+    }
     const { ModelRuntime } = await getSdk();
     mkdirSync(this.piDir, { recursive: true });
     const modelsPath = join(this.piDir, "models.json");
-    const profile = resolveCompatProfile(spec.compatProfile ?? "AUTO", spec);
-    writeFileSync(
-      modelsPath,
-      JSON.stringify(
-        {
-          providers: {
-            [spec.id]: {
-              name: spec.displayName,
-              baseUrl: spec.baseUrl,
-              api: API_MAP[spec.protocol],
-              compat: compatFlagsFor(profile),
-              models: [
-                {
-                  id: spec.modelId,
-                  reasoning: profile === "DEEPSEEK" || profile === "ZAI",
-                  contextWindow: spec.contextWindow,
-                  maxTokens: spec.maxOutputTokens,
-                },
-              ],
-            },
-          },
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
+    writeFileSync(modelsPath, JSON.stringify(buildPiModelsDocument(specs), null, 2), "utf8");
 
     const modelRuntime = await ModelRuntime.create({
       modelsPath,
       authPath: join(this.piDir, "auth.json"),
       refreshOnCreate: false,
     });
-    await modelRuntime.setRuntimeApiKey(spec.id, spec.apiKey);
-    const model = modelRuntime.getModel(spec.id, spec.modelId);
-    if (!model) {
-      throw new Error(`Pi runtime: model ${spec.modelId} not found in provider ${spec.id}`);
+    const seen = new Set<string>();
+    for (const spec of specs) {
+      if (seen.has(spec.id)) continue;
+      seen.add(spec.id);
+      await modelRuntime.setRuntimeApiKey(spec.id, spec.apiKey);
     }
-    return { modelRuntime, model };
+    return modelRuntime;
   }
 
   async #buildTools(ctx: ToolContext): Promise<ToolDefinition[]> {
