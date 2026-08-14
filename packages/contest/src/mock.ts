@@ -14,7 +14,7 @@ import type {
 } from "@rio/domain";
 import type { ContestAdapter } from "./adapter.js";
 import { buildFixtures, type FixtureChallenge } from "./fixtures.js";
-import { createHash } from "node:crypto";
+import { streamResponseToSink } from "./stream-body.js";
 
 export type MockOp = "list" | "detail" | "download" | "start" | "hint" | "submit";
 
@@ -163,12 +163,7 @@ export class MockContestAdapter implements ContestAdapter {
     if (!state) throw new Error(`Mock: unknown challenge ${remoteId}`);
     const detail: RemoteChallengeDetail = {
       ...this.#toRemote(state),
-      attachments: state.challenge.attachments.map((a, i) => ({
-        remoteId: `att-${i}`,
-        name: a.name,
-        url: `${this.baseUrl}/files/${remoteId}/${encodeURIComponent(a.name)}`,
-        sizeBytes: a.bytes.length,
-      })),
+      attachments: this.#attachmentsOf(state),
     };
     return detail;
   }
@@ -250,18 +245,18 @@ export class MockContestAdapter implements ContestAdapter {
     if (!res.ok) {
       return { ok: false, bytes: 0, sha256: "", retryable: res.status >= 500, message: `HTTP ${res.status}` };
     }
-    const buf = Buffer.from(await res.arrayBuffer());
-    const hash = createHash("sha256").update(buf);
-    if (sink) {
-      sink.write(buf);
-      sink.end();
+    const streamed = await streamResponseToSink(res, sink);
+    if (!streamed.ok) {
+      return { ok: false, bytes: streamed.bytes, sha256: streamed.sha256, retryable: streamed.retryable, message: streamed.message };
     }
-    return {
-      ok: true,
-      retryable: false,
-      bytes: buf.length,
-      sha256: hash.digest("hex"),
-    };
+    return { ok: true, retryable: false, bytes: streamed.bytes, sha256: streamed.sha256 };
+  }
+
+  replaceAttachments(remoteId: string, attachments: { name: string; bytes: Buffer }[]): void {
+    const state = this.states.get(remoteId);
+    if (!state) throw new Error(`Mock: unknown challenge ${remoteId}`);
+    state.challenge.attachments = attachments;
+    state.updatedAt = this.clock();
   }
 
   // -------------------------------------------------------------------------
@@ -378,6 +373,15 @@ export class MockContestAdapter implements ContestAdapter {
     if (!this.authOk) throw new Error("Mock: authenticate() not called");
   }
 
+  #attachmentsOf(state: MockState) {
+    return state.challenge.attachments.map((a, i) => ({
+      remoteId: `att-${i}`,
+      name: a.name,
+      url: this.baseUrl ? `${this.baseUrl}/files/${state.challenge.id}/${encodeURIComponent(a.name)}` : null,
+      sizeBytes: a.bytes.length,
+    }));
+  }
+
   #toRemote(state: MockState): RemoteChallenge {
     return {
       remoteId: state.challenge.id,
@@ -388,6 +392,7 @@ export class MockContestAdapter implements ContestAdapter {
       solveCount: null,
       createdAt: state.releasedAt ?? 0,
       updatedAt: state.updatedAt ?? state.releasedAt ?? 0,
+      attachments: this.#attachmentsOf(state),
     };
   }
 

@@ -354,6 +354,8 @@ export interface RemoteChallenge {
   solveCount: number | null;
   createdAt: number | null;
   updatedAt: number | null;
+  /** Present when the list/detail payload already includes file metadata. */
+  attachments?: RemoteAttachment[];
 }
 
 export interface RemoteChallengeDetail extends RemoteChallenge {

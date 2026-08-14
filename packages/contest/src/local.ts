@@ -6,7 +6,6 @@
 //   └── answer.json      { flag: "..." }                             (optional — auto verification)
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { createHash } from "node:crypto";
 import type {
   ContestCapabilities,
   RemoteChallenge,
@@ -16,6 +15,7 @@ import type {
   DownloadResult,
 } from "@rio/domain";
 import type { ContestAdapter } from "./adapter.js";
+import { streamFileToSink } from "./stream-body.js";
 import { z } from "zod";
 
 const challengeJsonSchema = z.object({
@@ -98,12 +98,7 @@ export class LocalContestAdapter implements ContestAdapter {
   async getChallenge(): Promise<RemoteChallengeDetail> {
     return {
       ...this.#toRemote(),
-      attachments: this.attachments.map((a, i) => ({
-        remoteId: `att-${i}`,
-        name: a.name,
-        url: null,
-        sizeBytes: statSync(a.path).size,
-      })),
+      attachments: this.#attachmentMetas(),
     };
   }
 
@@ -135,13 +130,20 @@ export class LocalContestAdapter implements ContestAdapter {
   ): Promise<DownloadResult> {
     const found = this.attachments.find((a) => a.name === attachment.name);
     if (!found) return { ok: false, bytes: 0, sha256: "", retryable: false, message: "attachment not found" };
-    const buf = readFileSync(found.path);
-    const hash = createHash("sha256").update(buf);
-    if (sink) {
-      sink.write(buf);
-      sink.end();
+    const streamed = await streamFileToSink(found.path, sink);
+    if (!streamed.ok) {
+      return { ok: false, bytes: streamed.bytes, sha256: streamed.sha256, retryable: streamed.retryable, message: streamed.message };
     }
-    return { ok: true, retryable: false, bytes: buf.length, sha256: hash.digest("hex") };
+    return { ok: true, retryable: false, bytes: streamed.bytes, sha256: streamed.sha256 };
+  }
+
+  #attachmentMetas() {
+    return this.attachments.map((a, i) => ({
+      remoteId: `att-${i}`,
+      name: a.name,
+      url: null as string | null,
+      sizeBytes: statSync(a.path).size,
+    }));
   }
 
   #toRemote(): RemoteChallenge {
@@ -154,6 +156,7 @@ export class LocalContestAdapter implements ContestAdapter {
       solveCount: null,
       createdAt: 0,
       updatedAt: 0,
+      attachments: this.#attachmentMetas(),
     };
   }
 }

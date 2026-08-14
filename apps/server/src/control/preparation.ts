@@ -13,6 +13,7 @@ import { WorkspaceManager, type WorkspaceLayout, resolveAttachmentTarget } from 
 import { buildChallengeFile, triage } from "@rio/solver";
 import type { EventBus } from "./bus.js";
 import type { StateMachine } from "../state-machine.js";
+import { upsertRemoteAttachments } from "./challenge-sync.js";
 
 export class PreparationService {
   private active = new Set<string>();
@@ -61,31 +62,9 @@ export class PreparationService {
       detail = await localAdapter.getChallenge();
     }
 
-    for (const ra of detail.attachments) {
-      const existing = repos.attachments.listByChallenge(challenge.id).find((a) => a.name === ra.name);
-      if (!existing) {
-        repos.attachments.create({
-          challengeId: challenge.id,
-          remoteId: ra.remoteId,
-          name: ra.name,
-          remoteUrl: ra.url,
-          localPath: null,
-          sizeBytes: ra.sizeBytes,
-          sha256: null,
-          mime: null,
-          downloadStatus: "PENDING",
-          downloadedAt: null,
-        });
-      }
-    }
-
-    // 2. download all attachments (streaming, budget-checked)
+    upsertRemoteAttachments(repos, challenge.id, detail.attachments);
+    await this.downloadPending(challenge, detail);
     const layout = this.deps.workspace.ensure(challenge.id);
-    const attachments = repos.attachments.listByChallenge(challenge.id);
-    for (const att of attachments) {
-      if (att.downloadStatus === "DOWNLOADED" && att.localPath && existsSync(att.localPath)) continue;
-      await this.#downloadOne(challenge, detail, att, layout);
-    }
 
     // 3. triage + challenge.txt
     const atts = repos.attachments.listByChallenge(challenge.id);
@@ -119,6 +98,27 @@ export class PreparationService {
     });
     logger.info({ event: "challenge_ready", challengeId: challenge.id, triage: result.summary });
     this.deps.stateMachine.transition(challenge.id, "PREPARE_DONE", { payload: { triage: result.summary } });
+  }
+
+  /** Download PENDING/FAILED attachments without a lifecycle transition (revision path). */
+  async downloadPending(challenge: Challenge, detail?: RemoteChallengeDetail): Promise<void> {
+    const { repos, adapter } = this.deps;
+    let resolved = detail;
+    if (!resolved) {
+      try {
+        resolved = await adapter.getChallenge(challenge.remoteId ?? "local");
+      } catch {
+        const localAdapter = adapter as unknown as { getChallenge: () => Promise<RemoteChallengeDetail> };
+        resolved = await localAdapter.getChallenge();
+      }
+    }
+    const layout = this.deps.workspace.ensure(challenge.id);
+    const attachments = repos.attachments.listByChallenge(challenge.id);
+    for (const att of attachments) {
+      if (att.downloadStatus === "DOWNLOADED" && att.localPath && existsSync(att.localPath)) continue;
+      await this.#downloadOne(challenge, resolved, att, layout);
+    }
+    this.refreshChallengeFile(challenge.id);
   }
 
   /** Streaming download: HTTP stream → tee (sha256) → .part file → atomic rename. */
@@ -164,6 +164,11 @@ export class PreparationService {
         bytes += c.length;
       });
       sink.pipe(fileStream);
+      const finished = new Promise<void>((resolveDone, rejectDone) => {
+        fileStream.on("finish", () => resolveDone());
+        fileStream.on("error", rejectDone);
+        sink.on("error", rejectDone);
+      });
 
       const result = await this.deps.adapter.downloadAttachment(detail, ra, sink);
       if (!result.ok) {
@@ -178,15 +183,16 @@ export class PreparationService {
         throw new Error(`download failed for ${att.name}: ${result.message ?? "unknown"}`);
       }
 
-      await new Promise<void>((resolveDone, rejectDone) => {
-        fileStream.on("finish", () => resolveDone());
-        fileStream.on("error", rejectDone);
-        sink.end();
-      });
+      if (!sink.writableEnded) sink.end();
+      await finished;
 
       const sha = hash.digest("hex");
       if (att.sizeBytes !== null && bytes !== att.sizeBytes) {
-        unlinkSync(part);
+        try {
+          unlinkSync(part);
+        } catch {
+          /* ignore */
+        }
         repos.attachments.update(att.id, { downloadStatus: "FAILED" });
         throw new Error(`size mismatch for ${att.name}: got ${bytes}, expected ${att.sizeBytes}`);
       }

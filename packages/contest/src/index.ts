@@ -9,3 +9,5 @@ export * from "./local.js";
 export * from "./url.js";
 export * from "./ctfd.js";
 export * from "./fetch-guard.js";
+export * from "./credential.js";
+export * from "./stream-body.js";

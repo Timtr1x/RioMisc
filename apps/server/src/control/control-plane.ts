@@ -24,10 +24,10 @@ import { ReflectionService } from "./reflection.js";
 import { RecoveryManager } from "./recovery.js";
 import { ModelRegistry } from "./registry.js";
 import { acceptIntoSolved } from "./accept.js";
-import { isDeletedRemoteId, rememberDeletedRemoteId } from "./deleted.js";
-import { ensureChallengeStarted } from "./start-policy.js";
+import { rememberDeletedRemoteId } from "./deleted.js";
+import { ChallengeStartService, isRetryableContestError } from "./start-policy.js";
 import { isRetryablePrepareError, prepareBackoffMs } from "./prepare-retry.js";
-import { createHash } from "node:crypto";
+import { syncRemoteChallenge } from "./challenge-sync.js";
 
 export interface ControlPlaneDeps {
   repos: Repositories;
@@ -68,6 +68,7 @@ export class ControlPlane {  private poller: Poller;
   /** Challenges discovered before this process started are ignored in idle mode. */
   private readonly bootAt = Date.now();
   private prepareBackoff = new Map<string, { failures: number; nextAt: number }>();
+  private startService: ChallengeStartService;
   private contestMeta: {
     baseUrl: string | null;
     connectedAt: number | null;
@@ -108,6 +109,13 @@ export class ControlPlane {  private poller: Poller;
       this.contestMeta.baseUrl = "mock://demo";
       this.contestMeta.connectedAt = Date.now();
     }
+    this.startService = new ChallengeStartService({
+      adapter: deps.adapter,
+      repos: deps.repos,
+      bus: deps.bus,
+      policy: deps.config.challenge.startPolicy,
+      logger: deps.logger,
+    });
     this.workerPool = new WorkerPool(
       deps.repos,
       deps.logger,
@@ -176,89 +184,37 @@ export class ControlPlane {  private poller: Poller;
     this.contestMeta.lastListed = list.length;
     let changed = false;
     for (const r of list) {
-      if (isDeletedRemoteId(repos, r.remoteId)) continue;
-      const existing = repos.challenges.getByRemoteId(r.remoteId);
-      const canonical = JSON.stringify({
-        title: r.title,
-        description: r.description,
-        category: r.category,
-        score: r.score,
-        solveCount: r.solveCount,
-      });
-      const hash = createHash("sha256").update(canonical).digest("hex");
-      if (!existing) {
-        const id = `ch_${r.remoteId.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
-        repos.challenges.create({
-          id,
-          remoteId: r.remoteId,
-          title: r.title,
-          description: r.description,
-          category: normalizeCategory(r.category),
-          subcategory: null,
-          score: r.score,
-          solveCount: r.solveCount,
-          lifecycleStatus: "DISCOVERED",
-          startStatus: "NOT_STARTED",
-          hintStatus: "LOCKED",
-          progressStatus: "UNKNOWN",
-          priority: 0,
-          lastPriorityScore: null,
-          difficultyEstimate: null,
-          currentSolverType: null,
-          currentSessionId: null,
-          wrongSubmissionCount: 0,
-          solverRestartCount: 0,
-          pausedReason: null,
-          parkedReason: null,
-          blockedReason: null,
-          contentHash: hash,
-          discoveredAt: Date.now(),
-          updatedAt: Date.now(),
-          startedAt: null,
-          solverStartedAt: null,
-          wallClockSolveMs: 0,
-          activeSolveMs: 0,
-          remoteCreatedAt: r.createdAt,
-          remoteUpdatedAt: r.updatedAt,
-        });
-        repos.events.append("CHALLENGE_DISCOVERED", id, { remoteId: r.remoteId, title: r.title, category: r.category });
-        bus.publish({ type: "CHALLENGE_DISCOVERED", challengeId: id, payload: { remoteId: r.remoteId, title: r.title } });
-        logger.info({ event: "challenge_discovered", challengeId: id, title: r.title });
+      const result = syncRemoteChallenge({ repos, remote: r, bus });
+      if (!result) continue;
+      if (result.created) {
+        logger.info({ event: "challenge_discovered", challengeId: result.challengeId, title: r.title });
         changed = true;
-        const created = repos.challenges.get(id);
-        if (created) {
-          void ensureChallengeStarted({
-            policy: this.deps.config.challenge.startPolicy,
-            phase: "discovery",
-            challenge: created,
-            adapter: this.deps.adapter,
-            repos,
-            bus,
-          }).catch((e) => logger.warn({ event: "start_on_discovery_failed", challengeId: id, err: String(e) }));
+      } else if (result.metadataChanged || result.attachmentChanged) {
+        if (result.metadataChanged) {
+          this.injectUpdate(result.challengeId, result.previousDescription ?? "", result.description);
         }
-      } else if (existing.contentHash !== hash) {
-        repos.challenges.update(existing.id, {
-          title: r.title,
-          description: r.description,
-          category: normalizeCategory(r.category),
-          score: r.score,
-          solveCount: r.solveCount,
-          contentHash: hash,
+        if (result.attachmentChanged) {
+          this.injectAttachmentUpdate(result.challengeId, result.attachmentSummary);
+          const ch = repos.challenges.get(result.challengeId);
+          if (ch) {
+            void this.deps.preparation.downloadPending(ch).catch((e) =>
+              logger.warn({ event: "attachment_redownload_failed", challengeId: ch.id, err: String(e) }),
+            );
+          }
+        }
+        logger.info({
+          event: result.attachmentChanged ? "challenge_attachment_updated" : "challenge_updated",
+          challengeId: result.challengeId,
         });
-        repos.challenges.recordRevision({
-          id: `rev_${Math.random().toString(36).slice(2, 12)}`,
-          challengeId: existing.id,
-          contentHash: hash,
-          title: r.title,
-          description: r.description,
-          category: r.category,
-          score: r.score,
-          attachmentMetasJson: "[]",
-        });
-        bus.publish({ type: "CHALLENGE_UPDATED", challengeId: existing.id, payload: { title: r.title } });
-        this.injectUpdate(existing.id, existing.description, r.description);
-        logger.info({ event: "challenge_updated", challengeId: existing.id });
         changed = true;
+      }
+    }
+    if (this.deps.config.challenge.startPolicy === "ON_DISCOVERY") {
+      for (const c of repos.challenges.list()) {
+        if (c.startStatus !== "NOT_STARTED" || !this.#schedulable(c)) continue;
+        void this.startService.ensure(c, "discovery").catch((e) =>
+          logger.warn({ event: "start_on_discovery_failed", challengeId: c.id, err: String(e) }),
+        );
       }
     }
     return { changed };
@@ -277,6 +233,22 @@ New description:
 <${newDesc}>
 
 Re-evaluate assumptions affected by this change.`;
+      this.workerPool.inject(challengeId, msg);
+    }
+    this.deps.preparation.refreshChallengeFile(challengeId);
+  }
+
+  private injectAttachmentUpdate(challengeId: string, summary: string): void {
+    if (this.workerPool.has(challengeId)) {
+      const msg = `OFFICIAL ATTACHMENT UPDATE
+
+The official challenge attachments changed.
+
+Updated files:
+<${summary || "(see challenge.txt)"}>
+
+Re-download is in progress. Re-read input/ and drop assumptions that
+depended on the previous files.`;
       this.workerPool.inject(challengeId, msg);
     }
     this.deps.preparation.refreshChallengeFile(challengeId);
@@ -315,25 +287,28 @@ Re-evaluate assumptions affected by this change.`;
       // 3. scores — compute once (manualPriority is already inside the formula)
       const queued = repos.challenges.listByStatus("QUEUED").filter((c) => this.#schedulable(c));
       const now = Date.now();
-      const ranked = scoreAndRankQueued(queued, (c) =>
-        computePriorityScore(
-          {
-            challengeId: c.id,
-            category: c.category,
-            manualPriority: c.priority,
-            score: c.score,
-            solveCount: c.solveCount,
-            difficulty: c.difficultyEstimate,
-            attempts: c.solverRestartCount,
-            progress: c.progressStatus,
-            elapsedActiveMs: c.activeSolveMs,
-            hintStatus: c.hintStatus,
-            requiredResources: { resourceClass: "NORMAL", resourceTypes: ["LLM"] },
-            discoveredAt: c.discoveredAt,
-          },
-          undefined,
-          now,
-        ),
+      const ranked = scoreAndRankQueued(
+        queued,
+        (c) =>
+          computePriorityScore(
+            {
+              challengeId: c.id,
+              category: c.category,
+              manualPriority: c.priority,
+              score: c.score,
+              solveCount: c.solveCount,
+              difficulty: c.difficultyEstimate,
+              attempts: c.solverRestartCount,
+              progress: c.progressStatus,
+              elapsedActiveMs: c.activeSolveMs,
+              hintStatus: c.hintStatus,
+              requiredResources: { resourceClass: "NORMAL", resourceTypes: ["LLM"] },
+              discoveredAt: c.discoveredAt,
+            },
+            undefined,
+            now,
+          ),
+        (c) => c.discoveredAt,
       );
       for (const { item: c, score } of ranked) {
         repos.challenges.update(c.id, { lastPriorityScore: score });
@@ -377,21 +352,14 @@ Re-evaluate assumptions affected by this change.`;
     try {
       const c = this.deps.repos.challenges.get(challengeId);
       if (!c) return;
-      await ensureChallengeStarted({
-        policy: this.deps.config.challenge.startPolicy,
-        phase: "preparation",
-        challenge: c,
-        adapter: this.deps.adapter,
-        repos: this.deps.repos,
-        bus: this.deps.bus,
-      });
+      await this.startService.ensure(c, "preparation");
       await this.deps.preparation.prepare(c);
       this.prepareBackoff.delete(challengeId);
     } catch (e) {
       this.deps.logger.error({ event: "prepare_failed", challengeId, err: String(e) });
       const c = this.deps.repos.challenges.get(challengeId);
       if (c && c.lifecycleStatus === "PREPARING") {
-        if (isRetryablePrepareError(e)) {
+        if (isRetryablePrepareError(e) || isRetryableContestError(e)) {
           const prev = this.prepareBackoff.get(challengeId)?.failures ?? 0;
           const failures = prev + 1;
           this.prepareBackoff.set(challengeId, { failures, nextAt: Date.now() + prepareBackoffMs(failures) });
@@ -406,17 +374,9 @@ Re-evaluate assumptions affected by this change.`;
   }
 
   async #startSolver(challenge: Challenge): Promise<void> {
-    const { repos, adapter, bus } = this.deps;
-    void adapter;
+    const { repos, bus } = this.deps;
 
-    await ensureChallengeStarted({
-      policy: this.deps.config.challenge.startPolicy,
-      phase: "solver",
-      challenge,
-      adapter,
-      repos,
-      bus,
-    });
+    await this.startService.ensure(challenge, "solver");
 
     const latest = repos.sessions.latestForChallenge(challenge.id);
     const resume = isResumableSession(latest);
@@ -924,6 +884,7 @@ Re-evaluate assumptions affected by this change.`;
     this.deps.preparation.replaceAdapter(adapter);
     this.deps.submission.replaceAdapter(adapter);
     this.deps.hints.replaceAdapter(adapter);
+    this.startService.replaceAdapter(adapter);
     this.contestMeta.baseUrl = meta.baseUrl;
     this.contestMeta.miscCryptoOnly = meta.miscCryptoOnly;
     this.contestMeta.connectedAt = meta.connected ? Date.now() : null;
@@ -1285,15 +1246,4 @@ Treat the rejection as negative evidence and continue solving.`;
       /* ignore */
     }
   }
-}
-
-function normalizeCategory(raw: string): Challenge["category"] {
-  const up = raw.toUpperCase().trim();
-  if (up.includes("MISC") || raw.includes("杂项") || /forensic/i.test(raw) || /osint/i.test(raw)) return "MISC";
-  if (up.includes("CRYPTO") || raw.includes("密码")) return "CRYPTO";
-  if (up.includes("WEB")) return "WEB";
-  if (up.includes("PWN")) return "PWN";
-  if (up.includes("REV")) return "REVERSE";
-  if (up === "OTHER") return "OTHER";
-  return "UNKNOWN";
 }

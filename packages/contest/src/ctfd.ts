@@ -10,6 +10,9 @@ import type {
   DownloadResult,
 } from "@rio/domain";
 import type { ContestAdapter } from "./adapter.js";
+import { shouldAttachContestCredential } from "./credential.js";
+import { MAX_REDIRECTS } from "./fetch-guard.js";
+import { streamResponseToSink } from "./stream-body.js";
 
 const UA = "rio-misc-agent/0.1 (CTF solver; authorized use)";
 const DETAIL_TTL_MS = 60_000;
@@ -23,6 +26,8 @@ export interface CtfdAdapterOptions {
   /** When true (default), only ingest Misc / Crypto / 杂项 / 密码. */
   miscCryptoOnly?: boolean;
   fetchImpl?: FetchLike;
+  /** Extra origins that may receive Token/Cookie/CSRF (e.g. the contest CDN). */
+  trustedCredentialOrigins?: string[];
 }
 
 export interface ExternalChallengeInput {
@@ -123,6 +128,7 @@ export class CtfdContestAdapter implements ContestAdapter {
   private readonly token: string | null;
   private readonly cookie: string | null;
   private readonly fetchImpl: FetchLike;
+  private readonly trustedCredentialOrigins: string[];
   private csrf: string | null = null;
   private cache = new Map<number, CachedDetail>();
   private extras = new Map<string, { remote: RemoteChallengeDetail; files: Map<string, Buffer> }>();
@@ -134,6 +140,7 @@ export class CtfdContestAdapter implements ContestAdapter {
     this.cookie = opts.cookie?.trim() || null;
     this.miscCryptoOnly = opts.miscCryptoOnly !== false;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.trustedCredentialOrigins = opts.trustedCredentialOrigins ?? [];
     this.hostKey = new URL(this.baseUrl).host.replace(/[^a-zA-Z0-9.-]/g, "_");
   }
 
@@ -277,12 +284,11 @@ export class CtfdContestAdapter implements ContestAdapter {
     const res = await this.#request(attachment.url);
     if (res.status === 429) return { ok: false, bytes: 0, sha256: "", retryable: true, message: "429 rate limited" };
     if (!res.ok) return { ok: false, bytes: 0, sha256: "", retryable: res.status >= 500, message: `HTTP ${res.status}` };
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (sink) {
-      sink.write(buf);
-      sink.end();
+    const streamed = await streamResponseToSink(res, sink);
+    if (!streamed.ok) {
+      return { ok: false, bytes: streamed.bytes, sha256: streamed.sha256, retryable: streamed.retryable, message: streamed.message };
     }
-    return { ok: true, retryable: false, bytes: buf.length, sha256: createHash("sha256").update(buf).digest("hex") };
+    return { ok: true, retryable: false, bytes: streamed.bytes, sha256: streamed.sha256 };
   }
 
   addExternalChallenge(input: ExternalChallengeInput): void {
@@ -371,19 +377,46 @@ export class CtfdContestAdapter implements ContestAdapter {
   }
 
   async #request(pathOrUrl: string, init: RequestInit = {}): Promise<Response> {
-    const url = /^https?:\/\//i.test(pathOrUrl) ? pathOrUrl : `${this.baseUrl}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`;
+    let url = this.#absoluteUrl(pathOrUrl);
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      const headers = this.#headersFor(url, init);
+      const res = await this.fetchImpl(url, { ...init, headers, redirect: "manual" });
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get("location");
+        if (!loc) throw new Error(`redirect without Location from ${url}`);
+        url = new URL(loc, url).toString();
+        continue;
+      }
+      return res;
+    }
+    throw new Error(`too many redirects (${MAX_REDIRECTS}) fetching ${pathOrUrl}`);
+  }
+
+  #absoluteUrl(pathOrUrl: string): string {
+    return /^https?:\/\//i.test(pathOrUrl)
+      ? pathOrUrl
+      : `${this.baseUrl}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`;
+  }
+
+  #headersFor(url: string, init: RequestInit): Headers {
     const headers = new Headers(init.headers);
     headers.set("User-Agent", UA);
     headers.set("Accept", "application/json, application/octet-stream, */*");
-    if (this.token) {
-      headers.set(
-        "Authorization",
-        this.token.startsWith("Bearer ") || this.token.startsWith("Token ") ? this.token : `Token ${this.token}`,
-      );
+    if (this.#shouldAttachContestCredential(url)) {
+      if (this.token) {
+        headers.set(
+          "Authorization",
+          this.token.startsWith("Bearer ") || this.token.startsWith("Token ") ? this.token : `Token ${this.token}`,
+        );
+      }
+      if (this.cookie) headers.set("Cookie", this.cookie);
+      if (this.csrf) headers.set("CSRF-Token", this.csrf);
     }
-    if (this.cookie) headers.set("Cookie", this.cookie);
-    if (this.csrf) headers.set("CSRF-Token", this.csrf);
     if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-    return this.fetchImpl(url, { ...init, headers, redirect: "follow" });
+    return headers;
+  }
+
+  #shouldAttachContestCredential(url: string): boolean {
+    return shouldAttachContestCredential(url, this.baseUrl, this.trustedCredentialOrigins);
   }
 }

@@ -66,10 +66,20 @@ export function computePriorityScore(
   return Math.round(score);
 }
 
-/** Score once (manualPriority already inside computePriorityScore), sort in memory, then persist. */
-export function scoreAndRankQueued<T>(queued: T[], scoreOf: (item: T) => number): { item: T; score: number }[] {
+/** Score once (manualPriority already inside computePriorityScore), sort in memory, then persist.
+ *  Equal scores break ties by discoveredAt ascending (older first). */
+export function scoreAndRankQueued<T>(
+  queued: T[],
+  scoreOf: (item: T) => number,
+  discoveredAtOf?: (item: T) => number,
+): { item: T; score: number }[] {
   const scored = queued.map((item) => ({ item, score: scoreOf(item) }));
-  scored.sort((a, b) => b.score - a.score);
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    const ta = discoveredAtOf?.(a.item) ?? 0;
+    const tb = discoveredAtOf?.(b.item) ?? 0;
+    return ta - tb;
+  });
   return scored;
 }
 

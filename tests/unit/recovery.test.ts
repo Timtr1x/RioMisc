@@ -191,6 +191,13 @@ describe("RecoveryManager startup matrix", () => {
     sending.stop();
   });
 
+  it("STARTING startStatus is reset to NOT_STARTED", async () => {
+    repos.challenges.create(seedChallenge({ id: "ch_start", lifecycleStatus: "DISCOVERED", startStatus: "STARTING" }));
+    await recovery.start();
+    expect(repos.challenges.get("ch_start")!.startStatus).toBe("NOT_STARTED");
+    expect(repos.challenges.get("ch_start")!.lifecycleStatus).toBe("DISCOVERED");
+  });
+
   it("PAUSED / PARKED / SOLVED stay put", async () => {
     repos.challenges.create(seedChallenge({ id: "ch_pause", lifecycleStatus: "PAUSED", pausedReason: "manual" }));
     repos.challenges.create(seedChallenge({ id: "ch_park", lifecycleStatus: "PARKED", parkedReason: "later" }));

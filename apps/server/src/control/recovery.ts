@@ -27,6 +27,7 @@ export class RecoveryManager {
     const { repos, logger } = this.deps;
 
     this.#resetStaleDownloads();
+    this.#resetInterruptedStarts();
     this.#clearAllLeases();
 
     for (const c of repos.challenges.list()) {
@@ -108,6 +109,15 @@ export class RecoveryManager {
         challengeId: lease.challengeId,
         payload: { reason: "recovery: stale lease" },
       });
+    }
+  }
+
+  #resetInterruptedStarts(): void {
+    const { repos, logger } = this.deps;
+    for (const c of repos.challenges.list()) {
+      if (c.startStatus !== "STARTING") continue;
+      repos.challenges.update(c.id, { startStatus: "NOT_STARTED" });
+      logger.info({ event: "recovery_reset_starting", challengeId: c.id }, "STARTING → NOT_STARTED");
     }
   }
 
