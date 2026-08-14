@@ -36,4 +36,15 @@ describe("schema migrations", () => {
     expect(cols.some((c) => c.name === "compat_profile")).toBe(true);
     db.close();
   });
+
+  it("close is idempotent — second close does not throw", () => {
+    const dir = mkdtempSync(join(tmpdir(), "rio-dbclose-"));
+    dirs.push(dir);
+    const db = new RioDb(join(dir, "t.sqlite"));
+    expect(db.isOpen).toBe(true);
+    db.close();
+    expect(db.isOpen).toBe(false);
+    expect(() => db.close()).not.toThrow();
+    expect(db.isOpen).toBe(false);
+  });
 });

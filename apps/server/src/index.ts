@@ -215,7 +215,12 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     api = await buildApi({ fastify, control, repos, bus, registry, secrets, config, logger });
   }
 
+  let shuttingDown = false;
   const shutdown = async (signal: string, exit = false) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
     logger.info({ event: "shutdown", signal }, "graceful shutdown");
     await control!.stop();
     await api?.close();
@@ -223,9 +228,10 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     logger.info({ event: "shutdown_complete" });
     if (exit) process.exit(0);
   };
-
-  process.on("SIGINT", () => void shutdown("SIGINT", true));
-  process.on("SIGTERM", () => void shutdown("SIGTERM", true));
+  const onSigint = () => void shutdown("SIGINT", true);
+  const onSigterm = () => void shutdown("SIGTERM", true);
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
 
   return {
     config,

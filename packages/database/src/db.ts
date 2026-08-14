@@ -11,6 +11,7 @@ import { dirname } from "node:path";
 
 export class RioDb {
   readonly sqlite: DatabaseSync;
+  private closed = false;
 
   constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -18,6 +19,10 @@ export class RioDb {
     this.sqlite.exec("PRAGMA journal_mode = WAL;");
     this.sqlite.exec("PRAGMA foreign_keys = ON;");
     this.sqlite.exec("PRAGMA busy_timeout = 5000;");
+  }
+
+  get isOpen(): boolean {
+    return !this.closed;
   }
 
   run(sql: string, ...params: unknown[]): { changes: number | bigint; lastInsertRowid: number | bigint } {
@@ -45,6 +50,8 @@ export class RioDb {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.sqlite.close();
   }
 }

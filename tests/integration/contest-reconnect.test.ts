@@ -120,6 +120,9 @@ describe("contest reconnect after ControlPlane restart", () => {
     expect(fake.hits.length).toBeGreaterThan(hitsAfterFirst);
     expect(fake.hits.slice(hitsAfterFirst).some((h) => h.auth === "Token tok-r1")).toBe(true);
     expect(r2.repos.challenges.list().some((c) => c.title === "stego")).toBe(true);
+    await r2.close();
+    await expect(r2.close()).resolves.toBeUndefined();
+    runtimes.pop();
   });
 
   it("stays idle after an explicit disconnect — no sneak reconnect", async () => {
