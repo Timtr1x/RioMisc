@@ -1,7 +1,10 @@
-# RioMisc — CTF Misc/Crypto Autonomous Agent Runtime (MVP-1)
+# RioMisc — CTF Misc/Crypto Autonomous Agent Runtime
 
 西湖论剑 RioMisc：一个能够真实接入 CTF 比赛、自动发现/下载题目、调度 Solver Agent、
 并行解题、获取 Hint、验证 Flag、限速自动提交、崩溃后持久化恢复的完整运行时代理。
+
+> **里程碑状态：** MVP-1 已 RELEASED · MVP-1.1（运行时加固）已完成 · MVP-2 未开始
+> （详见文末「里程碑状态」）
 
 > **架构三句话**：Control Plane 决定比赛怎么打；Solver Agent 决定一道题怎么解；
 > Tool Runtime 决定 Agent 可以安全地做什么。
@@ -176,7 +179,9 @@ RIO_AGENT_RUNTIME=pi npm run dev
 `config/runtime.yaml` 全部字段 Zod 校验，非法配置直接拒绝启动。
 API Key 通过 Dashboard「Add Provider」或 CLI 配置，加密落盘。
 
-## MVP-1 Definition of Done 对照
+## 里程碑状态
+
+### MVP-1（已 RELEASED）
 
 - [x] Windows 原生启动 · SQLite 自动迁移 · 配置校验 · SecretStore
 - [x] Mock Contest · 轮询 · 动态放题 · 题目更新 · Start · Hint · Submit · 限速 · 重试
@@ -187,3 +192,24 @@ API Key 通过 Dashboard「Add Provider」或 CLI 配置，加密落盘。
 - [x] 本地验证 · 去重 · Cooldown · Wrong 反馈 · Max wrong · Correct→SOLVED
 - [x] Dashboard · CLI · Provider 配置/测试 · 健康监控 · 结构化日志
 - [x] 服务器崩溃恢复 · Worker 崩溃恢复 · API 暂时性失败恢复
+
+### MVP-1.1（运行时加固，已完成）
+
+- [x] 真 Pi Session Resume（DB 记录 `pi_session_file`，worker 恢复原上下文）
+- [x] Crash Recovery 矩阵（PREPARING / ACTIVE / VERIFYING / SUBMITTING）
+- [x] UNKNOWN 提交永不自动重交
+- [x] Hint 不误取：stall 判定 + 失败 backoff + unsupported 不打 API
+- [x] 大文件无 OOM：附件名消毒、bounded IO、ZIP/GZIP/PCAP 限制
+- [x] URL 单题接入：8MB HTML / 128MB 附件 / 30s / 私网 SSRF 防护 / 有限跳转
+- [x] Provider 故障可见：3 次失败 DEGRADED、5 次 DOWN，`/api/health` 暴露
+- [x] 压测实跑：30 题 burst + 256MB 大文件（heapDelta 远小于文件体积）
+- [x] 非 loopback 监听需 `RIO_API_TOKEN` · SQLite 关停幂等 · CI
+- [x] 验收：typecheck / unit+integration / E2E / pi-smoke / pi-e2e 全部通过
+
+> 1.1 的六个退出指标（真 Pi Resume、Recovery 矩阵、UNKNOWN 不重交、Hint 不误取、
+> 大文件无 OOM、30 题 burst + 真实模型）全部达成，按 `开发指南1.1.md` §92 正式标记 RELEASED。
+
+### MVP-2（未开始）
+
+Specialist Solver · 更强 Triage · Crypto 攻击模块 · Misc 语义工具 ·
+context management · Manager/Reflection · model routing · knowledge reuse

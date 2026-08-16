@@ -1,5 +1,7 @@
 # MVP-1.1 runtime baseline
 
+**状态：** MVP-1.1 已收尾（2026-08），MVP-1 正式标记 RELEASED；MVP-2 未开始。
+
 NativeTrusted 不是 OS sandbox。Agent 生成的 Python 仍能访问工作区外文件和网络；RioMisc 用路径守卫、环境变量过滤、超时和进程树清理降低风险。
 
 已落地：
