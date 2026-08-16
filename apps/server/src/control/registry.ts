@@ -4,11 +4,14 @@ import type { RioLogger } from "@rio/shared";
 import type { Repositories } from "@rio/database";
 import type { ModelProviderConfig, ModelConfig, ProviderProtocol } from "@rio/domain";
 import type { SecretStore } from "@rio/shared";
+import { inferModelCapabilities, loadModelAssignments, mergeCapabilities } from "./model-assignments.js";
+import { buildVisionTestPayload, extractVisionReply, selectVisionTestModel, visionTestPassed } from "./capability-test.js";
 
 export interface TestConnectionResult {
   authentication: boolean;
   textApi: boolean;
   toolCall: boolean;
+  visionApi: boolean | null;
   latencyMs: number;
   message?: string;
 }
@@ -18,6 +21,7 @@ export class ModelRegistry {
     private repos: Repositories,
     private secrets: SecretStore,
     private logger: RioLogger,
+    private fetchImpl: typeof fetch = fetch,
   ) {}
 
   async addProvider(input: {
@@ -51,11 +55,13 @@ export class ModelRegistry {
     maxOutputTokens: number;
     role?: ModelConfig["role"];
     enabled?: boolean;
+    capabilities?: Partial<ModelConfig["capabilities"]>;
   }): Promise<ModelConfig> {
     const provider = this.repos.providers.get(input.providerId);
     if (!provider) throw new Error("unknown provider");
     const role = input.role ?? (this.repos.models.primary() ? "GENERAL" : "PRIMARY");
-    return this.repos.models.create({ ...input, role });
+    const capabilities = mergeCapabilities(inferModelCapabilities(input.modelName), input.capabilities);
+    return this.repos.models.create({ ...input, role, capabilities });
   }
 
   /** Two-phase test (§57): plain chat + tool calling. */
@@ -73,13 +79,14 @@ export class ModelRegistry {
         authentication: false,
         textApi: false,
         toolCall: false,
+        visionApi: null,
         latencyMs: 0,
         message: "该 provider 还没有注册模型 — 请先在 Dashboard 添加模型（如 deepseek-v4-flash）",
       };
     }
 
     const started = Date.now();
-    const out: TestConnectionResult = { authentication: false, textApi: false, toolCall: false, latencyMs: 0 };
+    const out: TestConnectionResult = { authentication: false, textApi: false, toolCall: false, visionApi: null, latencyMs: 0 };
 
     // Phase 1: plain chat — budget must cover reasoning models (deepseek etc.)
     try {
@@ -144,6 +151,21 @@ export class ModelRegistry {
     }
     out.message = (out.message ?? "") + ` | tool call: ${out.toolCall ? "OK" : "FAILED"}${probeNote}`;
 
+    const assigned = loadModelAssignments(this.repos);
+    const visionModel = selectVisionTestModel(models, assigned.visionModelId);
+    if (visionModel) {
+      try {
+        const payload = buildVisionTestPayload(visionModel.modelName);
+        const replyRaw = await this.#request(provider, apiKey, payload, false, visionModel.modelName);
+        const reply = extractVisionReply(replyRaw);
+        out.visionApi = visionTestPassed(reply);
+        out.message += ` | vision (${visionModel.modelName}): ${out.visionApi ? "OK" : `FAILED reply=${JSON.stringify(reply.slice(0, 80))}`}`;
+      } catch (e) {
+        out.visionApi = false;
+        out.message += ` | vision (${visionModel.modelName}) failed: ${(e as Error).message.slice(0, 160)}`;
+      }
+    }
+
     out.latencyMs = Date.now() - started;
     if (out.authentication && out.textApi && out.toolCall) {
       this.repos.providers.recordSuccess(providerId);
@@ -166,7 +188,7 @@ export class ModelRegistry {
       headers["x-api-key"] = apiKey;
       headers["anthropic-version"] = "2023-06-01";
       const payload = { ...body, model: modelName };
-      const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload) });
+      const res = await this.fetchImpl(url, { method: "POST", headers, body: JSON.stringify(payload) });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
       const json = (await res.json()) as Record<string, unknown>;
       const blocks = (json.content as { type: string; text?: string; id?: string }[]) ?? [];
@@ -177,7 +199,7 @@ export class ModelRegistry {
     // OpenAI-style (completions or responses)
     headers["authorization"] = `Bearer ${apiKey}`;
     const payload = { ...body, model: modelName };
-    const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload) });
+    const res = await this.fetchImpl(url, { method: "POST", headers, body: JSON.stringify(payload) });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
     const json = (await res.json()) as Record<string, unknown>;
     if (wantToolCalls) return json;

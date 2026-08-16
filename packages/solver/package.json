@@ -6,6 +6,7 @@
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
     "@rio/domain": "*",
+    "@rio/misc-runtime": "*",
     "@rio/shared": "*",
     "@rio/tool-runtime": "*"
   },

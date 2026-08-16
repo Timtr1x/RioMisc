@@ -92,6 +92,11 @@ export const runtimeConfigSchema = z.object({
     autoFallback: z.boolean().default(false),
   }).default({}),
 
+  visual: z.object({
+    maxVisionCallsPerChallenge: z.number().int().min(0).max(50).default(5),
+    maxImagesPerCall: z.number().int().min(1).max(8).default(4),
+  }).default({}),
+
   server: z.object({
     host: z.string().default(process.env.RIO_HOST ?? "127.0.0.1"),
     port: z.number().int().min(1).max(65535).default(Number(process.env.RIO_PORT ?? 3000)),

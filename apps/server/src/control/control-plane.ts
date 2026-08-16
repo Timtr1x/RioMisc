@@ -29,6 +29,9 @@ import { ChallengeStartService, isRetryableContestError } from "./start-policy.j
 import { isRetryablePrepareError, prepareBackoffMs } from "./prepare-retry.js";
 import { syncRemoteChallenge } from "./challenge-sync.js";
 import { loadContestProfile, saveContestProfile } from "./contest-profile.js";
+import { loadModelAssignments, resolveAssignedModel } from "./model-assignments.js";
+import { buildPlannerInjection, buildCheckpoint, shouldReflect } from "./planner.js";
+import { formatHumanVisualObservation } from "./visual-review.js";
 
 export interface ControlPlaneDeps {
   repos: Repositories;
@@ -485,6 +488,7 @@ depended on the previous files.`;
         : undefined,
       pythonExecutable: this.deps.pythonExecutable,
       pi: this.#piWorkerConfig(),
+      visual: this.#visualWorkerConfig(),
     });
     if (resume) {
       this.deps.logger.info(
@@ -505,10 +509,8 @@ depended on the previous files.`;
   }
 
   #resolveModelRef(): ModelRef | null {
-    const primary = this.deps.repos.models.primary();
-    if (primary) return { providerId: primary.providerId, modelId: primary.modelName };
-    const first = this.deps.repos.models.listEnabled()[0];
-    if (first) return { providerId: first.providerId, modelId: first.modelName };
+    const picked = resolveAssignedModel(this.deps.repos, "primarySolver");
+    if (picked) return { providerId: picked.providerId, modelId: picked.modelName };
     return null;
   }
 
@@ -539,7 +541,13 @@ depended on the previous files.`;
         }
       }
     }
-    return buildKickoffMessage({ challengeText, inputFiles, extraNote });
+    const challengeId = workspaceRoot.replace(/\\/g, "/").split("/").pop() ?? "";
+    const planner = challengeId ? buildPlannerInjection(this.deps.repos, challengeId) : "";
+    return buildKickoffMessage({
+      challengeText,
+      inputFiles,
+      extraNote: [extraNote, planner].filter(Boolean).join("\n\n") || undefined,
+    });
   }
 
   #resumeMessage(challengeId: string): string {
@@ -569,11 +577,21 @@ depended on the previous files.`;
           contextWindow: m.contextWindow,
           maxOutputTokens: m.maxOutputTokens,
           compatProfile: p.compatProfile ?? "AUTO",
+          vision: m.capabilities.vision,
         });
       }
     }
     if (list.length === 0) return undefined;
     return { piDir: this.deps.piDir, secretsFile: this.deps.secretsFile, providers: list };
+  }
+
+  #visualWorkerConfig(): StartWorkerConfig["visual"] {
+    const assigned = loadModelAssignments(this.deps.repos);
+    const vis = assigned.visionModelId ? this.deps.repos.models.get(assigned.visionModelId) : null;
+    return {
+      maxVisionCalls: this.deps.config.visual?.maxVisionCallsPerChallenge ?? 5,
+      visionModelId: vis?.modelName ?? assigned.visionModelId,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -660,6 +678,86 @@ depended on the previous files.`;
           });
         } catch (e) {
           logger.warn({ event: "artifact_record_failed", challengeId, err: String(e) });
+        }
+        break;
+      }
+      case "visual_evidence": {
+        const ev = (msg.evidence ?? msg) as {
+          id?: string;
+          sourcePath?: string;
+          sourceType?: string;
+          question?: string | null;
+          analyzer?: string;
+          observations?: unknown;
+          summary?: string;
+          confidence?: number;
+          createdAt?: number;
+          sourceArtifactId?: string | null;
+        };
+        try {
+          repos.visualEvidence.create({
+            id: ev.id,
+            challengeId,
+            sourceArtifactId: ev.sourceArtifactId ?? null,
+            sourcePath: String(ev.sourcePath ?? ""),
+            sourceType: (ev.sourceType as never) ?? "IMAGE",
+            question: ev.question ?? null,
+            analyzer: (ev.analyzer as never) ?? "LOCAL",
+            observations: Array.isArray(ev.observations) ? (ev.observations as never) : [],
+            summary: String(ev.summary ?? ""),
+            confidence: Number(ev.confidence ?? 0),
+            createdAt: ev.createdAt,
+          });
+          bus.publish({ type: "VISUAL_EVIDENCE", challengeId, payload: { id: ev.id, summary: ev.summary } });
+        } catch (e) {
+          logger.warn({ event: "visual_evidence_record_failed", challengeId, err: String(e) });
+        }
+        break;
+      }
+      case "experiment": {
+        try {
+          repos.experiments.create({
+            challengeId,
+            key: String(msg.key ?? ""),
+            artifactSha256: String(msg.artifactSha256 ?? ""),
+            tool: String(msg.tool ?? ""),
+            canonicalArgs: String(msg.canonicalArgs ?? ""),
+            resultSummary: String(msg.summary ?? ""),
+            outcome: (msg.outcome as never) ?? "NEW_EVIDENCE",
+          });
+        } catch {
+          /* unique key */
+        }
+        break;
+      }
+      case "specialist": {
+        try {
+          repos.specialists.create({
+            challengeId,
+            kind: (msg.kind as never) ?? "IMAGE",
+            conclusion: String(msg.conclusion ?? ""),
+            confidence: Number(msg.confidence ?? 0),
+            factsJson: JSON.stringify(msg.facts ?? []),
+            rejectedIdeasJson: JSON.stringify(msg.rejectedIdeas ?? []),
+            recommendedActionsJson: JSON.stringify(msg.recommendedActions ?? []),
+          });
+          bus.publish({ type: "SPECIALIST_RESULT", challengeId, payload: { kind: msg.kind, conclusion: msg.conclusion } });
+        } catch (e) {
+          logger.warn({ event: "specialist_record_failed", challengeId, err: String(e) });
+        }
+        break;
+      }
+      case "visual_review": {
+        try {
+          const rec = repos.visualReviews.create({
+            challengeId,
+            sourcePath: String(msg.path ?? ""),
+            question: String(msg.question ?? ""),
+            reason: String(msg.reason ?? ""),
+          });
+          bus.publish({ type: "VISUAL_REVIEW_REQUESTED", challengeId, payload: { id: rec.id, path: rec.sourcePath } });
+        } catch (e) {
+          logger.warn({ event: "visual_review_record_failed", challengeId, err: String(e) });
         }
         break;
       }
@@ -794,6 +892,7 @@ depended on the previous files.`;
       resume: false,
       pythonExecutable: this.deps.pythonExecutable,
       pi: this.#piWorkerConfig(),
+      visual: this.#visualWorkerConfig(),
     });
     this.deps.bus.publish({ type: "SOLVER_HANDOFF", challengeId, payload: { from: c.currentSolverType, to: target, summary } });
   }
@@ -1261,6 +1360,53 @@ Treat the rejection as negative evidence and continue solving.`;
     this.deps.submission.resumeSolvingAfterUnknown(challengeId);
   }
 
+  answerVisualReview(id: string, input: { observation: string; useful?: boolean }): { injected: boolean } {
+    const rec = this.deps.repos.visualReviews.get(id);
+    if (!rec) throw new Error("unknown visual review");
+    const useful = input.useful !== false;
+    this.deps.repos.visualReviews.answer(
+      id,
+      JSON.stringify({ observation: input.observation, useful }),
+    );
+    const text = formatHumanVisualObservation({
+      sourcePath: rec.sourcePath,
+      question: rec.question ?? "",
+      observation: input.observation,
+      useful,
+    });
+    const injected = this.injectWorker(rec.challengeId, text);
+    this.deps.bus.publish({
+      type: "VISUAL_REVIEW_ANSWERED",
+      challengeId: rec.challengeId,
+      payload: { id, useful, injected },
+    });
+    return { injected };
+  }
+
+  cancelVisualReview(id: string): void {
+    const rec = this.deps.repos.visualReviews.get(id);
+    if (!rec) throw new Error("unknown visual review");
+    this.deps.repos.visualReviews.cancel(id);
+    this.deps.bus.publish({ type: "VISUAL_REVIEW_CANCELLED", challengeId: rec.challengeId, payload: { id } });
+  }
+
+  readWorkspaceFile(challengeId: string, relPath: string): { bytes: Buffer; mime: string; path: string } {
+    const root = this.workspace.rootOf(challengeId);
+    const abs = this.workspace.safeResolve(root, relPath);
+    const ext = abs.toLowerCase();
+    const mime = ext.endsWith(".png")
+      ? "image/png"
+      : ext.endsWith(".jpg") || ext.endsWith(".jpeg")
+        ? "image/jpeg"
+        : ext.endsWith(".gif")
+          ? "image/gif"
+          : ext.endsWith(".webp")
+            ? "image/webp"
+            : "";
+    if (!mime) throw new Error("only image files can be previewed");
+    return { bytes: readFileSync(abs), mime, path: abs };
+  }
+
   runReflection(challengeId: string): ReturnType<ReflectionService["reflect"]> {
     return this.deps.reflection.reflect(challengeId, "manual");
   }
@@ -1316,6 +1462,7 @@ Treat the rejection as negative evidence and continue solving.`;
       error: countBy("ERROR"),
       blocked: all.filter((c) => Boolean(c.blockedReason)).length,
       unknownSubmissions: Number(repos.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM submissions WHERE status = 'UNKNOWN'")?.n ?? 0),
+      pendingVisualReviews: repos.visualReviews.listPending().length,
       miscSolved: all.filter((c) => c.category === "MISC" && c.lifecycleStatus === "SOLVED").length,
       cryptoSolved: all.filter((c) => c.category === "CRYPTO" && c.lifecycleStatus === "SOLVED").length,
       workers: this.workerPool.activeCount(),

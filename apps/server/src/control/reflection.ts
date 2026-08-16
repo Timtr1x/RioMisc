@@ -26,6 +26,7 @@ export function buildReflection(
   } | null,
   wrongFlags: string[],
   hints: string[],
+  experiments: string[] = [],
 ): ReflectionOutcome {
   const mistakes: string[] = [];
   const missed: string[] = [];
@@ -53,6 +54,16 @@ export function buildReflection(
     if (latest.confirmedFacts.length === 0) {
       missed.push("No confirmed facts recorded — treat earlier outputs as unverified.");
     }
+  }
+
+  const noSignal = experiments.filter((e) => e.endsWith("NO_SIGNAL")).length;
+  if (noSignal >= 3) {
+    mistakes.push("Three or more experiments returned NO_SIGNAL — stop repeating the same family of tests.");
+    steps.push("Switch artifact or hypothesis; consult the experiment ledger before calling the same tool again.");
+    continueDir = false;
+  }
+  if (experiments.some((e) => e.includes("ALREADY_TESTED"))) {
+    mistakes.push("Repeated an already-tested experiment.");
   }
 
   if (steps.length === 0) {
@@ -114,6 +125,7 @@ export class ReflectionService {
       .filter((s) => s.status === "WRONG")
       .map((s) => s.flagValue);
     const hints = repos.hints.listForChallenge(challengeId).map((h) => h.content);
+    const experiments = repos.experiments.listByChallenge(challengeId);
     const outcome = buildReflection(
       challenge,
       latest
@@ -128,6 +140,7 @@ export class ReflectionService {
         : null,
       wrongFlags,
       hints,
+      experiments.map((e) => `${e.tool}:${e.outcome}`),
     );
     repos.events.append("REFLECTION_RUN", challengeId, { trigger, ...outcome });
     this.deps.bus.publish({ type: "REFLECTION_RUN", challengeId, payload: { trigger, ...outcome } });

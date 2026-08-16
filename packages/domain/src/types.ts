@@ -102,6 +102,68 @@ export type CompatProfile = "AUTO" | "OPENAI" | "DEEPSEEK" | "ZAI" | "ANTHROPIC"
 
 export type StartPolicy = "ON_DISCOVERY" | "ON_PREPARATION" | "ON_SOLVER_ASSIGNMENT";
 
+export interface ModelCapabilities {
+  text: boolean;
+  toolCalling: boolean;
+  vision: boolean;
+  reasoning: boolean;
+  structuredOutput: boolean;
+}
+
+export interface ModelAssignments {
+  primarySolverModelId: string | null;
+  reflectionModelId: string | null;
+  visionModelId: string | null;
+  triageModelId: string | null;
+}
+
+export type VisualSourceType =
+  | "IMAGE"
+  | "BITPLANE"
+  | "CHANNEL"
+  | "SPECTROGRAM"
+  | "VIDEO_FRAME"
+  | "PDF_PAGE"
+  | "CONTACT_SHEET"
+  | "OTHER";
+
+export type VisualAnalyzer = "LOCAL" | "VISION_MODEL" | "HUMAN";
+
+export type VisualObservationType =
+  | "TEXT"
+  | "QR"
+  | "BARCODE"
+  | "SHAPE"
+  | "COLOR"
+  | "PATTERN"
+  | "ANOMALY"
+  | "STRUCTURE"
+  | "OTHER";
+
+export type VisualReviewStatus = "NONE" | "PENDING" | "ANSWERED" | "CANCELLED";
+
+export interface VisualObservation {
+  type: VisualObservationType;
+  value?: string;
+  description: string;
+  region?: { x: number; y: number; width: number; height: number };
+  confidence: number;
+}
+
+export interface VisualEvidence {
+  id: string;
+  challengeId: string;
+  sourceArtifactId: string | null;
+  sourcePath: string;
+  sourceType: VisualSourceType;
+  question: string | null;
+  analyzer: VisualAnalyzer;
+  observations: VisualObservation[];
+  summary: string;
+  confidence: number;
+  createdAt: number;
+}
+
 // ---------------------------------------------------------------------------
 // Challenge
 // ---------------------------------------------------------------------------
@@ -323,6 +385,7 @@ export interface ModelConfig {
   enabled: boolean;
   role: ModelRole;
   createdAt: number;
+  capabilities: ModelCapabilities;
 }
 
 // ---------------------------------------------------------------------------
@@ -393,6 +456,104 @@ export interface DownloadResult {
   sha256: string;
   retryable: boolean;
   message?: string;
+}
+
+export type HypothesisStatus = "CANDIDATE" | "TESTING" | "SUPPORTED" | "REJECTED" | "CONFIRMED";
+export type ExperimentOutcome = "NEW_EVIDENCE" | "NO_SIGNAL" | "FAILED" | "ALREADY_TESTED";
+export type ActionCost = "CHEAP" | "NORMAL" | "EXPENSIVE";
+export type SpecialistKind = "IMAGE" | "PCAP" | "AUDIO" | "ARCHIVE" | "RSA" | "PRNG" | "LATTICE";
+
+export interface ProposedTest {
+  tool: string;
+  args: unknown;
+  expectedInformation: string;
+  ifPositive: string;
+  ifNegative: string;
+  estimatedCost: ActionCost;
+}
+
+export interface Hypothesis {
+  id: string;
+  challengeId: string;
+  description: string;
+  confidence: number;
+  status: HypothesisStatus;
+  evidenceForJson: string;
+  evidenceAgainstJson: string;
+  proposedTestsJson: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ToolExperiment {
+  id: string;
+  challengeId: string;
+  key: string;
+  artifactSha256: string;
+  tool: string;
+  canonicalArgs: string;
+  resultSummary: string;
+  outcome: ExperimentOutcome;
+  createdAt: number;
+}
+
+export interface SolverCheckpoint {
+  challengeId: string;
+  solverType: SolverType;
+  confirmedFacts: string[];
+  activeHypotheses: string[];
+  rejectedHypotheses: string[];
+  importantArtifacts: string[];
+  visualEvidenceIds: string[];
+  wrongFlags: string[];
+  currentPlan: string[];
+  unresolvedQuestions: string[];
+  createdAt: number;
+}
+
+export interface SpecialistResult {
+  id: string;
+  challengeId: string;
+  kind: SpecialistKind;
+  conclusion: string;
+  confidence: number;
+  factsJson: string;
+  rejectedIdeasJson: string;
+  recommendedActionsJson: string;
+  createdAt: number;
+}
+
+export interface RecordedToolExecution {
+  id: string;
+  challengeId: string;
+  tool: string;
+  canonicalArgs: string;
+  resultJson: string;
+  artifactHashesJson: string;
+  durationMs: number;
+  createdAt: number;
+}
+
+export interface BenchmarkManifest {
+  id: string;
+  category: "MISC" | "CRYPTO";
+  subcategory: string[];
+  difficulty: number;
+  flag: string;
+  expectedTechniques: string[];
+  maxSolveSeconds: number;
+}
+
+export interface BenchmarkRunResult {
+  id: string;
+  manifestId: string;
+  solved: boolean;
+  flag: string | null;
+  techniques: string[];
+  toolCalls: number;
+  durationMs: number;
+  error: string | null;
+  createdAt: number;
 }
 
 export interface ContestCapabilities {

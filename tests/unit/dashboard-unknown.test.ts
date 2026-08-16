@@ -26,6 +26,16 @@ describe("dashboard UNKNOWN reconciliation", () => {
     expect(src).toContain("模型 API 连续失败");
     expect(src).toContain("不会自动换备用模型");
     expect(src).toContain("信任的附件域名");
+    expect(src).toContain("视觉能力");
+    expect(src).toContain("视觉模型");
+    expect(src).toContain("反思模型");
+    expect(src).toContain("analyze_visual");
+    expect(src).toContain("视觉复核");
+    expect(src).toContain("request_visual_review");
+    expect(src).toContain("HUMAN VISUAL OBSERVATION");
+    expect(src).toContain("评测");
+    expect(src).toContain("实验账本");
+    expect(src).toContain("跑全部评测");
   });
 });
 

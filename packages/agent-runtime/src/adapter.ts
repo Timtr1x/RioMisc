@@ -19,6 +19,7 @@ export interface PiProviderSpec {
   contextWindow: number;
   maxOutputTokens: number;
   compatProfile?: CompatProfile;
+  vision?: boolean;
 }
 
 export interface ToolSpec {

@@ -2,10 +2,11 @@
 import type { FastifyInstance } from "fastify";
 import type { Repositories } from "@rio/database";
 import type { RioLogger, SecretStore, RuntimeConfig } from "@rio/shared";
-import { setPriorityParamsSchema, switchModelParamsSchema, manualCandidateParamsSchema, providerCreateSchema, modelCreateSchema } from "@rio/domain";
+import { setPriorityParamsSchema, switchModelParamsSchema, manualCandidateParamsSchema, providerCreateSchema, modelCreateSchema, modelAssignmentsSchema, modelCapabilitiesSchema, visualReviewAnswerSchema } from "@rio/domain";
 import type { ControlPlane } from "../control/control-plane.js";
 import type { ModelRegistry } from "../control/registry.js";
 import type { EventBus } from "../control/bus.js";
+import { loadModelAssignments, patchModelAssignments } from "../control/model-assignments.js";
 
 export interface ApiDeps {
   fastify: FastifyInstance;
@@ -105,6 +106,10 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
       ...c,
       attachments: repos.attachments.listByChallenge(id),
       artifacts: repos.artifacts.listByChallenge(id),
+      visualEvidence: repos.visualEvidence.listByChallenge(id),
+      hypotheses: repos.hypotheses.listByChallenge(id),
+      experiments: repos.experiments.listByChallenge(id),
+      specialists: repos.specialists.listByChallenge(id),
       progress: repos.progress.listForChallenge(id, 50),
       candidates: repos.candidates.listByChallenge(id),
       submissions: repos.submissions.listByChallenge(id),
@@ -217,7 +222,15 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
   fastify.get("/api/providers", async () => ({
     providers: repos.providers.list(),
     models: repos.models.list(),
+    assignments: loadModelAssignments(repos),
   }));
+
+  fastify.get("/api/models/assignments", async () => loadModelAssignments(repos));
+
+  fastify.put("/api/models/assignments", async (req) => {
+    const body = modelAssignmentsSchema.parse(req.body ?? {});
+    return { ok: true, assignments: patchModelAssignments(repos, body) };
+  });
 
   fastify.post("/api/providers", async (req) => {
     const body = providerCreateSchema.parse(req.body);
@@ -264,8 +277,79 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
       for (const other of repos.models.listByProvider(model.providerId)) {
         if (other.id !== id && other.role === "PRIMARY") repos.models.update(other.id, { role: "GENERAL" });
       }
+      patchModelAssignments(repos, { primarySolverModelId: id });
     }
     return { ok: true };
+  });
+
+  fastify.post("/api/models/:id/capabilities", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = modelCapabilitiesSchema.parse(req.body ?? {});
+    const model = repos.models.get(id);
+    if (!model) return reply.code(404).send({ error: "unknown model" });
+    repos.models.update(id, { capabilities: { ...model.capabilities, ...body } });
+    return { ok: true, model: repos.models.get(id) };
+  });
+
+  fastify.get("/api/benchmarks", async () => {
+    const { BENCHMARK_MANIFESTS, runBenchmark } = await import("@rio/eval");
+    return { manifests: BENCHMARK_MANIFESTS, runs: repos.benchmarkRuns.list() };
+  });
+
+  fastify.post("/api/benchmarks/run", async (req) => {
+    const { runBenchmark } = await import("@rio/eval");
+    const id = (req.body as { id?: string } | undefined)?.id;
+    const results = runBenchmark(id);
+    for (const r of results) {
+      repos.benchmarkRuns.create({
+        manifestId: r.manifestId,
+        solved: r.solved,
+        flag: r.flag,
+        techniques: r.techniques,
+        toolCalls: r.toolCalls,
+        durationMs: r.durationMs,
+        error: r.error,
+      });
+    }
+    return { ok: true, results };
+  });
+
+  fastify.get("/api/visual-reviews", async () => {
+    const items = repos.visualReviews.list();
+    return { items, pending: items.filter((r) => r.status === "PENDING").length };
+  });
+
+  fastify.post("/api/visual-reviews/:id/answer", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = visualReviewAnswerSchema.parse(req.body ?? {});
+    try {
+      const result = control.answerVisualReview(id, body);
+      return { ok: true, ...result };
+    } catch (e) {
+      return reply.code(400).send({ error: (e as Error).message });
+    }
+  });
+
+  fastify.post("/api/visual-reviews/:id/cancel", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      control.cancelVisualReview(id);
+      return { ok: true };
+    } catch (e) {
+      return reply.code(400).send({ error: (e as Error).message });
+    }
+  });
+
+  fastify.get("/api/challenges/:id/workspace", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const path = String((req.query as { path?: string }).path ?? "");
+    if (!path) return reply.code(400).send({ error: "path required" });
+    try {
+      const file = control.readWorkspaceFile(id, path);
+      return reply.type(file.mime).send(file.bytes);
+    } catch (e) {
+      return reply.code(400).send({ error: (e as Error).message });
+    }
   });
 
   fastify.delete("/api/models/:id", async (req, reply) => {

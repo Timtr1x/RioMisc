@@ -1,15 +1,17 @@
 // RioMisc Dashboard — single page with tabs: Overview / Challenges / Detail / Providers.
 import { useCallback, useEffect, useState } from "react";
-import { api, useEvents, fmtMs, type Status, type ChallengeRow, type ChallengeDetail } from "./api.js";
+import { api, useEvents, fmtMs, type Status, type ChallengeRow, type ChallengeDetail, type VisualReviewRow } from "./api.js";
 import { applyTheme, readTheme, type Theme } from "./theme.js";
 
-type Tab = "overview" | "challenges" | "detail" | "providers";
+type Tab = "overview" | "challenges" | "detail" | "providers" | "reviews" | "benchmark";
 
 const TAB_LABEL: Record<Tab, string> = {
   overview: "总览",
   challenges: "题目",
   detail: "详情",
   providers: "模型",
+  reviews: "视觉复核",
+  benchmark: "评测",
 };
 
 const LIFECYCLE_ZH: Record<string, string> = {
@@ -178,7 +180,7 @@ export function App() {
         </div>
       </header>
       <nav>
-        {(["overview", "challenges", "detail", "providers"] as Tab[]).map((t) => (
+        {(["overview", "challenges", "detail", "providers", "reviews", "benchmark"] as Tab[]).map((t) => (
           <button key={t} className={tab === t ? "active" : ""} onClick={() => { setTab(t); window.location.hash = t; }}>
             {TAB_LABEL[t]}
           </button>
@@ -229,6 +231,8 @@ export function App() {
         />
       )}
       {tab === "providers" && <Providers refresh={refresh} refreshKey={refreshKey} />}
+      {tab === "reviews" && <VisualReviews refreshKey={refreshKey} onOpenChallenge={(id) => { setSelectedId(id); setTab("detail"); }} />}
+      {tab === "benchmark" && <BenchmarkPanel refreshKey={refreshKey} />}
     </>
   );
 }
@@ -864,6 +868,36 @@ function Detail({
           {d.artifacts.slice(-10).map((a) => (
             <div key={a.id} className="muted break" title={a.path}>{a.operation}: {shortPath(a.path)} ({a.size}B)</div>
           ))}
+          <h3 style={{ marginTop: 10 }}>假设</h3>
+          {(d.hypotheses ?? []).length === 0 && <div className="muted">无</div>}
+          {(d.hypotheses ?? []).map((h) => (
+            <div key={h.id} className="muted">{h.status} · {h.description}</div>
+          ))}
+          <h3 style={{ marginTop: 10 }}>实验账本</h3>
+          {(d.experiments ?? []).length === 0 && <div className="muted">无</div>}
+          {(d.experiments ?? []).slice(-8).map((e) => (
+            <div key={e.id} className="muted">{e.tool} → {e.outcome}: {e.resultSummary}</div>
+          ))}
+          <h3 style={{ marginTop: 10 }}>专家结论</h3>
+          {(d.specialists ?? []).length === 0 && <div className="muted">无</div>}
+          {(d.specialists ?? []).map((s) => (
+            <div key={s.id}>{s.kind}: {s.conclusion}</div>
+          ))}
+          <h3 style={{ marginTop: 10 }}>产物图</h3>
+          {d.artifacts.map((a) => (
+            <div key={a.id} className="muted break">{a.operation} → {shortPath(a.path)}</div>
+          ))}
+          <h3 style={{ marginTop: 10 }}>视觉证据</h3>
+          {(d.visualEvidence ?? []).length === 0 && <div className="muted">还没有 analyze_visual 结果</div>}
+          {(d.visualEvidence ?? []).map((e) => (
+            <div key={e.id} style={{ marginBottom: 8 }}>
+              <div>{e.summary}</div>
+              <div className="muted">{e.analyzer} · 置信度={e.confidence}</div>
+              {e.observations?.filter((o) => o.type === "QR" && o.value).map((o, i) => (
+                <div key={i} className="ok">QR: {o.value}</div>
+              ))}
+            </div>
+          ))}
           <h3 style={{ marginTop: 10 }}>Session</h3>
           {(d.sessions ?? []).length === 0 && <div className="muted">无</div>}
           {(d.sessions ?? []).map((s) => (
@@ -968,14 +1002,29 @@ type ProviderRow = {
   consecutiveFailures?: number;
   enabled: number | boolean;
 };
-type ModelRow = { id: string; providerId: string; modelName: string; role: string; enabled?: number | boolean };
+type ModelCapabilities = { text: boolean; toolCalling: boolean; vision: boolean; reasoning: boolean; structuredOutput: boolean };
+type ModelAssignments = {
+  primarySolverModelId: string | null;
+  reflectionModelId: string | null;
+  visionModelId: string | null;
+  triageModelId: string | null;
+};
+type ModelRow = {
+  id: string;
+  providerId: string;
+  modelName: string;
+  role: string;
+  enabled?: number | boolean;
+  capabilities?: ModelCapabilities;
+};
 
 function isOn(v: number | boolean | undefined): boolean {
   return v !== 0 && v !== false;
 }
 
 function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: number }) {
-  const [data, setData] = useState<{ providers: ProviderRow[]; models: ModelRow[] } | null>(null);
+  const [data, setData] = useState<{ providers: ProviderRow[]; models: ModelRow[]; assignments?: ModelAssignments } | null>(null);
+  const [visionDrafts, setVisionDrafts] = useState<Record<string, boolean>>({});
   const [name, setName] = useState("");
   const [protocol, setProtocol] = useState("OPENAI_CHAT_COMPLETIONS");
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com");
@@ -985,7 +1034,7 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const load = useCallback(() => {
-    void api<{ providers: ProviderRow[]; models: ModelRow[] }>("/providers")
+    void api<{ providers: ProviderRow[]; models: ModelRow[]; assignments?: ModelAssignments }>("/providers")
       .then(setData)
       .catch((e) => setMsg({ ok: false, text: String((e as Error).message) }));
   }, []);
@@ -1026,8 +1075,18 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
     }
     setBusy(true);
     try {
-      await api("/models", { method: "POST", body: { providerId, modelName, contextWindow: 200000, maxOutputTokens: 8192 } });
+      await api("/models", {
+        method: "POST",
+        body: {
+          providerId,
+          modelName,
+          contextWindow: 200000,
+          maxOutputTokens: 8192,
+          capabilities: visionDrafts[providerId] ? { vision: true } : undefined,
+        },
+      });
       setDrafts((s) => ({ ...s, [providerId]: "" }));
+      setVisionDrafts((s) => ({ ...s, [providerId]: false }));
       setMsg({ ok: true, text: `已添加模型 ${modelName}` });
       done();
     } catch (e) {
@@ -1041,14 +1100,15 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
     setBusy(true);
     setMsg({ ok: true, text: "正在测试连接…" });
     try {
-      const r = await api<{ result: { authentication: boolean; textApi: boolean; toolCall: boolean; latencyMs: number; message?: string } }>(
+      const r = await api<{ result: { authentication: boolean; textApi: boolean; toolCall: boolean; visionApi?: boolean | null; latencyMs: number; message?: string } }>(
         `/providers/${providerId}/test`,
         { method: "POST" },
       );
-      const ok = r.result.authentication && r.result.textApi && r.result.toolCall;
+      const ok = r.result.authentication && r.result.textApi && r.result.toolCall && r.result.visionApi !== false;
+      const visionBit = r.result.visionApi === null || r.result.visionApi === undefined ? "跳过" : r.result.visionApi ? "OK" : "失败";
       setMsg({
         ok,
-        text: `测试连接：鉴权=${r.result.authentication} 文本=${r.result.textApi} 工具=${r.result.toolCall} ${r.result.latencyMs}ms${r.result.message ? " · " + r.result.message : ""}`,
+        text: `测试连接：鉴权=${r.result.authentication} 文本=${r.result.textApi} 工具=${r.result.toolCall} 视觉=${visionBit} ${r.result.latencyMs}ms${r.result.message ? " · " + r.result.message : ""}`,
       });
       done();
     } catch (e) {
@@ -1063,6 +1123,19 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
     try {
       await api(`/models/${modelId}/role`, { method: "POST", body: { role: "PRIMARY" } });
       setMsg({ ok: true, text: "已设为主模型" });
+      done();
+    } catch (e) {
+      setMsg({ ok: false, text: String((e as Error).message) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setAssignment = async (slot: keyof ModelAssignments, modelId: string | null) => {
+    setBusy(true);
+    try {
+      await api("/models/assignments", { method: "PUT", body: { [slot]: modelId } });
+      setMsg({ ok: true, text: "已更新模型分配" });
       done();
     } catch (e) {
       setMsg({ ok: false, text: String((e as Error).message) });
@@ -1166,6 +1239,8 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
                     {m.modelName}
                   </span>{" "}
                   <span className="badge">{m.role === "PRIMARY" ? "主模型" : m.role === "FALLBACK" ? "备用" : "普通"}</span>
+                  {m.capabilities?.vision && <span className="badge">视觉能力</span>}
+                  {m.capabilities?.reasoning && <span className="badge">推理</span>}
                   <span className="buttons" style={{ display: "inline", marginLeft: 8 }}>
                     {m.role !== "PRIMARY" && (
                       <button disabled={busy} onClick={() => void setPrimary(m.id)}>
@@ -1194,6 +1269,14 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
                     onChange={(e) => setDrafts((s) => ({ ...s, [p.id]: e.target.value }))}
                   />
                 </div>
+                <label className="muted" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(visionDrafts[p.id])}
+                    onChange={(e) => setVisionDrafts((s) => ({ ...s, [p.id]: e.target.checked }))}
+                  />
+                  具备视觉能力
+                </label>
                 <button type="submit" className="primary" disabled={busy}>添加模型</button>
                 <button type="button" disabled={busy} onClick={() => void test(p.id)}>测试连接</button>
                 <button type="button" className="danger" disabled={busy} onClick={() => void removeProvider(p.id, p.displayName)}>
@@ -1205,7 +1288,162 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
         })}
         {providers.length === 0 && <div className="muted">暂无可用 Provider</div>}
       </div>
+      <div className="panel">
+        <h3>运行时模型分配</h3>
+        <p className="muted">不要用角色写死「视觉模型」。一个模型可以同时解题和看图。分配只是告诉系统哪一个负责哪件事。</p>
+        {(["primarySolverModelId", "reflectionModelId", "visionModelId", "triageModelId"] as const).map((slot) => {
+          const label =
+            slot === "primarySolverModelId"
+              ? "主解题模型"
+              : slot === "reflectionModelId"
+                ? "反思模型"
+                : slot === "visionModelId"
+                  ? "视觉模型"
+                  : "分诊模型";
+          const all = (data?.models ?? []).filter((m) => isOn(m.enabled));
+          return (
+            <div className="field" key={slot}>
+              <label htmlFor={`assign-${slot}`}>{label}</label>
+              <select
+                id={`assign-${slot}`}
+                value={data?.assignments?.[slot] ?? ""}
+                onChange={(e) => void setAssignment(slot, e.target.value || null)}
+                disabled={busy}
+              >
+                <option value="">未指定</option>
+                {all.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.modelName}
+                    {m.capabilities?.vision ? " · 视觉" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+          );
+        })}
+      </div>
       {msg && <div className={msg.ok ? "ok" : "err"}>{msg.text}</div>}
     </>
+  );
+}
+
+function VisualReviews({ refreshKey, onOpenChallenge }: { refreshKey: number; onOpenChallenge: (id: string) => void }) {
+  const [items, setItems] = useState<VisualReviewRow[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    void api<{ items: VisualReviewRow[] }>("/visual-reviews")
+      .then((r) => setItems(r.items))
+      .catch((e) => setMsg(String((e as Error).message)));
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load, refreshKey]);
+
+  const answer = async (id: string, observation: string, useful: boolean) => {
+    setBusy(true);
+    try {
+      await api(`/visual-reviews/${id}/answer`, { method: "POST", body: { observation, useful } });
+      setDrafts((s) => ({ ...s, [id]: "" }));
+      setMsg("已回写给人眼观察");
+      load();
+    } catch (e) {
+      setMsg(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pending = items.filter((r) => r.status === "PENDING");
+  return (
+    <div className="panel">
+      <h3>视觉复核队列</h3>
+      <p className="muted">Agent 调用 request_visual_review 后不会停工。回答会注入 HUMAN VISUAL OBSERVATION。</p>
+      {pending.length === 0 && <div className="muted">没有待复核的图片</div>}
+      {pending.map((r) => (
+        <div key={r.id} className="panel" style={{ marginTop: 12 }}>
+          <div>
+            <button type="button" className="ghost" onClick={() => onOpenChallenge(r.challengeId)}>
+              {r.challengeId}
+            </button>
+            <span className="muted break"> {r.sourcePath}</span>
+          </div>
+          <div>问题：{r.question}</div>
+          {r.reason && <div className="muted">原因：{r.reason}</div>}
+          <img
+            alt=""
+            src={`/api/challenges/${r.challengeId}/workspace?path=${encodeURIComponent(r.sourcePath)}`}
+            style={{ maxWidth: "100%", maxHeight: 240, marginTop: 8, background: "#111" }}
+          />
+          <div className="field" style={{ marginTop: 8 }}>
+            <label htmlFor={`rev-${r.id}`}>人眼观察</label>
+            <input
+              id={`rev-${r.id}`}
+              value={drafts[r.id] ?? ""}
+              onChange={(e) => setDrafts((s) => ({ ...s, [r.id]: e.target.value }))}
+              placeholder="例如：Blue bit 1 写着 TRY_ALPHA"
+            />
+          </div>
+          <div className="buttons">
+            <button
+              type="button"
+              className="primary"
+              disabled={busy || !(drafts[r.id] ?? "").trim()}
+              onClick={() => void answer(r.id, (drafts[r.id] ?? "").trim(), true)}
+            >
+              提交观察
+            </button>
+            <button type="button" disabled={busy} onClick={() => void answer(r.id, "No useful visual clue", false)}>
+              无明显视觉线索
+            </button>
+          </div>
+        </div>
+      ))}
+      {msg && <div className="muted" style={{ marginTop: 8 }}>{msg}</div>}
+    </div>
+  );
+}
+
+function BenchmarkPanel({ refreshKey }: { refreshKey: number }) {
+  const [data, setData] = useState<{ manifests: { id: string; category: string; flag: string; expectedTechniques: string[] }[]; runs: { id: string; manifestId: string; solved: boolean; durationMs: number; error: string | null }[] } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    void api<{ manifests: { id: string; category: string; flag: string; expectedTechniques: string[] }[]; runs: { id: string; manifestId: string; solved: boolean; durationMs: number; error: string | null }[] }>("/benchmarks").then(setData);
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load, refreshKey]);
+  const run = async () => {
+    setBusy(true);
+    try {
+      await api("/benchmarks/run", { method: "POST", body: {} });
+      load();
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="panel">
+      <h3>Benchmark</h3>
+      <p className="muted">用已实现的 Misc/Crypto 工具跑固定 fixture，不调用大模型。</p>
+      <button type="button" className="primary" disabled={busy} onClick={() => void run()}>
+        {busy ? "评测中…" : "跑全部评测"}
+      </button>
+      {(data?.manifests ?? []).map((m) => (
+        <div key={m.id} className="muted" style={{ marginTop: 8 }}>
+          {m.id} · {m.category} · 期望 {m.expectedTechniques.join(", ")}
+        </div>
+      ))}
+      <h3 style={{ marginTop: 12 }}>最近结果</h3>
+      {(data?.runs ?? []).length === 0 && <div className="muted">还没跑过</div>}
+      {(data?.runs ?? []).slice(0, 12).map((r) => (
+        <div key={r.id} className={r.solved ? "ok" : "err"}>
+          {r.manifestId} · {r.solved ? "解出" : "失败"} · {r.durationMs}ms {r.error ?? ""}
+        </div>
+      ))}
+    </div>
   );
 }

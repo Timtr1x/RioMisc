@@ -160,8 +160,46 @@ export class ProviderRepository {
 // Models
 // ---------------------------------------------------------------------------
 
+const DEFAULT_CAPABILITIES_JSON =
+  '{"text":true,"toolCalling":true,"vision":false,"reasoning":false,"structuredOutput":false}';
+
 const MODEL_COLUMNS =
-  "id, provider_id AS providerId, model_name AS modelName, context_window AS contextWindow, max_output_tokens AS maxOutputTokens, enabled, role, created_at AS createdAt";
+  "id, provider_id AS providerId, model_name AS modelName, context_window AS contextWindow, max_output_tokens AS maxOutputTokens, enabled, role, created_at AS createdAt, COALESCE(capabilities_json, '" +
+  DEFAULT_CAPABILITIES_JSON +
+  "') AS capabilitiesJson";
+
+export function parseModelCapabilities(raw: unknown): ModelConfig["capabilities"] {
+  const fallback: ModelConfig["capabilities"] = {
+    text: true,
+    toolCalling: true,
+    vision: false,
+    reasoning: false,
+    structuredOutput: false,
+  };
+  if (!raw) return fallback;
+  try {
+    const v = typeof raw === "string" ? (JSON.parse(raw) as Record<string, unknown>) : (raw as Record<string, unknown>);
+    return {
+      text: v.text !== false,
+      toolCalling: v.toolCalling !== false,
+      vision: v.vision === true,
+      reasoning: v.reasoning === true,
+      structuredOutput: v.structuredOutput === true,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+export function serializeModelCapabilities(c: ModelConfig["capabilities"]): string {
+  return JSON.stringify({
+    text: c.text,
+    toolCalling: c.toolCalling,
+    vision: c.vision,
+    reasoning: c.reasoning,
+    structuredOutput: c.structuredOutput,
+  });
+}
 
 function mapModel(r: Record<string, unknown>): ModelConfig {
   return {
@@ -173,6 +211,7 @@ function mapModel(r: Record<string, unknown>): ModelConfig {
     enabled: Boolean(r.enabled),
     role: (r.role as ModelConfig["role"]) ?? "GENERAL",
     createdAt: r.createdAt as number,
+    capabilities: parseModelCapabilities(r.capabilitiesJson),
   };
 }
 
@@ -183,22 +222,30 @@ const MODEL_UPDATE: Record<string, string> = {
   maxOutputTokens: "max_output_tokens",
   enabled: "enabled",
   role: "role",
+  capabilitiesJson: "capabilities_json",
 };
 
 export class ModelRepository {
   constructor(private db: RioDb) {}
 
-  create(m: Omit<ModelConfig, "id" | "createdAt" | "enabled" | "role"> & { enabled?: boolean; role?: ModelConfig["role"] }): ModelConfig {
+  create(
+    m: Omit<ModelConfig, "id" | "createdAt" | "enabled" | "role" | "capabilities"> & {
+      enabled?: boolean;
+      role?: ModelConfig["role"];
+      capabilities?: ModelConfig["capabilities"];
+    },
+  ): ModelConfig {
     const rec: ModelConfig = {
       ...m,
       id: `model_${Math.random().toString(36).slice(2, 14)}`,
       enabled: m.enabled !== false,
       role: m.role ?? "GENERAL",
       createdAt: Date.now(),
+      capabilities: m.capabilities ?? parseModelCapabilities(null),
     };
     this.db.run(
-      `INSERT INTO models (id, provider_id, model_name, context_window, max_output_tokens, enabled, role, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO models (id, provider_id, model_name, context_window, max_output_tokens, enabled, role, created_at, capabilities_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       rec.id,
       rec.providerId,
       rec.modelName,
@@ -207,6 +254,7 @@ export class ModelRepository {
       rec.enabled ? 1 : 0,
       rec.role,
       rec.createdAt,
+      serializeModelCapabilities(rec.capabilities),
     );
     return rec;
   }
@@ -249,6 +297,10 @@ export class ModelRepository {
   update(id: string, patch: Partial<ModelConfig>): void {
     const data: Record<string, unknown> = { ...patch };
     if ("enabled" in data) data.enabled = data.enabled ? 1 : 0;
+    if ("capabilities" in data && data.capabilities) {
+      data.capabilitiesJson = serializeModelCapabilities(data.capabilities as ModelConfig["capabilities"]);
+      delete data.capabilities;
+    }
     const { clause, values } = buildSet(data, MODEL_UPDATE);
     if (!clause) return;
     this.db.run(`UPDATE models SET ${clause} WHERE id = ?`, ...values, id);

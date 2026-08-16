@@ -169,6 +169,14 @@ export const providerCreateSchema = z.object({
   compatProfile: z.enum(["AUTO", "OPENAI", "DEEPSEEK", "ZAI", "ANTHROPIC"]).optional(),
 });
 
+export const modelCapabilitiesSchema = z.object({
+  text: z.boolean().optional(),
+  toolCalling: z.boolean().optional(),
+  vision: z.boolean().optional(),
+  reasoning: z.boolean().optional(),
+  structuredOutput: z.boolean().optional(),
+});
+
 export const modelCreateSchema = z.object({
   providerId: z.string(),
   modelName: z.string().min(1).max(200),
@@ -176,6 +184,90 @@ export const modelCreateSchema = z.object({
   maxOutputTokens: z.number().int().min(64).max(1_000_000),
   role: z.enum(["PRIMARY", "FALLBACK", "GENERAL"]).optional(),
   enabled: z.boolean().optional(),
+  capabilities: modelCapabilitiesSchema.optional(),
+});
+
+export const modelAssignmentsSchema = z.object({
+  primarySolverModelId: z.string().nullable().optional(),
+  reflectionModelId: z.string().nullable().optional(),
+  visionModelId: z.string().nullable().optional(),
+  triageModelId: z.string().nullable().optional(),
+});
+
+export const analyzeVisualParamsSchema = z.object({
+  path: z.string().min(1).max(1000),
+  question: z.string().max(4000).optional(),
+  mode: z.enum(["AUTO", "LOCAL_ONLY", "VISION_MODEL"]).optional(),
+  force: z.boolean().optional(),
+});
+
+export const requestVisualReviewParamsSchema = z.object({
+  path: z.string().min(1).max(1000),
+  question: z.string().min(1).max(4000),
+  reason: z.string().min(1).max(4000),
+});
+
+export const renderSpectrogramParamsSchema = z.object({
+  path: z.string().min(1).max(1000),
+  mode: z.enum(["AUTO", "WIDE", "DETAIL"]).optional(),
+  maxDurationSeconds: z.number().min(0.5).max(120).optional(),
+});
+
+export const extractKeyframesParamsSchema = z.object({
+  path: z.string().min(1).max(1000),
+  strategy: z.enum(["UNIFORM", "SCENE_CHANGE", "ALL_IF_SMALL"]).optional(),
+  maxFrames: z.number().int().min(1).max(16).optional(),
+});
+
+export const visualReviewAnswerSchema = z.object({
+  observation: z.string().min(1).max(4000),
+  useful: z.boolean().optional(),
+});
+
+export const pathOnlySchema = z.object({
+  path: z.string().min(1).max(1000),
+  force: z.boolean().optional(),
+});
+
+export const carveSchema = z.object({
+  path: z.string().min(1).max(1000),
+  offset: z.number().int().min(0),
+  length: z.number().int().min(1).max(64 * 1024 * 1024).optional(),
+  destPath: z.string().max(1000).optional(),
+  force: z.boolean().optional(),
+});
+
+export const cryptoTextSchema = z.object({
+  text: z.string().max(50_000).optional(),
+  path: z.string().max(1000).optional(),
+  n: z.string().optional(),
+  e: z.string().optional(),
+  c: z.string().optional(),
+  p: z.string().optional(),
+  q: z.string().optional(),
+  c1: z.string().optional(),
+  c2: z.string().optional(),
+  e1: z.string().optional(),
+  e2: z.string().optional(),
+  a: z.string().optional(),
+  b: z.string().optional(),
+  m: z.string().optional(),
+  m2: z.string().optional(),
+  samples: z.string().optional(),
+  key: z.string().optional(),
+  force: z.boolean().optional(),
+});
+
+export const specialistParamsSchema = z.object({
+  kind: z.enum(["IMAGE", "PCAP", "AUDIO", "ARCHIVE", "RSA", "PRNG", "LATTICE"]),
+  path: z.string().max(1000).optional(),
+  text: z.string().max(50_000).optional(),
+});
+
+export const hypothesisParamsSchema = z.object({
+  description: z.string().min(1).max(2000),
+  confidence: z.number().min(0).max(1).optional(),
+  status: z.enum(["CANDIDATE", "TESTING", "SUPPORTED", "REJECTED", "CONFIRMED"]).optional(),
 });
 
 export type ReportProgressParams = z.infer<typeof reportProgressParamsSchema>;

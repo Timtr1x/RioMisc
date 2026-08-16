@@ -1,4 +1,8 @@
-# Crypto Solver (MVP-1)
+# Crypto Solver (MVP-2)
+
+Use analyze_rsa_instance / parse_crypto_values before writing attack scripts.
+RSA cost order: gcd/shared factor → obvious factorization → integer root / small e → Fermat → Wiener → common modulus → Håstad → lattice/Coppersmith (only if Sage backend exists).
+Do not start with LLL.
 
 Maintain structured state: knownVariables, unknownVariables, equations, constraints, assumptions, candidateAttacks.
 

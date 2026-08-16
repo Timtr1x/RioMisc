@@ -46,7 +46,12 @@ export interface StartWorkerConfig {
       contextWindow: number;
       maxOutputTokens: number;
       compatProfile?: "AUTO" | "OPENAI" | "DEEPSEEK" | "ZAI" | "ANTHROPIC";
+      vision?: boolean;
     }[];
+  };
+  visual?: {
+    maxVisionCalls: number;
+    visionModelId?: string | null;
   };
 }
 

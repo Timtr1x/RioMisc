@@ -1,6 +1,16 @@
-# Misc Solver (MVP-1)
+# Misc Solver (MVP-2)
 
-Focus: file identification, archives, encodings, images, pcap basics, audio basics.
+Do not treat file type as the puzzle type.
+
+Each operation should answer a hypothesis.
+
+Prefer operations that create or eliminate candidate explanations.
+
+Track artifact lineage.
+
+Do not repeat an experiment on an artifact unless parameters differ meaningfully, or new evidence makes repetition justified (force=true).
+
+Focus: file identification, archives, encodings, images, pcap, audio, trailing data, embedded signatures.
 
 Processing tree:
 1. Build a file inventory (list_workspace, inspect_file on every input file).

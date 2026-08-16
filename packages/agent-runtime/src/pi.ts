@@ -205,6 +205,31 @@ function toolParameterSchema(Type: TBox, name: string) {
       });
     case "request_reflection":
       return Type.Object({ reason: Type.String() });
+    case "analyze_visual":
+      return Type.Object({
+        path: Type.String({ description: "Workspace-relative image, e.g. input/challenge.png" }),
+        question: Type.Optional(Type.String({ description: "What to look for. Do not ask to 'describe the image'." })),
+        mode: Type.Optional(Type.Union([Type.Literal("AUTO"), Type.Literal("LOCAL_ONLY"), Type.Literal("VISION_MODEL")])),
+        force: Type.Optional(Type.Boolean()),
+      });
+    case "request_visual_review":
+      return Type.Object({
+        path: Type.String(),
+        question: Type.String({ description: "Specific question for the human" }),
+        reason: Type.String({ description: "Why local/vision tools are not enough" }),
+      });
+    case "render_spectrogram":
+      return Type.Object({
+        path: Type.String({ description: "WAV path, e.g. input/secret.wav" }),
+        mode: Type.Optional(Type.Union([Type.Literal("AUTO"), Type.Literal("WIDE"), Type.Literal("DETAIL")])),
+        maxDurationSeconds: Type.Optional(Type.Number()),
+      });
+    case "extract_keyframes":
+      return Type.Object({
+        path: Type.String(),
+        strategy: Type.Optional(Type.Union([Type.Literal("UNIFORM"), Type.Literal("SCENE_CHANGE"), Type.Literal("ALL_IF_SMALL")])),
+        maxFrames: Type.Optional(Type.Number()),
+      });
     default:
       return Type.Object({});
   }

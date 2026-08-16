@@ -1,0 +1,16 @@
+{
+  "name": "@rio/visual-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@rio/domain": "*",
+    "jpeg-js": "^0.4.4",
+    "jsqr": "^1.4.0",
+    "pngjs": "^7.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

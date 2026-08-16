@@ -10,6 +10,7 @@ import {
   type ArtifactRef,
 } from "@rio/tool-runtime";
 import { MockAgentRuntime, PiAgentRuntimeAdapter, type AgentRuntimeAdapter, type PiProviderSpec } from "@rio/agent-runtime";
+import { FileVisionCache, HttpVisionAdapter, loadFileBudget, type VisionModelAdapter } from "@rio/visual-runtime";
 import { FileSecretStore } from "@rio/shared";
 import type { SolverType } from "@rio/domain";
 
@@ -33,6 +34,10 @@ interface StartConfig {
     piDir: string;
     secretsFile: string;
     providers: Omit<PiProviderSpec, "apiKey">[];
+  };
+  visual?: {
+    maxVisionCalls: number;
+    visionModelId?: string | null;
   };
 }
 
@@ -75,7 +80,25 @@ async function selectRuntime(preferred: "mock" | "pi", config: StartConfig): Pro
   return new MockAgentRuntime();
 }
 
-function buildToolContext(config: StartConfig): ToolContext {
+function pickVisionAdapter(config: StartConfig, providers: PiProviderSpec[]): VisionModelAdapter | null {
+  const named = config.visual?.visionModelId;
+  const spec =
+    (named ? providers.find((p) => p.modelId === named && p.apiKey) : undefined) ??
+    providers.find((p) => p.vision && p.apiKey);
+  if (!spec) return null;
+  const cacheDir = join(resolve(config.workspaceRoot), "state", "vision-cache");
+  const budgetPath = join(resolve(config.workspaceRoot), "state", "vision-budget.json");
+  return new HttpVisionAdapter({
+    baseUrl: spec.baseUrl,
+    apiKey: spec.apiKey,
+    modelId: spec.modelId,
+    protocol: spec.protocol,
+    cache: new FileVisionCache(cacheDir),
+    budget: loadFileBudget(budgetPath, config.visual?.maxVisionCalls ?? 5),
+  });
+}
+
+function buildToolContext(config: StartConfig, vision?: VisionModelAdapter | null): ToolContext {
   const wm = new WorkspaceManager(resolve(config.workspaceRoot, ".."));
   const root = resolve(config.workspaceRoot);
   return {
@@ -118,6 +141,17 @@ function buildToolContext(config: StartConfig): ToolContext {
     },
     pythonExecutable: config.pythonExecutable || process.env.RIO_PYTHON || "python",
     networkIsolation: "NONE",
+    vision: vision ?? null,
+    maxVisionCalls: config.visual?.maxVisionCalls ?? 5,
+    experiments: (() => {
+      const map = new Map<string, { summary: string; outcome: string }>();
+      return {
+        lookup: (key: string) => map.get(key) ?? null,
+        record: (e: { key: string; summary: string; outcome: string }) => {
+          map.set(e.key, { summary: e.summary, outcome: e.outcome });
+        },
+      };
+    })(),
   };
 }
 
@@ -165,7 +199,17 @@ process.on("message", async (msg: { type: string; [k: string]: unknown }) => {
     void (async () => {
       try {
         runtimeAdapter = await selectRuntime(currentConfig.runtime, currentConfig);
-        const ctx = buildToolContext(currentConfig);
+        let vision: VisionModelAdapter | null = null;
+        if (currentConfig.pi && currentConfig.pi.providers.length > 0) {
+          const secrets = new FileSecretStore(currentConfig.pi.secretsFile, process.env.CTF_RUNTIME_MASTER_KEY);
+          const decrypted: PiProviderSpec[] = [];
+          for (const p of currentConfig.pi.providers) {
+            const apiKey = await secrets.get(p.apiKeyRef);
+            if (apiKey) decrypted.push({ ...p, apiKey });
+          }
+          vision = pickVisionAdapter(currentConfig, decrypted);
+        }
+        const ctx = buildToolContext(currentConfig, vision);
         const tools = toolNames().map((name) => ({ name, description: `Solver tool ${name}` }));
         const sessionConfig = {
           sessionId: currentConfig.sessionId,

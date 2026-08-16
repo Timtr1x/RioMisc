@@ -1,0 +1,14 @@
+{
+  "name": "@rio/eval",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@rio/crypto-runtime": "*",
+    "@rio/domain": "*",
+    "@rio/misc-runtime": "*",
+    "@rio/visual-runtime": "*"
+  },
+  "scripts": { "typecheck": "tsc --noEmit" }
+}
