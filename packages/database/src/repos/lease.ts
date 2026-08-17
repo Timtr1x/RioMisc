@@ -163,10 +163,13 @@ export class ProviderRepository {
 const DEFAULT_CAPABILITIES_JSON =
   '{"text":true,"toolCalling":true,"vision":false,"reasoning":false,"structuredOutput":false}';
 
-const MODEL_COLUMNS =
-  "id, provider_id AS providerId, model_name AS modelName, context_window AS contextWindow, max_output_tokens AS maxOutputTokens, enabled, role, created_at AS createdAt, COALESCE(capabilities_json, '" +
-  DEFAULT_CAPABILITIES_JSON +
-  "') AS capabilitiesJson";
+function modelColumns(alias = ""): string {
+  const t = alias ? `${alias}.` : "";
+  return `${t}id, ${t}provider_id AS providerId, ${t}model_name AS modelName, ${t}context_window AS contextWindow, ${t}max_output_tokens AS maxOutputTokens, ${t}enabled, ${t}role, ${t}created_at AS createdAt, COALESCE(${t}capabilities_json, '${DEFAULT_CAPABILITIES_JSON}') AS capabilitiesJson`;
+}
+
+const MODEL_COLUMNS = modelColumns();
+const MODEL_COLUMNS_JOIN = modelColumns("models");
 
 export function parseModelCapabilities(raw: unknown): ModelConfig["capabilities"] {
   const fallback: ModelConfig["capabilities"] = {
@@ -276,20 +279,31 @@ export class ModelRepository {
 
   listEnabled(): ModelConfig[] {
     return this.db
-      .all<Record<string, unknown>>(`SELECT ${MODEL_COLUMNS} FROM models WHERE enabled = 1 ORDER BY created_at ASC`)
+      .all<Record<string, unknown>>(
+        `SELECT ${MODEL_COLUMNS_JOIN} FROM models
+         INNER JOIN model_providers ON model_providers.id = models.provider_id
+         WHERE models.enabled = 1 AND model_providers.enabled = 1
+         ORDER BY models.created_at ASC`,
+      )
       .map(mapModel);
   }
 
   primary(): ModelConfig | null {
     const r = this.db.get<Record<string, unknown>>(
-      `SELECT ${MODEL_COLUMNS} FROM models WHERE enabled = 1 AND role = 'PRIMARY' LIMIT 1`,
+      `SELECT ${MODEL_COLUMNS_JOIN} FROM models
+       INNER JOIN model_providers ON model_providers.id = models.provider_id
+       WHERE models.enabled = 1 AND model_providers.enabled = 1 AND models.role = 'PRIMARY'
+       LIMIT 1`,
     );
     return r ? mapModel(r) : null;
   }
 
   fallback(): ModelConfig | null {
     const r = this.db.get<Record<string, unknown>>(
-      `SELECT ${MODEL_COLUMNS} FROM models WHERE enabled = 1 AND role = 'FALLBACK' LIMIT 1`,
+      `SELECT ${MODEL_COLUMNS_JOIN} FROM models
+       INNER JOIN model_providers ON model_providers.id = models.provider_id
+       WHERE models.enabled = 1 AND model_providers.enabled = 1 AND models.role = 'FALLBACK'
+       LIMIT 1`,
     );
     return r ? mapModel(r) : null;
   }

@@ -29,8 +29,8 @@ import { ChallengeStartService, isRetryableContestError } from "./start-policy.j
 import { isRetryablePrepareError, prepareBackoffMs } from "./prepare-retry.js";
 import { syncRemoteChallenge } from "./challenge-sync.js";
 import { loadContestProfile, saveContestProfile } from "./contest-profile.js";
-import { loadModelAssignments, resolveAssignedModel } from "./model-assignments.js";
-import { buildPlannerInjection, buildCheckpoint, shouldReflect } from "./planner.js";
+import { isModelUsable, resolveAssignedModel } from "./model-assignments.js";
+import { buildPlannerInjection, buildCheckpoint, reflectionHasMaterial, shouldReflect } from "./planner.js";
 import { extractFlagsFromVisualObservation, formatHumanVisualObservation } from "./visual-review.js";
 
 export interface ControlPlaneDeps {
@@ -586,11 +586,10 @@ depended on the previous files.`;
   }
 
   #visualWorkerConfig(): StartWorkerConfig["visual"] {
-    const assigned = loadModelAssignments(this.deps.repos);
-    const vis = assigned.visionModelId ? this.deps.repos.models.get(assigned.visionModelId) : null;
+    const vis = resolveAssignedModel(this.deps.repos, "vision");
     return {
       maxVisionCalls: this.deps.config.visual?.maxVisionCallsPerChallenge ?? 40,
-      visionModelId: vis?.modelName ?? assigned.visionModelId,
+      visionModelId: vis?.modelName ?? null,
     };
   }
 
@@ -751,7 +750,13 @@ depended on the previous files.`;
             artifactHashesJson: JSON.stringify([msg.artifactSha256 ?? ""]),
             durationMs: 0,
           });
-          this.#maybeReflect(challengeId, String(msg.outcome ?? ""));
+          const trigger = shouldReflect({
+            noSignalStreak: repos.experiments.noSignalStreak(challengeId),
+            secondsSinceProgress: 0,
+            wrongFlags: challenge.wrongSubmissionCount,
+            repeatedTool: String(msg.outcome ?? "") === "ALREADY_TESTED",
+          });
+          if (trigger) this.#maybeReflect(challengeId, trigger);
         } catch {
           /* unique key */
         }
@@ -948,7 +953,8 @@ depended on the previous files.`;
         this.#maybeReflect(c.id, "stalled");
       }
       const latest = repos.progress.latestForChallenge(c.id);
-      const secondsSinceProgress = latest ? (now - latest.createdAt) / 1000 : idle / 1000;
+      // No progress yet is not a stall — the solver may still be on the first turn.
+      const secondsSinceProgress = latest ? (now - latest.createdAt) / 1000 : 0;
       const trigger = shouldReflect({
         noSignalStreak: repos.experiments.noSignalStreak(c.id),
         secondsSinceProgress,
@@ -1476,6 +1482,17 @@ Treat the rejection as negative evidence and continue solving.`;
     const now = Date.now();
     const last = this.reflectCooldown.get(challengeId) ?? 0;
     if (now - last < 5 * 60_000) return;
+    const repos = this.deps.repos;
+    if (
+      !reflectionHasMaterial({
+        trigger,
+        hasProgress: Boolean(repos.progress.latestForChallenge(challengeId)),
+        wrongFlags: repos.challenges.get(challengeId)?.wrongSubmissionCount ?? 0,
+        experimentCount: repos.experiments.listByChallenge(challengeId).length,
+      })
+    ) {
+      return;
+    }
     this.reflectCooldown.set(challengeId, now);
     const outcome = this.deps.reflection.reflect(challengeId, trigger);
     const c = this.deps.repos.challenges.get(challengeId);
@@ -1495,6 +1512,7 @@ Treat the rejection as negative evidence and continue solving.`;
   switchModel(challengeId: string, modelId: string): void {
     const model = this.deps.repos.models.get(modelId);
     if (!model) throw new Error("unknown model");
+    if (!isModelUsable(this.deps.repos, model)) throw new Error("model is disabled");
     const session = this.deps.repos.sessions.activeForChallenge(challengeId);
     if (session) this.deps.repos.sessions.update(session.id, { modelId: model.modelName, providerId: model.providerId });
     this.workerPool.switchModel(challengeId, { providerId: model.providerId, modelId: model.modelName });

@@ -134,16 +134,21 @@ packages/agent-runtime  AgentRuntimeAdapter · MockAgent · Pi 适配器（隔�
 packages/tool-runtime   Workspace/FS Guard · ProcessRunner · 工具注册表
 packages/visual-runtime 概览 / QR / 变换 / bitplane / 频谱图 / GIF / Vision HTTP
 packages/misc-runtime   PCAP / 字符串 / 签名 / 拖尾数据 / 实验账本
-packages/crypto-runtime RSA / CRT / Håstad / LCG / XOR …
+packages/crypto-runtime RSA / CRT / Håstad / LCG / XOR / 本地 LLL
 packages/solver         System Prompts · 确定性 Triage
 packages/eval           注册题 runTool 求解 + benchmark
-docker/                 misc/crypto/sage worker 镜像（Docker 可用时启用）
+docker/                 可选 Sage 镜像（工具默认本机 NativeTrusted，不强制 Docker）
 agent/prompts/          Solver/Triage/Reflection 提示词原文
 config/runtime.yaml     运行配置（Zod 启动校验）
 scripts/llm-soak-mock.ts  真模型 soak（只打已存 Key，不打印明文）
 ```
 
 ## 模型怎么调工具
+
+工具在**本机**跑（`NativeTrusted`），不进 Docker。`docker/` 里的 Sage
+镜像是可选后端：本机 PATH 上有 `sage`、Python 能 `import fpylll`、或
+Docker 里已经有 `sagemath/sagemath` 时，`lll_reduce` 才会去用；否则走
+打包的整数 LLL。Windows 上没有官方 fpylll / Sage 轮子，所以默认就是本地实现。
 
 Solver 不会自己去敲文件系统。Pi 适配器把 `TOOL_IMPLS` 全部注册成
 `defineTool`；模型发出 tool call 后，`execute` → `runTool`，结果写回
@@ -267,6 +272,7 @@ API Key 通过 Dashboard「Add Provider」或 CLI 配置，加密落盘。
 - [x] VisualRuntime：概览 / QR / 变换 / bitplane / 频谱图 / GIF 帧 / Vision HTTP
 - [x] Vision 解析 2.0.2：数组或 map 形 observations；从 prose / `reasoning_content` salvage `flag{…}`
 - [x] 视觉复核：像 flag 的人工回答会以 0.95 置信度进入候选
+- [x] 工具默认本机执行（NativeTrusted）。`lll_reduce` 自带整数 LLL；本机/Docker 有 Sage 或 fpylll 时才改走外部后端
 - [x] Misc / Crypto 语义工具 + 实验账本（`ALREADY_TESTED` + force）
 - [x] Hypothesis 落库 · Artifact `parentArtifactId` DAG · HUMAN VisualEvidence 持久化
 - [x] Mock 目录 22（21 可解 + WEB）；eval / Mock 策略走真实 `runTool`

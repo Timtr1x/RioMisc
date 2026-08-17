@@ -2,11 +2,11 @@
 import type { FastifyInstance } from "fastify";
 import type { Repositories } from "@rio/database";
 import type { RioLogger, SecretStore, RuntimeConfig } from "@rio/shared";
-import { setPriorityParamsSchema, switchModelParamsSchema, manualCandidateParamsSchema, providerCreateSchema, modelCreateSchema, modelAssignmentsSchema, modelCapabilitiesSchema, visualReviewAnswerSchema } from "@rio/domain";
+import { setPriorityParamsSchema, switchModelParamsSchema, manualCandidateParamsSchema, providerCreateSchema, modelCreateSchema, modelPatchSchema, modelAssignmentsSchema, modelCapabilitiesSchema, visualReviewAnswerSchema } from "@rio/domain";
 import type { ControlPlane } from "../control/control-plane.js";
 import type { ModelRegistry } from "../control/registry.js";
 import type { EventBus } from "../control/bus.js";
-import { loadModelAssignments, patchModelAssignments } from "../control/model-assignments.js";
+import { loadModelAssignments, patchModelAssignments, pruneUnusableAssignments, sanitizeModelAssignments } from "../control/model-assignments.js";
 
 export interface ApiDeps {
   fastify: FastifyInstance;
@@ -222,10 +222,10 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
   fastify.get("/api/providers", async () => ({
     providers: repos.providers.list(),
     models: repos.models.list(),
-    assignments: loadModelAssignments(repos),
+    assignments: sanitizeModelAssignments(repos, loadModelAssignments(repos)),
   }));
 
-  fastify.get("/api/models/assignments", async () => loadModelAssignments(repos));
+  fastify.get("/api/models/assignments", async () => sanitizeModelAssignments(repos, loadModelAssignments(repos)));
 
   fastify.put("/api/models/assignments", async (req) => {
     const body = modelAssignmentsSchema.parse(req.body ?? {});
@@ -254,6 +254,7 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
       /* no master key or missing secret — ignore */
     }
     repos.providers.update(id, { enabled: false });
+    pruneUnusableAssignments(repos);
     return { ok: true };
   });
 
@@ -261,6 +262,16 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     const body = modelCreateSchema.parse(req.body);
     const model = await registry.addModel(body);
     return { ok: true, model };
+  });
+
+  fastify.patch("/api/models/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = modelPatchSchema.parse(req.body ?? {});
+    const model = repos.models.get(id);
+    if (!model) return reply.code(404).send({ error: "unknown model" });
+    if (!model.enabled) return reply.code(400).send({ error: "model is disabled" });
+    repos.models.update(id, body);
+    return { ok: true, model: repos.models.get(id) };
   });
 
   fastify.post("/api/models/:id/role", async (req, reply) => {
@@ -271,6 +282,8 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     }
     const model = repos.models.get(id);
     if (!model) return reply.code(404).send({ error: "unknown model" });
+    if (!model.enabled) return reply.code(400).send({ error: "model is disabled" });
+    if (!repos.providers.get(model.providerId)?.enabled) return reply.code(400).send({ error: "provider is disabled" });
     repos.models.update(id, { role: body.role as "PRIMARY" | "FALLBACK" | "GENERAL" });
     // 同一 provider 只保留一个 PRIMARY
     if (body.role === "PRIMARY") {
@@ -358,6 +371,7 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     const model = repos.models.get(id);
     if (!model) return reply.code(404).send({ error: "unknown model" });
     repos.models.update(id, { enabled: false });
+    pruneUnusableAssignments(repos);
     return { ok: true };
   });
 

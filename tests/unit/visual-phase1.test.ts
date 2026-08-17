@@ -112,6 +112,38 @@ describe("vision adapter / cache / budget", () => {
     ).rejects.toThrow(/specific question/);
   });
 
+  it("HttpVisionAdapter uses Anthropic image blocks and parses content[]", async () => {
+    let body: Record<string, unknown> = {};
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({
+          content: [
+            { type: "thinking", thinking: "look at the pixels" },
+            { type: "text", text: JSON.stringify({ summary: "ok", observations: [{ type: "TEXT", value: "HI", description: "letters", confidence: 0.9 }] }) },
+          ],
+        }),
+        { status: 200 },
+      );
+    };
+    const adapter = new HttpVisionAdapter({
+      baseUrl: "https://api.minimaxi.com/anthropic",
+      apiKey: "k",
+      modelId: "MiniMax-M3",
+      protocol: "ANTHROPIC_MESSAGES",
+      fetchImpl,
+    });
+    const image = { width: 2, height: 2, data: new Uint8Array(16).fill(255) };
+    const out = await adapter.analyzeImage({ challengeId: "c", path: "a.png", image, question: "What text?", fileSha256: "abcd" });
+    const user = (body.messages as { content: { type: string }[] }[])[0]!;
+    expect(user.content.some((c) => c.type === "image")).toBe(true);
+    expect(user.content.some((c) => c.type === "image_url")).toBe(false);
+    expect(body.system).toBeTruthy();
+    expect((body.messages as { role: string }[]).some((m) => m.role === "system")).toBe(false);
+    expect(out.summary).toBe("ok");
+    expect(out.observations[0]?.value).toBe("HI");
+  });
+
   it("VisionCallBudget refuses calls past the configured max", () => {
     const b = new VisionCallBudget(0, 5);
     for (let i = 0; i < 5; i++) b.take();

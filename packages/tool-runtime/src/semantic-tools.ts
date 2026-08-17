@@ -40,7 +40,9 @@ import {
   caesar,
   lcgRecover,
   aesInspect,
-  advancedMathUnavailable,
+  parseIntegerMatrix,
+  lllWithBackend,
+  discreteLogSmall,
 } from "@rio/crypto-runtime";
 import { decodeImageFile, writeTransformedPng, extractBitplane, encodePng } from "@rio/visual-runtime";
 import type { ToolContext, ToolResult } from "./tools.js";
@@ -315,8 +317,21 @@ export async function rsaAttackTool(name: string, ctx: ToolContext, params: unkn
       const r = xorKnownPlaintext(c, pt);
       return ok(`keystream ${r.length}B`, { hex: Buffer.from(r).toString("hex") }, Date.now() - t0);
     }
-    if (name === "lll_reduce" || name === "discrete_log_if_small") {
-      return { ...advancedMathUnavailable(name), summary: "backend unavailable", durationMs: Date.now() - t0 };
+    if (name === "lll_reduce") {
+      const matrix = parseIntegerMatrix(v.matrix ?? text);
+      if (!matrix) return fail("VALIDATION", "lll_reduce needs a matrix (JSON [[..],[..]] or whitespace rows)", Date.now() - t0);
+      const { reduced, backend } = lllWithBackend(matrix);
+      return ok(`lll ${reduced.length}x${reduced[0]?.length ?? 0} via ${backend}`, {
+        backend,
+        matrix: reduced.map((row) => row.map(String)),
+      }, Date.now() - t0);
+    }
+    if (name === "discrete_log_if_small") {
+      const g = parseBig(v.g ?? v.a ?? "0");
+      const h = parseBig(v.h ?? v.b ?? "0");
+      const mod = parseBig(v.m ?? v.n ?? "0");
+      const x = discreteLogSmall(g, h, mod);
+      return ok(x !== null ? `x=${x}` : "no small discrete log", { x: x?.toString() ?? null }, Date.now() - t0);
     }
   } catch (e) {
     return fail("CRYPTO", String(e), Date.now() - t0);

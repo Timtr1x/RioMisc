@@ -107,14 +107,10 @@ export class ModelRegistry {
       return out;
     }
 
-    // Phase 2: tool call — keep thinking on first. DeepSeek needs to think
-    // AND call tools; only fall back to "off" probes if the endpoint rejects that.
-    const probes: { label: string; extra: Record<string, unknown> }[] = [
-      { label: "thinking.enabled", extra: { thinking: { type: "enabled" }, reasoning_effort: "high" } },
-      { label: "thinking.enabled-only", extra: { thinking: { type: "enabled" } } },
-      { label: "no-param", extra: {} },
-      { label: "thinking.disabled", extra: { thinking: { type: "disabled" } } },
-    ];
+    // Phase 2: tool call. OpenAI/DeepSeek probes include thinking on/off.
+    // Anthropic-compatible hosts (Claude, MiniMax /anthropic) reject OpenAI
+    // function tools, string tool_choice, and thinking.type=disabled.
+    const probes = toolProbesFor(provider.protocol);
     out.toolCall = false;
     let probeNote = "";
     for (const probe of probes) {
@@ -135,15 +131,14 @@ export class ModelRegistry {
           ],
           tool_choice: "auto",
         }, true, modelName)) as Record<string, unknown> | null;
-        // 标准 OpenAI 响应: choices[0].message.tool_calls（不是顶层）
-        const choice = (response?.choices as { message?: { tool_calls?: unknown[] } }[] | undefined)?.[0];
-        const toolCalls = Array.isArray(choice?.message?.tool_calls) ? choice.message.tool_calls : [];
+        const toolCalls = extractToolCalls(response);
         if (toolCalls.length > 0) {
           out.toolCall = true;
           probeNote = ` (tool+thinking 探测: ${probe.label})`;
           break;
         }
-        const finish = choice?.message ? (response?.choices as { finish_reason?: string }[] | undefined)?.[0]?.finish_reason : "?";
+        const finish = (response?.choices as { finish_reason?: string }[] | undefined)?.[0]?.finish_reason
+          ?? (typeof response?.stop_reason === "string" ? response.stop_reason : "?");
         probeNote = ` (探测 ${probe.label}: finish=${finish ?? "?"}, 无 tool call)`;
       } catch (e) {
         probeNote = ` (探测 ${probe.label} 失败: ${(e as Error).message.slice(0, 160)})`;
@@ -155,7 +150,7 @@ export class ModelRegistry {
     const visionModel = selectVisionTestModel(models, assigned.visionModelId);
     if (visionModel) {
       try {
-        const payload = buildVisionTestPayload(visionModel.modelName);
+        const payload = buildVisionTestPayload(visionModel.modelName, provider.protocol);
         const replyRaw = await this.#request(provider, apiKey, payload, false, visionModel.modelName);
         const reply = extractVisionReply(replyRaw);
         out.visionApi = visionTestPassed(reply);
@@ -187,14 +182,29 @@ export class ModelRegistry {
     if (provider.protocol === "ANTHROPIC_MESSAGES") {
       headers["x-api-key"] = apiKey;
       headers["anthropic-version"] = "2023-06-01";
-      const payload = { ...body, model: modelName };
+      headers["authorization"] = `Bearer ${apiKey}`;
+      const payload = toAnthropicMessagesBody(body, modelName);
       const res = await this.fetchImpl(url, { method: "POST", headers, body: JSON.stringify(payload) });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
       const json = (await res.json()) as Record<string, unknown>;
-      const blocks = (json.content as { type: string; text?: string; id?: string }[]) ?? [];
-      const text = blocks.filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
+      const blocks = (json.content as { type: string; text?: string; thinking?: string; id?: string }[]) ?? [];
+      const text = blocks
+        .map((b) => (b.type === "text" ? b.text ?? "" : b.type === "thinking" ? b.thinking ?? "" : ""))
+        .filter(Boolean)
+        .join("\n");
       const toolUses = blocks.filter((b) => b.type === "tool_use");
-      return wantToolCalls ? { tool_calls: toolUses.length ? [{ id: toolUses[0]!.id }] : [] } : text;
+      if (wantToolCalls) {
+        return {
+          ...json,
+          choices: [
+            {
+              message: { tool_calls: toolUses.map((t) => ({ id: t.id })) },
+              finish_reason: toolUses.length ? "tool_calls" : json.stop_reason,
+            },
+          ],
+        };
+      }
+      return text;
     }
     // OpenAI-style (completions or responses)
     headers["authorization"] = `Bearer ${apiKey}`;
@@ -244,4 +254,75 @@ export class ModelRegistry {
   recordModelSuccess(providerId: string): void {
     this.repos.providers.recordSuccess(providerId);
   }
+}
+
+function toolProbesFor(protocol: ProviderProtocol): { label: string; extra: Record<string, unknown> }[] {
+  if (protocol === "ANTHROPIC_MESSAGES") {
+    return [
+      { label: "no-param", extra: {} },
+      { label: "thinking.adaptive", extra: { thinking: { type: "adaptive" } } },
+      { label: "thinking.enabled", extra: { thinking: { type: "enabled", budget_tokens: 1024 } } },
+    ];
+  }
+  return [
+    { label: "thinking.enabled", extra: { thinking: { type: "enabled" }, reasoning_effort: "high" } },
+    { label: "thinking.enabled-only", extra: { thinking: { type: "enabled" } } },
+    { label: "no-param", extra: {} },
+    { label: "thinking.disabled", extra: { thinking: { type: "disabled" } } },
+  ];
+}
+
+function extractToolCalls(response: Record<string, unknown> | null): unknown[] {
+  if (!response) return [];
+  const choice = (response.choices as { message?: { tool_calls?: unknown[] } }[] | undefined)?.[0];
+  if (Array.isArray(choice?.message?.tool_calls) && choice.message.tool_calls.length > 0) {
+    return choice.message.tool_calls;
+  }
+  if (Array.isArray(response.tool_calls) && response.tool_calls.length > 0) return response.tool_calls;
+  const blocks = response.content as { type?: string }[] | undefined;
+  if (Array.isArray(blocks) && blocks.some((b) => b.type === "tool_use")) {
+    return blocks.filter((b) => b.type === "tool_use");
+  }
+  return [];
+}
+
+function toAnthropicMessagesBody(body: Record<string, unknown>, modelName: string): Record<string, unknown> {
+  const rawMessages = Array.isArray(body.messages) ? (body.messages as Record<string, unknown>[]) : [];
+  let system = typeof body.system === "string" ? body.system : undefined;
+  const messages: Record<string, unknown>[] = [];
+  for (const msg of rawMessages) {
+    if (msg.role === "system") {
+      if (typeof msg.content === "string") system = msg.content;
+      continue;
+    }
+    messages.push(msg);
+  }
+  const payload: Record<string, unknown> = {
+    model: modelName,
+    messages,
+    max_tokens: body.max_tokens ?? 256,
+  };
+  if (system) payload.system = system;
+  if (Array.isArray(body.tools)) {
+    payload.tools = (body.tools as Record<string, unknown>[]).map(toAnthropicTool);
+  }
+  if (body.tool_choice === "auto" || body.tool_choice === "none") {
+    payload.tool_choice = { type: body.tool_choice };
+  } else if (body.tool_choice && typeof body.tool_choice === "object") {
+    payload.tool_choice = body.tool_choice;
+  }
+  if (body.thinking && typeof body.thinking === "object") payload.thinking = body.thinking;
+  return payload;
+}
+
+function toAnthropicTool(tool: Record<string, unknown>): Record<string, unknown> {
+  const fn = tool.function as { name?: string; description?: string; parameters?: unknown } | undefined;
+  if (fn?.name) {
+    return {
+      name: fn.name,
+      description: fn.description ?? "",
+      input_schema: fn.parameters ?? { type: "object", properties: {} },
+    };
+  }
+  return tool;
 }

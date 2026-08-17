@@ -142,9 +142,10 @@ export class ReflectionService {
       hints,
       experiments.map((e) => `${e.tool}:${e.outcome}`),
     );
-    repos.events.append("REFLECTION_RUN", challengeId, { trigger, ...outcome });
-    this.deps.bus.publish({ type: "REFLECTION_RUN", challengeId, payload: { trigger, ...outcome } });
     const injected = this.deps.inject(challengeId, reflectionMessage(outcome));
+    const payload = { trigger, ...outcome, injected };
+    repos.events.append("REFLECTION_RUN", challengeId, payload);
+    this.deps.bus.publish({ type: "REFLECTION_RUN", challengeId, payload });
     this.deps.logger.info({ event: "reflection", challengeId, trigger, injected });
     return { ...outcome, injected };
   }

@@ -6,9 +6,9 @@ import { createRepositories } from "@rio/database";
 import { WorkspaceManager, runTool, type ToolContext } from "@rio/tool-runtime";
 import { encodePng } from "@rio/visual-runtime";
 import { experimentKey } from "@rio/misc-runtime";
-import { rsaSmallE, rsaFermat, lcgRecover, rsaWiener } from "@rio/crypto-runtime";
+import { rsaSmallE, rsaFermat, lcgRecover, rsaWiener, lllReduce, matrixDet, discreteLogSmall, resetMathBackendCache } from "@rio/crypto-runtime";
 import { runBenchmark, replayLookup } from "@rio/eval";
-import { scoreProposedTest, shouldReflect } from "../../apps/server/src/control/planner.ts";
+import { reflectionHasMaterial, scoreProposedTest, shouldReflect } from "../../apps/server/src/control/planner.ts";
 import { resolveAssignedModel } from "../../apps/server/src/control/model-assignments.ts";
 
 function makeCtx(root: string, challengeId = "ch_m2"): ToolContext {
@@ -131,6 +131,11 @@ describe("MVP-2 misc/crypto/planner/eval", () => {
     expect(scoreProposedTest({ tool: "x", args: {}, expectedInformation: "HIGH", ifPositive: "", ifNegative: "", estimatedCost: "CHEAP" }, true)).toBe(-1);
     expect(shouldReflect({ noSignalStreak: 3, secondsSinceProgress: 10, wrongFlags: 0, repeatedTool: false })).toBe("no_signal_streak");
     expect(shouldReflect({ noSignalStreak: 0, secondsSinceProgress: 10, wrongFlags: 1, repeatedTool: false })).toBe("wrong_flag");
+    expect(shouldReflect({ noSignalStreak: 0, secondsSinceProgress: 0, wrongFlags: 0, repeatedTool: false })).toBeNull();
+    expect(reflectionHasMaterial({ trigger: "NEW_EVIDENCE", hasProgress: false, wrongFlags: 0, experimentCount: 1 })).toBe(false);
+    expect(reflectionHasMaterial({ trigger: "stalled", hasProgress: false, wrongFlags: 0, experimentCount: 0 })).toBe(false);
+    expect(reflectionHasMaterial({ trigger: "wrong_flag", hasProgress: false, wrongFlags: 1, experimentCount: 2 })).toBe(true);
+    expect(reflectionHasMaterial({ trigger: "manual", hasProgress: false, wrongFlags: 0, experimentCount: 0 })).toBe(true);
   });
 
   it("resolveAssignedModel prefers the vision-capable model for vision slot", () => {
@@ -154,5 +159,36 @@ describe("MVP-2 misc/crypto/planner/eval", () => {
     repos.settings.set("models.assignments", JSON.stringify({ visionModelId: vis.id, primarySolverModelId: null, reflectionModelId: null, triageModelId: null }));
     expect(resolveAssignedModel(repos, "vision")?.modelName).toBe("see");
     repos.db.close();
+  });
+
+  it("lll_reduce runs on the host without Sage or Docker", async () => {
+    process.env.RIO_MATH_BACKEND = "local";
+    resetMathBackendCache();
+    const dir = mkdtempSync(join(tmpdir(), "rio-m2lll-"));
+    dirs.push(dir);
+    const ctx = makeCtx(dir);
+    const r = await runTool(ctx, "lll_reduce", { text: "[[1,1,1],[-1,0,2],[3,5,6]]" });
+    expect(r.ok).toBe(true);
+    const data = r.data as { backend: string; matrix: string[][] };
+    expect(data.backend).toBe("local");
+    expect(data.matrix.length).toBe(3);
+    const reduced = data.matrix.map((row) => row.map((c) => BigInt(c)));
+    const orig = [
+      [1n, 1n, 1n],
+      [-1n, 0n, 2n],
+      [3n, 5n, 6n],
+    ];
+    expect(matrixDet(reduced)?.toString()).toBe(matrixDet(orig)?.toString());
+    expect(lllReduce(orig).length).toBe(3);
+  });
+
+  it("discrete_log_if_small solves a tiny instance", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "rio-m2dl-"));
+    dirs.push(dir);
+    const ctx = makeCtx(dir);
+    const r = await runTool(ctx, "discrete_log_if_small", { a: "2", b: "14", m: "101" });
+    expect(r.ok).toBe(true);
+    expect((r.data as { x: string }).x).toBe("10");
+    expect(discreteLogSmall(2n, 14n, 101n)).toBe(10n);
   });
 });

@@ -43,36 +43,103 @@ export class HttpVisionAdapter implements VisionModelAdapter {
     this.opts.budget?.take();
     const png = encodePng(input.image);
     const b64 = png.toString("base64");
+    const protocol = this.opts.protocol ?? "OPENAI_CHAT_COMPLETIONS";
     const fetchImpl = this.opts.fetchImpl ?? fetch;
-    const url = chatEndpoint(this.opts.baseUrl, this.opts.protocol ?? "OPENAI_CHAT_COMPLETIONS");
-    const payload = {
-      model: this.opts.modelId,
-      max_tokens: 4096,
-      messages: [
-        { role: "system", content: VISION_SYSTEM_PROMPT },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: question },
-            { type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } },
-          ],
-        },
-      ],
-    };
+    const url = chatEndpoint(this.opts.baseUrl, protocol);
+    const payload = buildVisionChatPayload({
+      modelId: this.opts.modelId,
+      protocol,
+      question,
+      pngBase64: b64,
+      maxTokens: 4096,
+      system: VISION_SYSTEM_PROMPT,
+    });
     const res = await fetchImpl(url, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.apiKey}` },
+      headers: visionRequestHeaders(protocol, this.opts.apiKey),
       body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error(`vision HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    const json = (await res.json()) as {
-      choices?: { message?: { content?: unknown; reasoning_content?: unknown } }[];
-    };
-    const text = visionMessageText(json.choices?.[0]?.message);
+    const json = (await res.json()) as Record<string, unknown>;
+    const text = extractVisionHttpText(json);
     const parsed = parseVisionModelJson(text);
     this.opts.cache?.set(key, parsed);
     return { ...parsed, analyzer: "VISION_MODEL", cached: false };
   }
+}
+
+export function visionRequestHeaders(protocol: string, apiKey: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${apiKey}`,
+  };
+  if (protocol === "ANTHROPIC_MESSAGES") {
+    headers["x-api-key"] = apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+  }
+  return headers;
+}
+
+export function visionImagePart(protocol: string, pngBase64: string): Record<string, unknown> {
+  if (protocol === "ANTHROPIC_MESSAGES") {
+    return {
+      type: "image",
+      source: { type: "base64", media_type: "image/png", data: pngBase64 },
+    };
+  }
+  return { type: "image_url", image_url: { url: `data:image/png;base64,${pngBase64}` } };
+}
+
+export function buildVisionChatPayload(input: {
+  modelId: string;
+  protocol: string;
+  question: string;
+  pngBase64: string;
+  maxTokens: number;
+  system?: string;
+}): Record<string, unknown> {
+  const userContent = [{ type: "text", text: input.question }, visionImagePart(input.protocol, input.pngBase64)];
+  if (input.protocol === "ANTHROPIC_MESSAGES") {
+    const payload: Record<string, unknown> = {
+      model: input.modelId,
+      max_tokens: input.maxTokens,
+      messages: [{ role: "user", content: userContent }],
+    };
+    if (input.system) payload.system = input.system;
+    return payload;
+  }
+  const messages: Record<string, unknown>[] = [];
+  if (input.system) messages.push({ role: "system", content: input.system });
+  messages.push({ role: "user", content: userContent });
+  return { model: input.modelId, max_tokens: input.maxTokens, messages };
+}
+
+export function extractAnthropicMessageText(json: unknown): string {
+  if (!json || typeof json !== "object") return "";
+  const blocks = (json as { content?: unknown }).content;
+  if (!Array.isArray(blocks)) return "";
+  const chunks: string[] = [];
+  for (const block of blocks) {
+    if (!block || typeof block !== "object") continue;
+    const rec = block as { type?: string; text?: unknown; thinking?: unknown };
+    if (typeof rec.text === "string" && rec.text.trim()) chunks.push(rec.text);
+    else if (typeof rec.thinking === "string" && rec.thinking.trim()) chunks.push(rec.thinking);
+  }
+  return chunks.join("\n");
+}
+
+export function extractVisionHttpText(json: unknown): string {
+  const anthropic = extractAnthropicMessageText(json);
+  if (anthropic) return anthropic;
+  if (!json || typeof json !== "object") return "";
+  const rec = json as {
+    choices?: { message?: { content?: unknown; reasoning_content?: unknown } }[];
+    output_text?: unknown;
+  };
+  const fromChoices = visionMessageText(rec.choices?.[0]?.message);
+  if (fromChoices) return fromChoices;
+  if (typeof rec.output_text === "string") return rec.output_text;
+  return "";
 }
 
 export function visionMessageText(message: { content?: unknown; reasoning_content?: unknown } | undefined): string {

@@ -67,4 +67,15 @@ export function shouldReflect(input: {
   return null;
 }
 
+/** Empty-state reflections (no progress, no wrong flags, few experiments) are noise. */
+export function reflectionHasMaterial(input: {
+  trigger: string;
+  hasProgress: boolean;
+  wrongFlags: number;
+  experimentCount: number;
+}): boolean {
+  if (input.trigger === "manual" || input.trigger === "solver_request") return true;
+  return input.hasProgress || input.wrongFlags > 0 || input.experimentCount >= 3;
+}
+
 export type { ActionCost };

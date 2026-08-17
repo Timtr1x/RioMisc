@@ -1,5 +1,5 @@
 import type { Repositories } from "@rio/database";
-import type { ModelAssignments, ModelCapabilities } from "@rio/domain";
+import type { ModelAssignments, ModelCapabilities, ModelConfig } from "@rio/domain";
 
 export const MODEL_ASSIGNMENTS_KEY = "models.assignments";
 
@@ -23,7 +23,9 @@ export function inferModelCapabilities(modelName: string): ModelCapabilities {
     n.includes("gpt-4o") ||
     n.includes("qwen-vl") ||
     n.includes("qwen2-vl") ||
-    n.includes("qwen2.5-vl");
+    n.includes("qwen2.5-vl") ||
+    n.includes("minimax-m3") ||
+    n.includes("minimax_m3");
   const reasoning = /\b(r1|o1|o3|o4|reason|thinking)\b/.test(n);
   return {
     text: true,
@@ -67,19 +69,43 @@ export function loadModelAssignments(repos: Repositories): ModelAssignments {
   return parseModelAssignments(repos.settings.get(MODEL_ASSIGNMENTS_KEY));
 }
 
+export function isModelUsable(repos: Repositories, model: ModelConfig | null | undefined): model is ModelConfig {
+  if (!model?.enabled) return false;
+  const provider = repos.providers.get(model.providerId);
+  return Boolean(provider?.enabled);
+}
+
+export function sanitizeModelAssignments(repos: Repositories, next: ModelAssignments): ModelAssignments {
+  const keep = (id: string | null): string | null => {
+    if (!id) return null;
+    return isModelUsable(repos, repos.models.get(id)) ? id : null;
+  };
+  return {
+    primarySolverModelId: keep(next.primarySolverModelId),
+    reflectionModelId: keep(next.reflectionModelId),
+    visionModelId: keep(next.visionModelId),
+    triageModelId: keep(next.triageModelId),
+  };
+}
+
 export function saveModelAssignments(repos: Repositories, next: ModelAssignments): ModelAssignments {
-  const cleaned: ModelAssignments = {
+  const cleaned = sanitizeModelAssignments(repos, {
     primarySolverModelId: next.primarySolverModelId || null,
     reflectionModelId: next.reflectionModelId || null,
     visionModelId: next.visionModelId || null,
     triageModelId: next.triageModelId || null,
-  };
+  });
   repos.settings.set(MODEL_ASSIGNMENTS_KEY, JSON.stringify(cleaned));
   return cleaned;
 }
 
 export function patchModelAssignments(repos: Repositories, patch: Partial<ModelAssignments>): ModelAssignments {
   return saveModelAssignments(repos, { ...loadModelAssignments(repos), ...patch });
+}
+
+/** Drop slots that point at a removed model or a now-unusable provider. */
+export function pruneUnusableAssignments(repos: Repositories): ModelAssignments {
+  return saveModelAssignments(repos, loadModelAssignments(repos));
 }
 
 export type AssignmentSlot = "primarySolver" | "reflection" | "triage" | "vision";
@@ -96,8 +122,11 @@ export function resolveAssignedModel(repos: Repositories, slot: AssignmentSlot) 
           : a.visionModelId;
   if (id) {
     const m = repos.models.get(id);
-    if (m?.enabled) return m;
+    if (isModelUsable(repos, m)) return m;
   }
-  if (slot === "vision") return repos.models.listEnabled().find((m) => m.capabilities.vision) ?? null;
-  return repos.models.primary() ?? repos.models.listEnabled()[0] ?? null;
+  const usable = repos.models.listEnabled();
+  if (slot === "vision") return usable.find((m) => m.capabilities.vision) ?? null;
+  const primary = repos.models.primary();
+  if (isModelUsable(repos, primary)) return primary;
+  return usable[0] ?? null;
 }

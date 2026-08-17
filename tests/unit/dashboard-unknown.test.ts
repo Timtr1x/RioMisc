@@ -20,6 +20,9 @@ describe("dashboard UNKNOWN reconciliation", () => {
     expect(src).toContain("出 Flag");
     expect(src).toContain("已添加模型");
     expect(src).toContain("先填模型名再点添加");
+    expect(src).toContain("上下文窗口");
+    expect(src).toContain("最大输出 token");
+    expect(src).toContain("保存上限");
     expect(src).toContain("done()");
     expect(src).toContain("浅色模式");
     expect(src).toContain("data-theme");
@@ -28,12 +31,15 @@ describe("dashboard UNKNOWN reconciliation", () => {
     expect(src).toContain("信任的附件域名");
     expect(src).toContain("视觉能力");
     expect(src).toContain("视觉模型");
+    expect(src).toContain("enabledProviderIds");
     expect(src).toContain("反思模型");
     expect(src).toContain("analyze_visual");
     expect(src).toContain("视觉复核");
     expect(src).toContain("request_visual_review");
     expect(src).toContain("HUMAN VISUAL OBSERVATION");
     expect(src).toContain("同时作为候选提交");
+    expect(src).toContain("pickLatestReflection");
+    expect(src).toContain("zhReflectTrigger");
     expect(src).toContain("评测");
     expect(src).toContain("实验账本");
     expect(src).toContain("跑全部评测");

@@ -187,6 +187,15 @@ export const modelCreateSchema = z.object({
   capabilities: modelCapabilitiesSchema.optional(),
 });
 
+export const modelPatchSchema = z
+  .object({
+    contextWindow: z.number().int().min(1024).max(10_000_000).optional(),
+    maxOutputTokens: z.number().int().min(64).max(1_000_000).optional(),
+  })
+  .refine((v) => v.contextWindow !== undefined || v.maxOutputTokens !== undefined, {
+    message: "contextWindow or maxOutputTokens required",
+  });
+
 export const modelAssignmentsSchema = z.object({
   primarySolverModelId: z.string().nullable().optional(),
   reflectionModelId: z.string().nullable().optional(),
@@ -272,6 +281,9 @@ export const cryptoTextSchema = z.object({
   n2: z.string().optional(),
   n3: z.string().optional(),
   c3: z.string().optional(),
+  matrix: z.string().optional(),
+  g: z.string().optional(),
+  h: z.string().optional(),
   force: z.boolean().optional(),
 });
 

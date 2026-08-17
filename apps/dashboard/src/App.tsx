@@ -81,6 +81,56 @@ function zhHealth(code: string | null | undefined): string {
   return code ?? "—";
 }
 
+function zhReflectTrigger(code: string | null | undefined): string {
+  if (code === "manual") return "手动";
+  if (code === "solver_request") return "Solver 请求";
+  if (code === "wrong_flag") return "错 Flag";
+  if (code === "no_signal_streak") return "连续无信号";
+  if (code === "tool_repetition") return "重复实验";
+  if (code === "stalled" || code === "stalled_120s") return "停滞";
+  return code || "自动";
+}
+
+type ReflectionView = {
+  createdAt: number;
+  trigger: string;
+  diagnosis: string;
+  likelyMistakes: string[];
+  missedEvidence: string[];
+  recommendedNextSteps: string[];
+  injected: boolean | null;
+};
+
+function pickLatestReflection(timeline: { type: string; createdAt: number; payloadJson: string }[]): ReflectionView | null {
+  let latest: { type: string; createdAt: number; payloadJson: string } | null = null;
+  for (const ev of timeline) {
+    if (ev.type !== "REFLECTION_RUN") continue;
+    if (!latest || ev.createdAt > latest.createdAt) latest = ev;
+  }
+  if (!latest) return null;
+  try {
+    const p = JSON.parse(latest.payloadJson) as {
+      trigger?: string;
+      diagnosis?: string;
+      likelyMistakes?: string[];
+      missedEvidence?: string[];
+      recommendedNextSteps?: string[];
+      injected?: boolean;
+    };
+    return {
+      createdAt: latest.createdAt,
+      trigger: typeof p.trigger === "string" ? p.trigger : "",
+      diagnosis: p.diagnosis ?? "",
+      likelyMistakes: p.likelyMistakes ?? [],
+      missedEvidence: p.missedEvidence ?? [],
+      recommendedNextSteps: p.recommendedNextSteps ?? [],
+      injected: typeof p.injected === "boolean" ? p.injected : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 const HEALTH_CLASS: Record<string, string> = { HEALTHY: "ok", DOWN: "err", DEGRADED: "warn" };
 
 function shortId(id: string): string {
@@ -639,43 +689,21 @@ function Detail({
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
-  const [reflection, setReflection] = useState<{
-    diagnosis: string;
-    likelyMistakes: string[];
-    missedEvidence: string[];
-    recommendedNextSteps: string[];
-    injected: boolean;
-  } | null>(null);
+  const [reflection, setReflection] = useState<ReflectionView | null>(null);
 
   const load = useCallback(() => {
     if (!id) return;
     void api<ChallengeDetail>(`/challenges/${id}`)
       .then((row) => {
         setD(row);
-        const ev = [...row.timeline].reverse().find((e) => e.type === "REFLECTION_RUN");
-        if (ev) {
-          try {
-            const p = JSON.parse(ev.payloadJson) as {
-              diagnosis?: string;
-              likelyMistakes?: string[];
-              missedEvidence?: string[];
-              recommendedNextSteps?: string[];
-            };
-            setReflection((cur) =>
-              cur ?? {
-                diagnosis: p.diagnosis ?? "",
-                likelyMistakes: p.likelyMistakes ?? [],
-                missedEvidence: p.missedEvidence ?? [],
-                recommendedNextSteps: p.recommendedNextSteps ?? [],
-                injected: true,
-              },
-            );
-          } catch {
-            /* ignore */
-          }
-        }
+        const next = pickLatestReflection(row.timeline);
+        if (next) setReflection(next);
       })
       .catch(() => setD(null));
+  }, [id]);
+
+  useEffect(() => {
+    setReflection(null);
   }, [id]);
 
   useEffect(() => {
@@ -694,6 +722,8 @@ function Detail({
       setErr("");
       if (path.endsWith("/reflection")) {
         setReflection({
+          createdAt: Date.now(),
+          trigger: "manual",
           diagnosis: String(r.diagnosis ?? ""),
           likelyMistakes: (r.likelyMistakes as string[]) ?? [],
           missedEvidence: (r.missedEvidence as string[]) ?? [],
@@ -824,6 +854,10 @@ function Detail({
       {reflection && (
         <div className="panel">
           <h3>反思结果</h3>
+          <p className="muted">
+            {zhReflectTrigger(reflection.trigger)}
+            {reflection.createdAt ? ` · ${new Date(reflection.createdAt).toLocaleString()}` : ""}
+          </p>
           <p>{reflection.diagnosis}</p>
           {reflection.likelyMistakes.length > 0 && (
             <>
@@ -851,8 +885,12 @@ function Detail({
               <li key={m}>{m}</li>
             ))}
           </ul>
-          <div className={reflection.injected ? "ok" : "warn"}>
-            {reflection.injected ? "已注入当前 Solver 会话" : "没有活着的 Solver，反思没有送进模型"}
+          <div className={reflection.injected === false ? "warn" : "ok"}>
+            {reflection.injected === false
+              ? "没有活着的 Solver，反思没有送进模型"
+              : reflection.injected === true
+                ? "已注入当前 Solver 会话"
+                : "已写入时间线"}
           </div>
         </div>
       )}
@@ -1056,8 +1094,35 @@ type ModelRow = {
   modelName: string;
   role: string;
   enabled?: number | boolean;
+  contextWindow?: number;
+  maxOutputTokens?: number;
   capabilities?: ModelCapabilities;
 };
+
+type ModelAddDraft = {
+  name: string;
+  contextWindow: string;
+  maxOutputTokens: string;
+  vision: boolean;
+};
+
+const DEFAULT_CONTEXT_WINDOW = 320000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 320000;
+
+function emptyModelDraft(): ModelAddDraft {
+  return {
+    name: "",
+    contextWindow: String(DEFAULT_CONTEXT_WINDOW),
+    maxOutputTokens: String(DEFAULT_MAX_OUTPUT_TOKENS),
+    vision: false,
+  };
+}
+
+function parseLimit(raw: string, min: number, max: number): number | null {
+  const n = Number(String(raw).trim());
+  if (!Number.isInteger(n) || n < min || n > max) return null;
+  return n;
+}
 
 function isOn(v: number | boolean | undefined): boolean {
   return v !== 0 && v !== false;
@@ -1065,14 +1130,19 @@ function isOn(v: number | boolean | undefined): boolean {
 
 function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: number }) {
   const [data, setData] = useState<{ providers: ProviderRow[]; models: ModelRow[]; assignments?: ModelAssignments } | null>(null);
-  const [visionDrafts, setVisionDrafts] = useState<Record<string, boolean>>({});
   const [name, setName] = useState("");
   const [protocol, setProtocol] = useState("OPENAI_CHAT_COMPLETIONS");
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com");
   const [apiKey, setApiKey] = useState("");
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [drafts, setDrafts] = useState<Record<string, ModelAddDraft>>({});
+  const [limitEdits, setLimitEdits] = useState<Record<string, { contextWindow: string; maxOutputTokens: string }>>({});
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const draftOf = (providerId: string): ModelAddDraft => drafts[providerId] ?? emptyModelDraft();
+  const patchDraft = (providerId: string, patch: Partial<ModelAddDraft>) => {
+    setDrafts((s) => ({ ...s, [providerId]: { ...emptyModelDraft(), ...s[providerId], ...patch } }));
+  };
 
   const load = useCallback(() => {
     void api<{ providers: ProviderRow[]; models: ModelRow[]; assignments?: ModelAssignments }>("/providers")
@@ -1109,9 +1179,20 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
   };
 
   const addModel = async (providerId: string) => {
-    const modelName = (drafts[providerId] ?? "").trim();
+    const draft = draftOf(providerId);
+    const modelName = draft.name.trim();
     if (!modelName) {
       setMsg({ ok: false, text: "先填模型名再点添加" });
+      return;
+    }
+    const contextWindow = parseLimit(draft.contextWindow, 1024, 10_000_000);
+    const maxOutputTokens = parseLimit(draft.maxOutputTokens, 64, 1_000_000);
+    if (contextWindow === null) {
+      setMsg({ ok: false, text: "上下文窗口须为 1024–10000000 的整数" });
+      return;
+    }
+    if (maxOutputTokens === null) {
+      setMsg({ ok: false, text: "最大输出 token 须为 64–1000000 的整数" });
       return;
     }
     setBusy(true);
@@ -1121,14 +1202,40 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
         body: {
           providerId,
           modelName,
-          contextWindow: 200000,
-          maxOutputTokens: 8192,
-          capabilities: visionDrafts[providerId] ? { vision: true } : undefined,
+          contextWindow,
+          maxOutputTokens,
+          capabilities: draft.vision ? { vision: true } : undefined,
         },
       });
-      setDrafts((s) => ({ ...s, [providerId]: "" }));
-      setVisionDrafts((s) => ({ ...s, [providerId]: false }));
+      setDrafts((s) => ({ ...s, [providerId]: emptyModelDraft() }));
       setMsg({ ok: true, text: `已添加模型 ${modelName}` });
+      done();
+    } catch (e) {
+      setMsg({ ok: false, text: String((e as Error).message) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveModelLimits = async (model: ModelRow) => {
+    const edit = limitEdits[model.id] ?? {
+      contextWindow: String(model.contextWindow ?? DEFAULT_CONTEXT_WINDOW),
+      maxOutputTokens: String(model.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS),
+    };
+    const contextWindow = parseLimit(edit.contextWindow, 1024, 10_000_000);
+    const maxOutputTokens = parseLimit(edit.maxOutputTokens, 64, 1_000_000);
+    if (contextWindow === null) {
+      setMsg({ ok: false, text: "上下文窗口须为 1024–10000000 的整数" });
+      return;
+    }
+    if (maxOutputTokens === null) {
+      setMsg({ ok: false, text: "最大输出 token 须为 64–1000000 的整数" });
+      return;
+    }
+    setBusy(true);
+    try {
+      await api(`/models/${model.id}`, { method: "PATCH", body: { contextWindow, maxOutputTokens } });
+      setMsg({ ok: true, text: `已更新 ${model.modelName} 的 token 上限` });
       done();
     } catch (e) {
       setMsg({ ok: false, text: String((e as Error).message) });
@@ -1274,55 +1381,128 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
               )}
               {!hasPrimary && models.length > 0 && <div className="warn">还没有主模型，调度会用列表里第一个</div>}
               {models.length === 0 && <div className="muted">还没有模型。先填名称再点添加。</div>}
-              {models.map((m) => (
-                <div key={m.id} style={{ margin: "6px 0" }}>
-                  <span className={m.role === "PRIMARY" ? "ok" : ""}>
-                    {m.modelName}
-                  </span>{" "}
-                  <span className="badge">{m.role === "PRIMARY" ? "主模型" : m.role === "FALLBACK" ? "备用" : "普通"}</span>
-                  {m.capabilities?.vision && <span className="badge">视觉能力</span>}
-                  {m.capabilities?.reasoning && <span className="badge">推理</span>}
-                  <span className="buttons" style={{ display: "inline", marginLeft: 8 }}>
-                    {m.role !== "PRIMARY" && (
-                      <button disabled={busy} onClick={() => void setPrimary(m.id)}>
-                        设为主模型
+              {models.map((m) => {
+                const edit = limitEdits[m.id] ?? {
+                  contextWindow: String(m.contextWindow ?? DEFAULT_CONTEXT_WINDOW),
+                  maxOutputTokens: String(m.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS),
+                };
+                return (
+                  <div key={m.id} style={{ margin: "6px 0" }}>
+                    <span className={m.role === "PRIMARY" ? "ok" : ""}>
+                      {m.modelName}
+                    </span>{" "}
+                    <span className="badge">{m.role === "PRIMARY" ? "主模型" : m.role === "FALLBACK" ? "备用" : "普通"}</span>
+                    {m.capabilities?.vision && <span className="badge">视觉能力</span>}
+                    {m.capabilities?.reasoning && <span className="badge">推理</span>}
+                    <span className="muted">
+                      {" "}
+                      窗口 {m.contextWindow ?? "?"} · 输出 {m.maxOutputTokens ?? "?"}
+                    </span>
+                    <span className="buttons" style={{ display: "inline", marginLeft: 8 }}>
+                      {m.role !== "PRIMARY" && (
+                        <button disabled={busy} onClick={() => void setPrimary(m.id)}>
+                          设为主模型
+                        </button>
+                      )}
+                      <button className="danger" disabled={busy} onClick={() => void removeModel(m.id, m.modelName)}>
+                        移除
                       </button>
-                    )}
-                    <button className="danger" disabled={busy} onClick={() => void removeModel(m.id, m.modelName)}>
-                      移除
-                    </button>
-                  </span>
-                </div>
-              ))}
+                    </span>
+                    <div className="field-row" style={{ marginTop: 6 }}>
+                      <div className="field">
+                        <label htmlFor={`edit-ctx-${m.id}`}>上下文窗口</label>
+                        <input
+                          id={`edit-ctx-${m.id}`}
+                          type="number"
+                          min={1024}
+                          max={10000000}
+                          value={edit.contextWindow}
+                          onChange={(e) =>
+                            setLimitEdits((s) => ({
+                              ...s,
+                              [m.id]: { ...edit, contextWindow: e.target.value },
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field">
+                        <label htmlFor={`edit-out-${m.id}`}>最大输出 token</label>
+                        <input
+                          id={`edit-out-${m.id}`}
+                          type="number"
+                          min={64}
+                          max={1000000}
+                          value={edit.maxOutputTokens}
+                          onChange={(e) =>
+                            setLimitEdits((s) => ({
+                              ...s,
+                              [m.id]: { ...edit, maxOutputTokens: e.target.value },
+                            }))
+                          }
+                        />
+                      </div>
+                      <button type="button" disabled={busy} onClick={() => void saveModelLimits(m)}>
+                        保存上限
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
               <form
-                className="buttons"
                 onSubmit={(e) => {
                   e.preventDefault();
                   void addModel(p.id);
                 }}
               >
-                <div className="field">
-                  <label htmlFor={`model-${p.id}`}>模型名称</label>
-                  <input
-                    id={`model-${p.id}`}
-                    placeholder="deepseek-v4-flash"
-                    value={drafts[p.id] ?? ""}
-                    onChange={(e) => setDrafts((s) => ({ ...s, [p.id]: e.target.value }))}
-                  />
+                <div className="field-row">
+                  <div className="field">
+                    <label htmlFor={`model-${p.id}`}>模型名称</label>
+                    <input
+                      id={`model-${p.id}`}
+                      placeholder="deepseek-v4-flash"
+                      value={draftOf(p.id).name}
+                      onChange={(e) => patchDraft(p.id, { name: e.target.value })}
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor={`model-ctx-${p.id}`}>上下文窗口</label>
+                    <input
+                      id={`model-ctx-${p.id}`}
+                      type="number"
+                      min={1024}
+                      max={10000000}
+                      value={draftOf(p.id).contextWindow}
+                      onChange={(e) => patchDraft(p.id, { contextWindow: e.target.value })}
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor={`model-out-${p.id}`}>最大输出 token</label>
+                    <input
+                      id={`model-out-${p.id}`}
+                      type="number"
+                      min={64}
+                      max={1000000}
+                      value={draftOf(p.id).maxOutputTokens}
+                      onChange={(e) => patchDraft(p.id, { maxOutputTokens: e.target.value })}
+                    />
+                  </div>
                 </div>
-                <label className="muted" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                  <input
-                    type="checkbox"
-                    checked={Boolean(visionDrafts[p.id])}
-                    onChange={(e) => setVisionDrafts((s) => ({ ...s, [p.id]: e.target.checked }))}
-                  />
-                  具备视觉能力
-                </label>
-                <button type="submit" className="primary" disabled={busy}>添加模型</button>
-                <button type="button" disabled={busy} onClick={() => void test(p.id)}>测试连接</button>
-                <button type="button" className="danger" disabled={busy} onClick={() => void removeProvider(p.id, p.displayName)}>
-                  停用
-                </button>
+                <p className="muted">默认 320000，可按模型改。新上限要重启 Solver 才生效。</p>
+                <div className="buttons">
+                  <label className="muted" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={draftOf(p.id).vision}
+                      onChange={(e) => patchDraft(p.id, { vision: e.target.checked })}
+                    />
+                    具备视觉能力
+                  </label>
+                  <button type="submit" className="primary" disabled={busy}>添加模型</button>
+                  <button type="button" disabled={busy} onClick={() => void test(p.id)}>测试连接</button>
+                  <button type="button" className="danger" disabled={busy} onClick={() => void removeProvider(p.id, p.displayName)}>
+                    停用
+                  </button>
+                </div>
               </form>
             </div>
           );
@@ -1341,13 +1521,16 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
                 : slot === "visionModelId"
                   ? "视觉模型"
                   : "分诊模型";
-          const all = (data?.models ?? []).filter((m) => isOn(m.enabled));
+          const enabledProviderIds = new Set(providers.map((p) => p.id));
+          const all = (data?.models ?? []).filter((m) => isOn(m.enabled) && enabledProviderIds.has(m.providerId));
+          const assigned = data?.assignments?.[slot] ?? "";
+          const value = all.some((m) => m.id === assigned) ? assigned : "";
           return (
             <div className="field" key={slot}>
               <label htmlFor={`assign-${slot}`}>{label}</label>
               <select
                 id={`assign-${slot}`}
-                value={data?.assignments?.[slot] ?? ""}
+                value={value}
                 onChange={(e) => void setAssignment(slot, e.target.value || null)}
                 disabled={busy}
               >
