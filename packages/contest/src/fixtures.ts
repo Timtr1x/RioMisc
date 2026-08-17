@@ -3,6 +3,7 @@
 import { deflateSync } from "node:zlib";
 import { createHash, randomBytes } from "node:crypto";
 import QRCode from "qrcode";
+import { encodeGif } from "@rio/visual-runtime";
 
 export interface FixtureAttachment {
   name: string;
@@ -271,29 +272,233 @@ export function sha256Hex(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
 }
 
-export function makeQrPng(text: string): Buffer {
+interface QrLayout {
+  size: number;
+  scale: number;
+  quiet: number;
+  dim: number;
+  dark: (mx: number, my: number) => boolean;
+}
+
+function qrLayout(text: string, scale = 4, quiet = 4): QrLayout {
   const qr = QRCode.create(text, { errorCorrectionLevel: "M" });
   const size = qr.modules.size;
-  const scale = 4;
-  const quiet = 4;
-  const dim = (size + quiet * 2) * scale;
-  const rgb = Buffer.alloc(dim * dim * 3, 255);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      if (!qr.modules.get(y, x)) continue;
-      for (let dy = 0; dy < scale; dy++) {
-        for (let dx = 0; dx < scale; dx++) {
-          const px = (quiet + x) * scale + dx;
-          const py = (quiet + y) * scale + dy;
-          const o = (py * dim + px) * 3;
-          rgb[o] = 0;
-          rgb[o + 1] = 0;
-          rgb[o + 2] = 0;
+  return {
+    size,
+    scale,
+    quiet,
+    dim: (size + quiet * 2) * scale,
+    dark: (mx, my) => Boolean(qr.modules.get(my, mx)),
+  };
+}
+
+function paintQrRgb(text: string, darkRgb: [number, number, number], lightRgb: [number, number, number], scale = 4): { dim: number; rgb: Buffer } {
+  const q = qrLayout(text, scale);
+  const rgb = Buffer.alloc(q.dim * q.dim * 3);
+  for (let i = 0; i < rgb.length; i += 3) {
+    rgb[i] = lightRgb[0];
+    rgb[i + 1] = lightRgb[1];
+    rgb[i + 2] = lightRgb[2];
+  }
+  for (let y = 0; y < q.size; y++) {
+    for (let x = 0; x < q.size; x++) {
+      if (!q.dark(x, y)) continue;
+      for (let dy = 0; dy < q.scale; dy++) {
+        for (let dx = 0; dx < q.scale; dx++) {
+          const px = (q.quiet + x) * q.scale + dx;
+          const py = (q.quiet + y) * q.scale + dy;
+          const o = (py * q.dim + px) * 3;
+          rgb[o] = darkRgb[0];
+          rgb[o + 1] = darkRgb[1];
+          rgb[o + 2] = darkRgb[2];
         }
       }
     }
   }
+  return { dim: q.dim, rgb };
+}
+
+function moduleAt(q: QrLayout, px: number, py: number): boolean {
+  const mx = Math.floor(px / q.scale) - q.quiet;
+  const my = Math.floor(py / q.scale) - q.quiet;
+  if (mx < 0 || my < 0 || mx >= q.size || my >= q.size) return false;
+  return q.dark(mx, my);
+}
+
+function seededBytes(n: number, seed = 0xc0ffee): Buffer {
+  const out = Buffer.alloc(n);
+  let s = seed >>> 0;
+  for (let i = 0; i < n; i++) {
+    s = (Math.imul(1664525, s) + 1013904223) >>> 0;
+    out[i] = (s >>> 24) & 0xff;
+  }
+  return out;
+}
+
+export function makePngRgba(width: number, height: number, rgba: Buffer): Buffer {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const scanlines = Buffer.alloc(height * (1 + width * 4));
+  for (let y = 0; y < height; y++) {
+    scanlines[y * (1 + width * 4)] = 0;
+    rgba.copy(scanlines, y * (1 + width * 4) + 1, y * width * 4, (y + 1) * width * 4);
+  }
+  const idat = deflateSync(scanlines);
+  const chunk = (type: string, data: Buffer) =>
+    Buffer.concat([be32(data.length), Buffer.from(type, "binary"), data, be32(crc32(Buffer.concat([Buffer.from(type, "binary"), data])))]);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", idat),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+export function makeQrPng(text: string): Buffer {
+  const { dim, rgb } = paintQrRgb(text, [0, 0, 0], [255, 255, 255]);
   return makePng(dim, dim, rgb);
+}
+
+/** QR with almost-no contrast — needs autocontrast before jsQR. */
+export function makeLowContrastQrPng(text: string): Buffer {
+  const { dim, rgb } = paintQrRgb(text, [118, 118, 118], [132, 132, 132]);
+  return makePng(dim, dim, rgb);
+}
+
+/** QR only in the red channel; G/B noise hides it from a straight decode. */
+export function makeChannelQrPng(text: string): Buffer {
+  const q = qrLayout(text);
+  const noise = seededBytes(q.dim * q.dim * 3, 0x51f1);
+  const rgb = Buffer.from(noise);
+  for (let y = 0; y < q.dim; y++) {
+    for (let x = 0; x < q.dim; x++) {
+      const o = (y * q.dim + x) * 3;
+      rgb[o] = moduleAt(q, x, y) ? 0 : 255;
+    }
+  }
+  return makePng(q.dim, q.dim, rgb);
+}
+
+/** QR painted into R bit 0 (visible bitplane, not a bitstream LSB). */
+export function makeBitplaneQrPng(text: string): Buffer {
+  const q = qrLayout(text);
+  const rgb = seededBytes(q.dim * q.dim * 3, 0xb17e);
+  for (let y = 0; y < q.dim; y++) {
+    for (let x = 0; x < q.dim; x++) {
+      const o = (y * q.dim + x) * 3;
+      const on = moduleAt(q, x, y);
+      rgb[o] = on ? rgb[o]! | 1 : rgb[o]! & 0xfe;
+    }
+  }
+  return makePng(q.dim, q.dim, rgb);
+}
+
+/** QR in the alpha MSB; RGB looks like noise. */
+export function makeAlphaQrPng(text: string): Buffer {
+  const q = qrLayout(text);
+  const rgb = seededBytes(q.dim * q.dim * 3, 0xa1fa);
+  const rgba = Buffer.alloc(q.dim * q.dim * 4);
+  for (let y = 0; y < q.dim; y++) {
+    for (let x = 0; x < q.dim; x++) {
+      const i = y * q.dim + x;
+      rgba[i * 4] = rgb[i * 3]!;
+      rgba[i * 4 + 1] = rgb[i * 3 + 1]!;
+      rgba[i * 4 + 2] = rgb[i * 3 + 2]!;
+      rgba[i * 4 + 3] = moduleAt(q, x, y) ? 0 : 255;
+    }
+  }
+  return makePngRgba(q.dim, q.dim, rgba);
+}
+
+export function makeRotatedQrPng(text: string): Buffer {
+  const { dim, rgb } = paintQrRgb(text, [0, 0, 0], [255, 255, 255]);
+  const out = Buffer.alloc(dim * dim * 3);
+  for (let y = 0; y < dim; y++) {
+    for (let x = 0; x < dim; x++) {
+      const nx = dim - 1 - y;
+      const ny = x;
+      const si = (y * dim + x) * 3;
+      const di = (ny * dim + nx) * 3;
+      out[di] = rgb[si]!;
+      out[di + 1] = rgb[si + 1]!;
+      out[di + 2] = rgb[si + 2]!;
+    }
+  }
+  return makePng(dim, dim, out);
+}
+
+export function makeInvertedQrPng(text: string): Buffer {
+  const { dim, rgb } = paintQrRgb(text, [255, 255, 255], [0, 0, 0]);
+  return makePng(dim, dim, rgb);
+}
+
+export function makeControlPng(): Buffer {
+  return makePng(48, 48, seededBytes(48 * 48 * 3, 0x1111));
+}
+
+/** Two-frame GIF: noise, then a QR. */
+export function makeHiddenFrameGif(text: string): Buffer {
+  const { dim, rgb } = paintQrRgb(text, [0, 0, 0], [255, 255, 255]);
+  const palette = Buffer.from([0, 0, 0, 255, 255, 255]);
+  const noise = new Uint8Array(dim * dim);
+  const qr = new Uint8Array(dim * dim);
+  const rnd = seededBytes(dim * dim, 0x61f);
+  for (let i = 0; i < dim * dim; i++) {
+    noise[i] = rnd[i]! > 127 ? 1 : 0;
+    const o = i * 3;
+    qr[i] = rgb[o]! < 128 ? 0 : 1;
+  }
+  return encodeGif(
+    [
+      { width: dim, height: dim, index: noise, delayCs: 10 },
+      { width: dim, height: dim, index: qr, delayCs: 10 },
+    ],
+    palette,
+  );
+}
+
+/** Ethernet + IPv4 + UDP/53 DNS query whose QNAME contains the flag. */
+export function makePcapDns(qname: string): Buffer {
+  const labels = qname.split(".").filter(Boolean);
+  const qnameBufs: Buffer[] = [];
+  for (const lab of labels) {
+    const b = Buffer.from(lab, "ascii");
+    qnameBufs.push(Buffer.from([b.length]), b);
+  }
+  qnameBufs.push(Buffer.from([0]));
+  const dns = Buffer.concat([
+    Buffer.from([0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+    ...qnameBufs,
+    Buffer.from([0x00, 0x01, 0x00, 0x01]),
+  ]);
+  const udp = Buffer.alloc(8 + dns.length);
+  udp.writeUInt16BE(53000, 0);
+  udp.writeUInt16BE(53, 2);
+  udp.writeUInt16BE(8 + dns.length, 4);
+  dns.copy(udp, 8);
+  const ip = Buffer.alloc(20 + udp.length);
+  ip[0] = 0x45;
+  ip.writeUInt16BE(20 + udp.length, 2);
+  ip[8] = 64;
+  ip[9] = 17;
+  ip.writeUInt32BE(0x0a000003, 12);
+  ip.writeUInt32BE(0x08080808, 16);
+  udp.copy(ip, 20);
+  const eth = Buffer.concat([Buffer.from("00112233445566778899aabb", "hex"), Buffer.from("0800", "hex"), ip]);
+  const rec = Buffer.alloc(16);
+  rec.writeUInt32LE(1700000100, 0);
+  rec.writeUInt32LE(eth.length, 8);
+  rec.writeUInt32LE(eth.length, 12);
+  const globalHeader = Buffer.alloc(24);
+  globalHeader.writeUInt32LE(0xa1b2c3d4, 0);
+  globalHeader.writeUInt16LE(2, 4);
+  globalHeader.writeUInt16LE(4, 6);
+  globalHeader.writeUInt32LE(65535, 16);
+  globalHeader.writeUInt32LE(1, 20);
+  return Buffer.concat([globalHeader, rec, eth]);
 }
 
 export function makeToneWav(sampleRate: number, hz: number, seconds: number): Buffer {
@@ -331,7 +536,7 @@ export function bigintToAscii(n: bigint): string {
 }
 
 // ---------------------------------------------------------------------------
-// The fixture set (misc-001..007, crypto-001..006, unsupported-web)
+// The fixture set (misc-001..015, crypto-001..006, unsupported-web)
 // ---------------------------------------------------------------------------
 
 export function buildFixtures(): FixtureChallenge[] {
@@ -557,6 +762,110 @@ export function buildFixtures(): FixtureChallenge[] {
       category: "CRYPTO",
       flag,
       attachments: [],
+    });
+  }
+
+  // misc-008: low-contrast QR (autocontrast then analyze_visual)
+  {
+    const flag = "flag{low_contrast_ok}";
+    fixtures.push({
+      id: "misc-008",
+      title: "Washed Out",
+      description: "The PNG looks blank. Apply autocontrast; a QR is hiding in the low contrast.",
+      category: "MISC",
+      flag,
+      attachments: [{ name: "blank.png", bytes: makeLowContrastQrPng(flag) }],
+    });
+  }
+
+  // misc-009: QR only in the red channel
+  {
+    const flag = "flag{red_channel_ok}";
+    fixtures.push({
+      id: "misc-009",
+      title: "Red Channel",
+      description: "Only the red channel carries a QR. Extract bitplane R7, then analyze_visual.",
+      category: "MISC",
+      flag,
+      attachments: [{ name: "rgb.png", bytes: makeChannelQrPng(flag) }],
+    });
+  }
+
+  // misc-010: visible bitplane QR (not LSB bitstream)
+  {
+    const flag = "flag{bitplane_vis_ok}";
+    fixtures.push({
+      id: "misc-010",
+      title: "Bit Plane",
+      description: "A QR lives in a single bitplane (R0), not an LSB bitstream. extract_bitplane then analyze_visual.",
+      category: "MISC",
+      flag,
+      attachments: [{ name: "planes.png", bytes: makeBitplaneQrPng(flag) }],
+    });
+  }
+
+  // misc-011: QR in alpha
+  {
+    const flag = "flag{alpha_hidden_ok}";
+    fixtures.push({
+      id: "misc-011",
+      title: "See Through",
+      description: "RGB looks like noise. Check the alpha bitplane (A7) with extract_bitplane.",
+      category: "MISC",
+      flag,
+      attachments: [{ name: "alpha.png", bytes: makeAlphaQrPng(flag) }],
+    });
+  }
+
+  // misc-012: two-frame GIF, QR in the hidden frame
+  {
+    const flag = "flag{gif_frame_ok}";
+    fixtures.push({
+      id: "misc-012",
+      title: "Blink",
+      description: "A two-frame GIF. extract_keyframes and look at every frame with analyze_visual.",
+      category: "MISC",
+      flag,
+      attachments: [{ name: "anim.gif", bytes: makeHiddenFrameGif(flag) }],
+    });
+  }
+
+  // misc-013: rotated QR (decodeQr already tries 4 rotations)
+  {
+    const flag = "flag{rotated_qr_ok}";
+    fixtures.push({
+      id: "misc-013",
+      title: "Sideways",
+      description: "A QR was rotated 90 degrees. analyze_visual should still see it.",
+      category: "MISC",
+      flag,
+      attachments: [{ name: "tilted.png", bytes: makeRotatedQrPng(flag) }],
+    });
+  }
+
+  // misc-014: inverted QR (jsQR attemptBoth)
+  {
+    const flag = "flag{inverted_qr_ok}";
+    fixtures.push({
+      id: "misc-014",
+      title: "Negative",
+      description: "The QR is inverted. Local decode tries both polarities via analyze_visual.",
+      category: "MISC",
+      flag,
+      attachments: [{ name: "negative.png", bytes: makeInvertedQrPng(flag) }],
+    });
+  }
+
+  // misc-015: DNS exfil pcap
+  {
+    const flag = "flag{dns_exfil_ok}";
+    fixtures.push({
+      id: "misc-015",
+      title: "Name Server",
+      description: "DNS queries leaked the flag. Use extract_dns_activity on the capture.",
+      category: "MISC",
+      flag,
+      attachments: [{ name: "dns.pcap", bytes: makePcapDns(`${flag}.exfil.test`) }],
     });
   }
 

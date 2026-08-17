@@ -66,17 +66,55 @@ function python(ctx: ToolContext, code: string): Promise<ToolResult> {
 
 const STRATEGIES: Strategy[] = [
   {
-    name: "qr_visual",
-    match: (desc) => /qr|analyze_visual/i.test(desc),
-    async run(ctx, _desc, rejected) {
+    name: "visual_lab",
+    match: (desc) =>
+      /qr|analyze_visual|contrast|autocontrast|bitplane|alpha|rotat|invert|gif|hidden frame|red channel|visual/i.test(desc),
+    async run(ctx, desc, rejected) {
+      const flagFrom = (r: ToolResult) => firstFlag(JSON.stringify(r.data ?? r.summary ?? ""), rejected);
+      const analyze = async (path: string) =>
+        flagFrom(await tool(ctx, "analyze_visual", { path, mode: "LOCAL_ONLY" }));
       const list = await tool(ctx, "list_workspace", { path: "input" });
       const entries = (list.data as { entries: { name: string }[] })?.entries ?? [];
       for (const e of entries) {
+        if (/\.gif$/i.test(e.name) || /gif|hidden frame/i.test(desc)) {
+          if (!/\.gif$/i.test(e.name)) continue;
+          await tool(ctx, "extract_keyframes", { path: `input/${e.name}`, maxFrames: 8 });
+          const frames = await tool(ctx, "list_workspace", { path: "artifacts/visual/frames" });
+          for (const f of (frames.data as { entries: { name: string }[] })?.entries ?? []) {
+            if (!/\.png$/i.test(f.name)) continue;
+            const hit = await analyze(`artifacts/visual/frames/${f.name}`);
+            if (hit) return hit;
+          }
+          continue;
+        }
         if (!/\.(png|jpg|jpeg)$/i.test(e.name)) continue;
-        const r = await tool(ctx, "analyze_visual", { path: `input/${e.name}`, mode: "LOCAL_ONLY" });
-        const blob = JSON.stringify(r.data ?? r.summary ?? "");
-        const f = firstFlag(blob, rejected);
-        if (f) return f;
+        const src = `input/${e.name}`;
+        const plane = /alpha/i.test(desc)
+          ? ({ ch: "A" as const, bit: 7 })
+          : /bitplane|bit plane/i.test(desc)
+            ? ({ ch: "R" as const, bit: 0 })
+            : /red channel|rgb channel/i.test(desc)
+              ? ({ ch: "R" as const, bit: 7 })
+              : null;
+        if (plane) {
+          const b = await tool(ctx, "extract_bitplane", { path: src, channel: plane.ch, bit: plane.bit });
+          const dest = (b.data as { path?: string } | undefined)?.path;
+          if (dest) {
+            const hit = await analyze(dest);
+            if (hit) return hit;
+          }
+          continue;
+        }
+        if (/contrast|autocontrast/i.test(desc)) {
+          const t = await tool(ctx, "render_transform", { path: src, op: "autocontrast" });
+          const dest = (t.data as { path?: string } | undefined)?.path;
+          if (dest) {
+            const hit = await analyze(dest);
+            if (hit) return hit;
+          }
+        }
+        const hit = await analyze(src);
+        if (hit) return hit;
       }
       return null;
     },
@@ -176,7 +214,7 @@ const STRATEGIES: Strategy[] = [
   },
   {
     name: "png_trailing_zip",
-    match: (desc) => /png|image|picture/i.test(desc),
+    match: (desc) => /trailing|whole file|appended/i.test(desc),
     async run(ctx, _desc, rejected) {
       // python: find a zip after the PNG payload, extract it, read files
       const inputDir = JSON.stringify(ctx.workspace.input.replaceAll("\\", "/"));
@@ -208,7 +246,7 @@ for n in names:
   },
   {
     name: "lsb",
-    match: (desc) => /lsb|stego|least significant|channel/i.test(desc),
+    match: (desc) => /lsb|stego|least significant|channel anomal/i.test(desc),
     async run(ctx, _desc, rejected) {
       const inputDir = JSON.stringify(ctx.workspace.input.replaceAll("\\", "/"));
       const code = `
@@ -247,6 +285,21 @@ for n in os.listdir(${inputDir}):
       if (r.ok) {
         const stdout = (r.data as { stdout?: string })?.stdout ?? "";
         const f = firstFlag(stdout, rejected);
+        if (f) return f;
+      }
+      return null;
+    },
+  },
+  {
+    name: "pcap_dns",
+    match: (desc) => /dns/i.test(desc),
+    async run(ctx, _desc, rejected) {
+      const list = await tool(ctx, "list_workspace", { path: "input" });
+      const entries = (list.data as { entries: { name: string }[] })?.entries ?? [];
+      for (const e of entries) {
+        if (!/\.(pcap|pcapng)$/i.test(e.name)) continue;
+        const r = await tool(ctx, "extract_dns_activity", { path: `input/${e.name}` });
+        const f = firstFlag(JSON.stringify(r.data ?? ""), rejected);
         if (f) return f;
       }
       return null;

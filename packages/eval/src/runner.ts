@@ -19,6 +19,14 @@ const MANIFEST_TO_FIXTURE: Record<string, string> = {
   "misc-qr-001": "misc-006",
   "misc-wav-sr-001": "misc-007",
   "crypto-hastad-001": "crypto-006",
+  "misc-visual-low-contrast-001": "misc-008",
+  "misc-visual-channel-001": "misc-009",
+  "misc-visual-bitplane-001": "misc-010",
+  "misc-visual-alpha-001": "misc-011",
+  "misc-visual-gif-001": "misc-012",
+  "misc-visual-rotated-001": "misc-013",
+  "misc-visual-inverted-001": "misc-014",
+  "misc-pcap-dns-001": "misc-015",
 };
 
 export async function runBenchmark(id?: string): Promise<BenchmarkRunResult[]> {

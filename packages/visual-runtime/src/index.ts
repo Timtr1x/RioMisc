@@ -10,6 +10,7 @@ export { applyImageTransform, writeTransformedPng, rotateRgba, type ImageTransfo
 export { decodeWav, encodeWav } from "./local/wav.js";
 export { renderSpectrogramPng } from "./local/spectrogram.js";
 export { composeContactSheet, extractKeyframesWithFfmpeg, loadFrameImages } from "./local/frames.js";
+export { decodeGifFrames, encodeGif, isGif } from "./local/gif.js";
 export { parseVisionModelJson, extractJsonObject, VISION_SYSTEM_PROMPT, VISUAL_RUNTIME_VERSION } from "./model/parse.js";
 export { visionCacheKey, MemoryVisionCache, FileVisionCache } from "./model/cache.js";
 export { VisionCallBudget, loadFileBudget } from "./model/budget.js";

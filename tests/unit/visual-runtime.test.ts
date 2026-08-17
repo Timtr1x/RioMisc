@@ -11,6 +11,8 @@ import {
   decodeImageBuffer,
   decodeQr,
   encodePng,
+  encodeGif,
+  decodeGifFrames,
   renderVisionOkImage,
   VISION_OK_TEXT,
   VisualRuntime,
@@ -85,6 +87,40 @@ describe("visual runtime", () => {
     expect(existsSync(join(art, "channels-contact-sheet.png"))).toBe(true);
     expect(existsSync(join(art, "bitplanes-contact-sheet.png"))).toBe(true);
     expect(VISION_OK_TEXT).toBe("RIO VISION OK");
+  });
+
+  it("GIF encode/decode keeps two independent frames", () => {
+    const w = 4;
+    const h = 2;
+    const a = new Uint8Array(w * h).fill(0);
+    const b = new Uint8Array(w * h).fill(1);
+    const gif = encodeGif(
+      [
+        { width: w, height: h, index: a, delayCs: 5 },
+        { width: w, height: h, index: b, delayCs: 5 },
+      ],
+      Buffer.from([0, 0, 0, 255, 255, 255]),
+    );
+    expect(gif.toString("ascii", 0, 6)).toBe("GIF89a");
+    const frames = decodeGifFrames(gif);
+    expect(frames).toHaveLength(2);
+    expect(frames[0]!.data[0]).toBe(0);
+    expect(frames[1]!.data[0]).toBe(255);
+  });
+
+  it("GIF encode/decode is pixel-perfect on a 80x80 checkerboard", () => {
+    const w = 80;
+    const h = 80;
+    const idx = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) idx[y * w + x] = (x + y) % 2;
+    const gif = encodeGif([{ width: w, height: h, index: idx }], Buffer.from([0, 0, 0, 255, 255, 255]));
+    const back = decodeGifFrames(gif);
+    expect(back).toHaveLength(1);
+    let bad = 0;
+    for (let i = 0; i < w * h; i++) {
+      if (back[0]!.data[i * 4] !== (idx[i] ? 255 : 0)) bad += 1;
+    }
+    expect(bad).toBe(0);
   });
 
   it("analyze_visual tool is the shipped entry and persists evidence in SQLite via the repo", async () => {

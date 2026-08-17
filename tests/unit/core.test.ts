@@ -1,8 +1,9 @@
 // Priority score, rate limiter, path guard, zip, fixtures, submission dedup (§110).
 import { describe, it, expect } from "vitest";
 import { computePriorityScore, scoreAndRankQueued } from "@rio/scheduler";
-import { ApiRateLimiter, buildFixtures, lsbEmbed, makePcapHttp, makeZip } from "@rio/contest";
+import { ApiRateLimiter, buildFixtures, lsbEmbed, makePcapDns, makePcapHttp, makeZip } from "@rio/contest";
 import { WorkspaceManager, extractZip, listZipEntries, pcapSummary, formatToolResultForModel, normalizeWorkPath, runTool, type ToolContext } from "@rio/tool-runtime";
+import { analyzePcapOverview } from "@rio/misc-runtime";
 import { inflateSync } from "node:zlib";
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -217,6 +218,14 @@ describe("fixtures validity", () => {
     expect(s.packetCount).toBe(2);
     expect(s.hasHttp).toBe(true);
     expect(s.sampleText).toContain("flag{pcap_ok}");
+  });
+
+  it("DNS pcap fixture exposes the flag in the query name", () => {
+    const pcap = makePcapDns("flag{dns_ok}.exfil.test");
+    const ov = analyzePcapOverview(pcap);
+    expect(ov.packetCount).toBe(1);
+    expect(ov.udp).toBe(1);
+    expect(ov.dnsNames.some((n) => n.includes("flag{dns_ok}"))).toBe(true);
   });
 });
 

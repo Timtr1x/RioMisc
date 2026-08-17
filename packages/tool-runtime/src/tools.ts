@@ -38,6 +38,9 @@ import {
   composeContactSheet,
   extractKeyframesWithFfmpeg,
   decodeImageFile,
+  decodeGifFrames,
+  isGif,
+  encodePng,
   type VisionModelAdapter,
 } from "@rio/visual-runtime";
 import { experimentKey, LEDGER_SKIP_TOOLS, canonicalizeArgs } from "@rio/misc-runtime";
@@ -552,17 +555,30 @@ export function extractKeyframesTool(ctx: ToolContext, params: unknown): Promise
     const maxFrames = p.data.maxFrames ?? 16;
     const destDir = ctx.safeResolve("artifacts/visual/frames");
     mkdirSync(destDir, { recursive: true });
-    let frames = extractKeyframesWithFfmpeg(abs, destDir, {
-      maxFrames,
-      strategy: p.data.strategy ?? "UNIFORM",
-    });
+    const raw = readFileSync(abs);
+    let frames = null as ReturnType<typeof extractKeyframesWithFfmpeg>;
+    if (isGif(raw)) {
+      const gifFrames = decodeGifFrames(raw).slice(0, maxFrames);
+      if (gifFrames.length) {
+        frames = gifFrames.map((img, i) => {
+          const dest = join(destDir, `frame-${String(i + 1).padStart(3, "0")}.png`);
+          writeFileSync(dest, encodePng(img));
+          return { index: i, timestampMs: null, absPath: dest };
+        });
+      }
+    }
+    if (!frames) {
+      frames = extractKeyframesWithFfmpeg(abs, destDir, {
+        maxFrames,
+        strategy: p.data.strategy ?? "UNIFORM",
+      });
+    }
     if (!frames) {
       try {
         const one = decodeImageFile(abs);
         const dest = join(destDir, "frame-001.png");
-        writeFileSync(dest, readFileSync(abs));
+        writeFileSync(dest, encodePng(one));
         frames = [{ index: 0, timestampMs: 0, absPath: dest }];
-        void one;
       } catch {
         return Promise.resolve(fail("KEYFRAMES", "need ffmpeg for this video/gif (or pass a PNG/JPEG)", Date.now() - started));
       }

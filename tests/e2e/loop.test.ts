@@ -91,11 +91,11 @@ describe("E2E", () => {
     try {
       await waitFor(() => {
         const s = runtime.control.status();
-        return Number(s.solved) >= 13;
-      }, 240_000, 2000, "all challenges solved");
+        return Number(s.solved) >= 21;
+      }, 300_000, 2000, "all challenges solved");
       const s = runtime.control.status();
-      expect(Number(s.total)).toBe(14);
-      expect(Number(s.solved)).toBe(13);
+      expect(Number(s.total)).toBe(22);
+      expect(Number(s.solved)).toBe(21);
       expect(Number(s.unsupported)).toBe(1);
       expect(Number(s.error)).toBe(0);
       const solved = runtime.repos.challenges.list().filter((c) => c.lifecycleStatus === "SOLVED");
@@ -110,7 +110,7 @@ describe("E2E", () => {
       await runtime.close();
       await rmRetry(dataDir);
     }
-  }, 300_000);
+  }, 360_000);
 
   it("recovers all state after a hard crash (stale leases requeued, nothing lost)", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "rio-e2e-crash-"));
@@ -122,7 +122,7 @@ describe("E2E", () => {
     }, 120_000, 1500, "2 solved + active");
 
     const before = r1.repos.challenges.list().map((c) => c.id);
-    expect(before.length).toBe(14);
+    expect(before.length).toBe(22);
 
     // hard crash: no graceful shutdown, no session end, no lease release
     crashRuntime(r1);
@@ -137,8 +137,8 @@ describe("E2E", () => {
       // recovery requeued the interrupted challenges and solving continues
       await waitFor(() => {
         const s = r2.control.status();
-        return Number(s.solved) >= 13;
-      }, 240_000, 2000, "all solved after recovery");
+        return Number(s.solved) >= 21;
+      }, 300_000, 2000, "all solved after recovery");
 
       // the sessions that were interrupted were preserved (their rows exist)
       const sessions = r2.repos.sessions.listActive();
@@ -147,7 +147,7 @@ describe("E2E", () => {
       await r2.close();
       await rmRetry(dataDir);
     }
-  }, 360_000);
+  }, 420_000);
 
   it("marks hints eligible after start+delay and auto-fetches when enabled", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "rio-e2e-hint-"));

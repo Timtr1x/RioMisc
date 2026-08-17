@@ -4,7 +4,23 @@ import { tmpdir } from "node:os";
 import { buildFixtures } from "@rio/contest";
 import { WorkspaceManager, runTool, type ToolContext } from "@rio/tool-runtime";
 
-export const REGISTERED_SOLVE_IDS = ["misc-006", "misc-007", "crypto-006"] as const;
+export const REGISTERED_SOLVE_IDS = [
+  "misc-006",
+  "misc-007",
+  "crypto-006",
+  "misc-008",
+  "misc-009",
+  "misc-010",
+  "misc-011",
+  "misc-012",
+  "misc-013",
+  "misc-014",
+  "misc-015",
+] as const;
+
+function flagIn(value: unknown): string | null {
+  return JSON.stringify(value ?? "").match(/flag\{[^}]+\}/)?.[0] ?? null;
+}
 
 function ctxFor(root: string, challengeId: string): ToolContext {
   const wm = new WorkspaceManager(join(root, "ws"));
@@ -38,9 +54,7 @@ export async function solveRegisteredWithTools(id: string): Promise<{ flag: stri
     writeFileSync(join(ctx.workspace.root, "challenge.txt"), fixture.description);
     if (id === "misc-006") {
       const r = await call("analyze_visual", { path: "input/code.png", mode: "LOCAL_ONLY" });
-      const blob = JSON.stringify(r.data ?? "");
-      const m = blob.match(/flag\{[^}]+\}/);
-      return { flag: m?.[0] ?? null, techniques: ["analyze_visual"], toolCalls };
+      return { flag: flagIn(r.data), techniques: ["analyze_visual"], toolCalls };
     }
     if (id === "misc-007") {
       const r = await call("render_spectrogram", { path: "input/tone.wav", mode: "AUTO" });
@@ -67,6 +81,53 @@ export async function solveRegisteredWithTools(id: string): Promise<{ flag: stri
         x >>= 8n;
       }
       return { flag: Buffer.from(bytes.reverse()).toString("utf8"), techniques: ["rsa-hastad"], toolCalls };
+    }
+    if (id === "misc-008") {
+      const t = await call("render_transform", { path: "input/blank.png", op: "autocontrast" });
+      const dest = (t.data as { path?: string } | undefined)?.path ?? "artifacts/visual/autocontrast.png";
+      const r = await call("analyze_visual", { path: dest, mode: "LOCAL_ONLY" });
+      return { flag: flagIn(r.data), techniques: ["render_transform", "analyze_visual"], toolCalls };
+    }
+    if (id === "misc-009") {
+      const b = await call("extract_bitplane", { path: "input/rgb.png", channel: "R", bit: 7 });
+      const dest = (b.data as { path?: string } | undefined)?.path ?? "artifacts/visual/bitplane-R7.png";
+      const r = await call("analyze_visual", { path: dest, mode: "LOCAL_ONLY" });
+      return { flag: flagIn(r.data), techniques: ["extract_bitplane", "analyze_visual"], toolCalls };
+    }
+    if (id === "misc-010") {
+      const b = await call("extract_bitplane", { path: "input/planes.png", channel: "R", bit: 0 });
+      const dest = (b.data as { path?: string } | undefined)?.path ?? "artifacts/visual/bitplane-R0.png";
+      const r = await call("analyze_visual", { path: dest, mode: "LOCAL_ONLY" });
+      return { flag: flagIn(r.data), techniques: ["extract_bitplane", "analyze_visual"], toolCalls };
+    }
+    if (id === "misc-011") {
+      const b = await call("extract_bitplane", { path: "input/alpha.png", channel: "A", bit: 7 });
+      const dest = (b.data as { path?: string } | undefined)?.path ?? "artifacts/visual/bitplane-A7.png";
+      const r = await call("analyze_visual", { path: dest, mode: "LOCAL_ONLY" });
+      return { flag: flagIn(r.data), techniques: ["extract_bitplane", "analyze_visual"], toolCalls };
+    }
+    if (id === "misc-012") {
+      await call("extract_keyframes", { path: "input/anim.gif", maxFrames: 8 });
+      const frames = await call("list_workspace", { path: "artifacts/visual/frames" });
+      const names = ((frames.data as { entries: { name: string }[] })?.entries ?? []).map((e) => e.name).filter((n) => /\.png$/i.test(n));
+      for (const n of names) {
+        const r = await call("analyze_visual", { path: `artifacts/visual/frames/${n}`, mode: "LOCAL_ONLY" });
+        const f = flagIn(r.data);
+        if (f) return { flag: f, techniques: ["extract_keyframes", "analyze_visual"], toolCalls };
+      }
+      return { flag: null, techniques: ["extract_keyframes"], toolCalls };
+    }
+    if (id === "misc-013") {
+      const r = await call("analyze_visual", { path: "input/tilted.png", mode: "LOCAL_ONLY" });
+      return { flag: flagIn(r.data), techniques: ["analyze_visual"], toolCalls };
+    }
+    if (id === "misc-014") {
+      const r = await call("analyze_visual", { path: "input/negative.png", mode: "LOCAL_ONLY" });
+      return { flag: flagIn(r.data), techniques: ["analyze_visual"], toolCalls };
+    }
+    if (id === "misc-015") {
+      const r = await call("extract_dns_activity", { path: "input/dns.pcap" });
+      return { flag: flagIn(r.data), techniques: ["extract_dns_activity"], toolCalls };
     }
     return { flag: null, techniques: [], toolCalls };
   } finally {
