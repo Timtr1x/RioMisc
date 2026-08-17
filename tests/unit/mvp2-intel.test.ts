@@ -113,8 +113,8 @@ describe("MVP-2 misc/crypto/planner/eval", () => {
     expect(String((r.data as { conclusion: string }).conclusion)).toMatch(/RSA/);
   });
 
-  it("benchmark runner solves the shipped fixtures", () => {
-    const results = runBenchmark();
+  it("benchmark runner solves the shipped fixtures", async () => {
+    const results = await runBenchmark();
     expect(results.length).toBeGreaterThanOrEqual(6);
     const failed = results.filter((r) => !r.solved).map((r) => `${r.manifestId}: ${r.error}`);
     expect(failed).toEqual([]);

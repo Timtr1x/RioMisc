@@ -2,6 +2,7 @@
 // Pure functions — no I/O. Every fixture produces real attachment bytes.
 import { deflateSync } from "node:zlib";
 import { createHash, randomBytes } from "node:crypto";
+import QRCode from "qrcode";
 
 export interface FixtureAttachment {
   name: string;
@@ -270,8 +271,67 @@ export function sha256Hex(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
 }
 
+export function makeQrPng(text: string): Buffer {
+  const qr = QRCode.create(text, { errorCorrectionLevel: "M" });
+  const size = qr.modules.size;
+  const scale = 4;
+  const quiet = 4;
+  const dim = (size + quiet * 2) * scale;
+  const rgb = Buffer.alloc(dim * dim * 3, 255);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      if (!qr.modules.get(y, x)) continue;
+      for (let dy = 0; dy < scale; dy++) {
+        for (let dx = 0; dx < scale; dx++) {
+          const px = (quiet + x) * scale + dx;
+          const py = (quiet + y) * scale + dy;
+          const o = (py * dim + px) * 3;
+          rgb[o] = 0;
+          rgb[o + 1] = 0;
+          rgb[o + 2] = 0;
+        }
+      }
+    }
+  }
+  return makePng(dim, dim, rgb);
+}
+
+export function makeToneWav(sampleRate: number, hz: number, seconds: number): Buffer {
+  const frames = Math.floor(sampleRate * seconds);
+  const data = Buffer.alloc(frames * 2);
+  for (let i = 0; i < frames; i++) {
+    const s = Math.sin((2 * Math.PI * hz * i) / sampleRate);
+    data.writeInt16LE(Math.round(s * 16000), i * 2);
+  }
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + data.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(data.length, 40);
+  return Buffer.concat([header, data]);
+}
+
+export function bigintToAscii(n: bigint): string {
+  let x = n;
+  const bytes: number[] = [];
+  while (x > 0n) {
+    bytes.push(Number(x & 0xffn));
+    x >>= 8n;
+  }
+  return Buffer.from(bytes.reverse()).toString("utf8");
+}
+
 // ---------------------------------------------------------------------------
-// The fixture set (misc-001..005, crypto-001..005, unsupported-web)
+// The fixture set (misc-001..007, crypto-001..006, unsupported-web)
 // ---------------------------------------------------------------------------
 
 export function buildFixtures(): FixtureChallenge[] {
@@ -448,6 +508,54 @@ export function buildFixtures(): FixtureChallenge[] {
       description: `a = ${a}\nc = ${c}\nm = ${m}\noutputs = [${out.slice(0, 4).join(", ")}]\nWhat is the next output? (flag{next})`,
       category: "CRYPTO",
       flag: `flag{${out[4]}}`,
+      attachments: [],
+    });
+  }
+
+  // misc-006: QR image — Solver must call analyze_visual, not guess pixels
+  {
+    const flag = "flag{visual_qr_ok}";
+    fixtures.push({
+      id: "misc-006",
+      title: "Scan This",
+      description: "A QR code holds the flag. Use analyze_visual; do not guess pixels.",
+      category: "MISC",
+      flag,
+      attachments: [{ name: "code.png", bytes: makeQrPng(flag) }],
+    });
+  }
+
+  // misc-007: single-tone WAV — sample rate is the flag payload
+  {
+    const sampleRate = 8000;
+    const flag = `flag{sr_${sampleRate}}`;
+    fixtures.push({
+      id: "misc-007",
+      title: "One Tone",
+      description: "A single-tone WAV. Render the spectrogram and put the sample rate in flag{sr_<rate>}.",
+      category: "MISC",
+      flag,
+      attachments: [{ name: "tone.wav", bytes: makeToneWav(sampleRate, 440, 1) }],
+    });
+  }
+
+  // crypto-006: Håstad broadcast (e=3, three moduli)
+  {
+    const flag = "flag{hastad}";
+    const m = flagToBigInt(flag);
+    const e = 3n;
+    const n1 = nextPrime(2n ** 96n + 101n);
+    const n2 = nextPrime(2n ** 96n + 333n);
+    const n3 = nextPrime(2n ** 96n + 777n);
+    const c1 = (m ** e) % n1;
+    const c2 = (m ** e) % n2;
+    const c3 = (m ** e) % n3;
+    fixtures.push({
+      id: "crypto-006",
+      title: "Broadcast RSA",
+      description: `Håstad broadcast with e = ${e}.\nn1 = ${n1}\nc1 = ${c1}\nn2 = ${n2}\nc2 = ${c2}\nn3 = ${n3}\nc3 = ${c3}\nRecover the message.`,
+      category: "CRYPTO",
+      flag,
       attachments: [],
     });
   }

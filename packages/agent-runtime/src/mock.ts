@@ -66,6 +66,70 @@ function python(ctx: ToolContext, code: string): Promise<ToolResult> {
 
 const STRATEGIES: Strategy[] = [
   {
+    name: "qr_visual",
+    match: (desc) => /qr|analyze_visual/i.test(desc),
+    async run(ctx, _desc, rejected) {
+      const list = await tool(ctx, "list_workspace", { path: "input" });
+      const entries = (list.data as { entries: { name: string }[] })?.entries ?? [];
+      for (const e of entries) {
+        if (!/\.(png|jpg|jpeg)$/i.test(e.name)) continue;
+        const r = await tool(ctx, "analyze_visual", { path: `input/${e.name}`, mode: "LOCAL_ONLY" });
+        const blob = JSON.stringify(r.data ?? r.summary ?? "");
+        const f = firstFlag(blob, rejected);
+        if (f) return f;
+      }
+      return null;
+    },
+  },
+  {
+    name: "wav_spectrogram",
+    match: (desc) => /spectrogram|wav|tone|sample rate|sr_/i.test(desc),
+    async run(ctx, _desc, rejected) {
+      const list = await tool(ctx, "list_workspace", { path: "input" });
+      const entries = (list.data as { entries: { name: string }[] })?.entries ?? [];
+      for (const e of entries) {
+        if (!/\.wav$/i.test(e.name)) continue;
+        const r = await tool(ctx, "render_spectrogram", { path: `input/${e.name}`, mode: "AUTO" });
+        const rate = (r.data as { sampleRate?: number } | undefined)?.sampleRate;
+        if (rate) {
+          const flag = `flag{sr_${rate}}`;
+          if (!rejected.has(flag)) return flag;
+        }
+        const f = firstFlag(JSON.stringify(r.data ?? ""), rejected);
+        if (f) return f;
+      }
+      return null;
+    },
+  },
+  {
+    name: "rsa_hastad",
+    match: (desc) => /hastad|broadcast|n1\s*=/i.test(desc),
+    async run(ctx, desc, rejected) {
+      const grab = (k: string) => desc.match(new RegExp(`${k}\\s*=\\s*(\\d+)`))?.[1];
+      const body = {
+        e: grab("e") ?? "3",
+        n1: grab("n1"),
+        c1: grab("c1"),
+        n2: grab("n2"),
+        c2: grab("c2"),
+        n3: grab("n3"),
+        c3: grab("c3"),
+      };
+      if (!body.n1 || !body.c1 || !body.n2 || !body.c2 || !body.n3 || !body.c3) return null;
+      const r = await tool(ctx, "rsa_hastad", body);
+      const raw = (r.data as { m?: string } | undefined)?.m;
+      if (!raw) return firstFlag(JSON.stringify(r.data ?? ""), rejected);
+      let x = BigInt(raw);
+      const bytes: number[] = [];
+      while (x > 0n) {
+        bytes.push(Number(x & 0xffn));
+        x >>= 8n;
+      }
+      const text = Buffer.from(bytes.reverse()).toString("utf8");
+      return firstFlag(text, rejected);
+    },
+  },
+  {
     name: "base64",
     match: (desc) => /base64/i.test(desc) || /decode/i.test(desc),
     async run(ctx, _desc, rejected) {
@@ -277,7 +341,7 @@ print(m.to_bytes((m.bit_length() + 7) // 8, 'big').decode('utf-8', 'ignore'))
   },
   {
     name: "rsa_small_e",
-    match: (desc) => /e\s*=\s*3\b|small e/i.test(desc),
+    match: (desc) => (/e\s*=\s*3\b/.test(desc) || /small e/i.test(desc)) && !/n1\s*=/.test(desc),
     async run(ctx, desc, rejected) {
       const n = BigInt(desc.match(/n\s*=\s*(\d+)/)?.[1] ?? "0");
       const c = BigInt(desc.match(/c\s*=\s*(\d+)/)?.[1] ?? "0");

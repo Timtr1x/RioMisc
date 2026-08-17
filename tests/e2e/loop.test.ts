@@ -91,11 +91,11 @@ describe("E2E", () => {
     try {
       await waitFor(() => {
         const s = runtime.control.status();
-        return Number(s.solved) >= 10;
+        return Number(s.solved) >= 13;
       }, 240_000, 2000, "all challenges solved");
       const s = runtime.control.status();
-      expect(Number(s.total)).toBe(11);
-      expect(Number(s.solved)).toBe(10);
+      expect(Number(s.total)).toBe(14);
+      expect(Number(s.solved)).toBe(13);
       expect(Number(s.unsupported)).toBe(1);
       expect(Number(s.error)).toBe(0);
       const solved = runtime.repos.challenges.list().filter((c) => c.lifecycleStatus === "SOLVED");
@@ -122,7 +122,7 @@ describe("E2E", () => {
     }, 120_000, 1500, "2 solved + active");
 
     const before = r1.repos.challenges.list().map((c) => c.id);
-    expect(before.length).toBe(11);
+    expect(before.length).toBe(14);
 
     // hard crash: no graceful shutdown, no session end, no lease release
     crashRuntime(r1);
@@ -137,7 +137,7 @@ describe("E2E", () => {
       // recovery requeued the interrupted challenges and solving continues
       await waitFor(() => {
         const s = r2.control.status();
-        return Number(s.solved) >= 10;
+        return Number(s.solved) >= 13;
       }, 240_000, 2000, "all solved after recovery");
 
       // the sessions that were interrupted were preserved (their rows exist)

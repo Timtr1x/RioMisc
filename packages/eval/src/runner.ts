@@ -1,6 +1,7 @@
 import { encodePng } from "@rio/visual-runtime";
 import { scanTrailingData } from "@rio/misc-runtime";
 import { lcgRecover, rsaFermat, rsaSmallE, rsaWiener, xorKnownPlaintext } from "@rio/crypto-runtime";
+import { solveRegisteredWithTools } from "./solve-registered.js";
 import type { BenchmarkManifest, BenchmarkRunResult } from "@rio/domain";
 import { BENCHMARK_MANIFESTS, getManifest } from "./manifests.js";
 
@@ -14,9 +15,50 @@ export function replayLookup(log: ReplayRecord[], tool: string, canonicalArgs: s
   return log.find((r) => r.tool === tool && r.canonicalArgs === canonicalArgs)?.result;
 }
 
-export function runBenchmark(id?: string): BenchmarkRunResult[] {
-  const list = id ? [getManifest(id)].filter(Boolean) as BenchmarkManifest[] : BENCHMARK_MANIFESTS;
-  return list.map(runOne);
+const MANIFEST_TO_FIXTURE: Record<string, string> = {
+  "misc-qr-001": "misc-006",
+  "misc-wav-sr-001": "misc-007",
+  "crypto-hastad-001": "crypto-006",
+};
+
+export async function runBenchmark(id?: string): Promise<BenchmarkRunResult[]> {
+  const list = id ? ([getManifest(id)].filter(Boolean) as BenchmarkManifest[]) : BENCHMARK_MANIFESTS;
+  const out: BenchmarkRunResult[] = [];
+  for (const m of list) {
+    const fixtureId = MANIFEST_TO_FIXTURE[m.id];
+    if (fixtureId) {
+      const started = Date.now();
+      try {
+        const solved = await solveRegisteredWithTools(fixtureId);
+        out.push({
+          id: `run_${m.id}`,
+          manifestId: m.id,
+          solved: solved.flag === m.flag,
+          flag: solved.flag,
+          techniques: solved.techniques,
+          toolCalls: solved.toolCalls,
+          durationMs: Date.now() - started,
+          error: solved.flag === m.flag ? null : `got ${solved.flag}`,
+          createdAt: Date.now(),
+        });
+      } catch (e) {
+        out.push({
+          id: `run_${m.id}`,
+          manifestId: m.id,
+          solved: false,
+          flag: null,
+          techniques: [],
+          toolCalls: 0,
+          durationMs: Date.now() - started,
+          error: (e as Error).message,
+          createdAt: Date.now(),
+        });
+      }
+      continue;
+    }
+    out.push(runOne(m));
+  }
+  return out;
 }
 
 export function summarizeBenchmark(results: BenchmarkRunResult[]): {

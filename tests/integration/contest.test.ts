@@ -19,7 +19,7 @@ describe("mock contest → challenge repo", () => {
     await mock.authenticate();
     await mock.applySchedule();
     const list = await mock.listChallenges();
-    expect(list.length).toBe(11);
+    expect(list.length).toBe(14);
     const detail = await mock.getChallenge("misc-001");
     expect(detail.attachments.length).toBe(1);
     expect(detail.attachments[0]!.name).toBe("message.txt");

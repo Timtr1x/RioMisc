@@ -55,6 +55,33 @@ export const BENCHMARK_MANIFESTS: BenchmarkManifest[] = [
     expectedTechniques: ["rsa-wiener"],
     maxSolveSeconds: 30,
   },
+  {
+    id: "misc-qr-001",
+    category: "MISC",
+    subcategory: ["QR", "visual"],
+    difficulty: 1,
+    flag: "flag{visual_qr_ok}",
+    expectedTechniques: ["analyze_visual"],
+    maxSolveSeconds: 30,
+  },
+  {
+    id: "misc-wav-sr-001",
+    category: "MISC",
+    subcategory: ["audio", "spectrogram"],
+    difficulty: 1,
+    flag: "flag{sr_8000}",
+    expectedTechniques: ["render_spectrogram"],
+    maxSolveSeconds: 30,
+  },
+  {
+    id: "crypto-hastad-001",
+    category: "CRYPTO",
+    subcategory: ["RSA", "hastad"],
+    difficulty: 2,
+    flag: "flag{hastad}",
+    expectedTechniques: ["rsa-hastad"],
+    maxSolveSeconds: 30,
+  },
 ];
 
 export function getManifest(id: string): BenchmarkManifest | undefined {

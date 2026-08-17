@@ -147,8 +147,8 @@ describe("MVP-2 feature-complete closeout", () => {
     repos.db.close();
   });
 
-  it("summarizeBenchmark reports solve rate and median", () => {
-    const results = runBenchmark();
+  it("summarizeBenchmark reports solve rate and median", async () => {
+    const results = await runBenchmark();
     const s = summarizeBenchmark(results);
     expect(s.total).toBe(results.length);
     expect(s.solved).toBe(results.length);

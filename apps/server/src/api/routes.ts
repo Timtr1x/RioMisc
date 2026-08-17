@@ -300,7 +300,7 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
   fastify.post("/api/benchmarks/run", async (req) => {
     const id = (req.body as { id?: string } | undefined)?.id;
     const { runBenchmark, summarizeBenchmark } = await import("@rio/eval");
-    const results = runBenchmark(id);
+    const results = await runBenchmark(id);
     for (const r of results) {
       repos.benchmarkRuns.create({
         manifestId: r.manifestId,

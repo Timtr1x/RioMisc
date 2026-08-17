@@ -5,9 +5,11 @@
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
+    "@rio/contest": "*",
     "@rio/crypto-runtime": "*",
     "@rio/domain": "*",
     "@rio/misc-runtime": "*",
+    "@rio/tool-runtime": "*",
     "@rio/visual-runtime": "*"
   },
   "scripts": { "typecheck": "tsc --noEmit" }
