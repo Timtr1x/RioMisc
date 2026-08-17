@@ -14,4 +14,4 @@ export { decodeGifFrames, encodeGif, isGif } from "./local/gif.js";
 export { parseVisionModelJson, extractJsonObject, VISION_SYSTEM_PROMPT, VISUAL_RUNTIME_VERSION } from "./model/parse.js";
 export { visionCacheKey, MemoryVisionCache, FileVisionCache } from "./model/cache.js";
 export { VisionCallBudget, loadFileBudget } from "./model/budget.js";
-export { HttpVisionAdapter, chatEndpoint } from "./model/http.js";
+export { HttpVisionAdapter, chatEndpoint, visionMessageText } from "./model/http.js";

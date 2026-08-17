@@ -94,7 +94,7 @@ function pickVisionAdapter(config: StartConfig, providers: PiProviderSpec[]): Vi
     modelId: spec.modelId,
     protocol: spec.protocol,
     cache: new FileVisionCache(cacheDir),
-    budget: loadFileBudget(budgetPath, config.visual?.maxVisionCalls ?? 5),
+    budget: loadFileBudget(budgetPath, config.visual?.maxVisionCalls ?? 40),
   });
 }
 
@@ -142,7 +142,7 @@ function buildToolContext(config: StartConfig, vision?: VisionModelAdapter | nul
     pythonExecutable: config.pythonExecutable || process.env.RIO_PYTHON || "python",
     networkIsolation: "NONE",
     vision: vision ?? null,
-    maxVisionCalls: config.visual?.maxVisionCalls ?? 5,
+    maxVisionCalls: config.visual?.maxVisionCalls ?? 40,
     experiments: (() => {
       const file = join(root, "state", "experiments.json");
       mkdirSync(join(root, "state"), { recursive: true });

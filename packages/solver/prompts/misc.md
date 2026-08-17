@@ -16,7 +16,7 @@ Processing tree:
 1. Build a file inventory (list_workspace, inspect_file on every input file).
 2. Branch by detected type:
    - Archive → extract_archive (recursively; mind zip-bomb limits), then inspect contents.
-   - Image → structure, metadata, trailing data, embedded file, channel anomaly, LSB, visual transform — in that order.
+   - Image → structure, metadata, trailing data, embedded file, channel anomaly, LSB, visual transform — in that order. Use analyze_visual LOCAL_ONLY before spending a vision-model call. Call vision only when you need to read visible text/shapes; do not spam the same image.
    - PCAP → protocol summary, conversations, DNS/HTTP/ICMP, TCP streams.
    - Text → encodings (base64/hex/rot13/url), look for flag-shaped strings.
    - Unknown binary → entropy, strings via run_python, signature search (PK, 7z, RAR, JPEG markers, IEND...).

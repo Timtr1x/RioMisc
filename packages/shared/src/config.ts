@@ -93,7 +93,7 @@ export const runtimeConfigSchema = z.object({
   }).default({}),
 
   visual: z.object({
-    maxVisionCallsPerChallenge: z.number().int().min(0).max(50).default(5),
+    maxVisionCallsPerChallenge: z.number().int().min(0).max(200).default(40),
     maxImagesPerCall: z.number().int().min(1).max(8).default(4),
   }).default({}),
 

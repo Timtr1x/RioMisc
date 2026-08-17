@@ -3,13 +3,19 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createRepositories } from "@rio/database";
+import { IdleContestAdapter } from "@rio/contest";
+import { createLogger } from "@rio/shared";
 import { WorkspaceManager, runTool, type ToolContext } from "@rio/tool-runtime";
+import { StateMachine } from "../../apps/server/src/state-machine.ts";
+import { EventBus } from "../../apps/server/src/control/bus.ts";
+import { SubmissionManager } from "../../apps/server/src/control/submission.ts";
 import {
   parseVisionModelJson,
   visionCacheKey,
   MemoryVisionCache,
   VisionCallBudget,
   HttpVisionAdapter,
+  visionMessageText,
   encodeWav,
   renderSpectrogramPng,
   composeContactSheet,
@@ -17,7 +23,7 @@ import {
   decodeImageFile,
   VISUAL_RUNTIME_VERSION,
 } from "@rio/visual-runtime";
-import { formatHumanVisualObservation } from "../../apps/server/src/control/visual-review.ts";
+import { extractFlagsFromVisualObservation, formatHumanVisualObservation } from "../../apps/server/src/control/visual-review.ts";
 
 function ctx(root: string, challengeId = "ch_p1"): ToolContext {
   const wm = new WorkspaceManager(join(root, "ws"));
@@ -46,6 +52,25 @@ describe("vision adapter / cache / budget", () => {
     expect(parsed.suggestedActions).toEqual(["extract alpha"]);
   });
 
+  it("parseVisionModelJson accepts observations as a map and salvage flags from prose", () => {
+    const mapped = parseVisionModelJson(`{
+      "summary": "red overlay text",
+      "observations": { "text_visible": "flag{He1l0_d4_ba1}", "text_color": "red" }
+    }`);
+    expect(mapped.observations.some((o) => o.value === "flag{He1l0_d4_ba1}")).toBe(true);
+    const salvage = parseVisionModelJson("I can see flag{from_prose} in the corner but forgot JSON.");
+    expect(salvage.observations.some((o) => o.value === "flag{from_prose}")).toBe(true);
+  });
+
+  it("visionMessageText includes reasoning_content so truncated JSON still yields a flag", () => {
+    const text = visionMessageText({
+      content: "Based on the image:\n```json\n{\"summary\":\"drawing\"",
+      reasoning_content: "I located the red text string \"flag{He1l0_d4_ba1}\" clearly visible.",
+    });
+    const parsed = parseVisionModelJson(text);
+    expect(parsed.observations.some((o) => o.value === "flag{He1l0_d4_ba1}")).toBe(true);
+  });
+
   it("cache key changes with question and model, not with extra whitespace in version isolation", () => {
     const a = visionCacheKey({ fileSha256: "aa", question: "q1", modelId: "v" });
     const b = visionCacheKey({ fileSha256: "aa", question: "q2", modelId: "v" });
@@ -53,7 +78,7 @@ describe("vision adapter / cache / budget", () => {
     expect(a).not.toBe(b);
     expect(a).not.toBe(c);
     expect(a).toHaveLength(64);
-    expect(VISUAL_RUNTIME_VERSION).toMatch(/^2\./);
+    expect(VISUAL_RUNTIME_VERSION).toMatch(/^2\.0\.2/);
   });
 
   it("MemoryVisionCache + HttpVisionAdapter reuse the first HTTP reply", async () => {
@@ -87,11 +112,14 @@ describe("vision adapter / cache / budget", () => {
     ).rejects.toThrow(/specific question/);
   });
 
-  it("VisionCallBudget refuses the 6th call when max is 5", () => {
+  it("VisionCallBudget refuses calls past the configured max", () => {
     const b = new VisionCallBudget(0, 5);
     for (let i = 0; i < 5; i++) b.take();
     expect(b.remaining()).toBe(0);
     expect(() => b.take()).toThrow(/budget exhausted/);
+    const wide = new VisionCallBudget(0, 40);
+    for (let i = 0; i < 6; i++) wide.take();
+    expect(wide.remaining()).toBe(34);
   });
 });
 
@@ -138,6 +166,82 @@ describe("human visual review", () => {
     expect(text).toContain("input/pic.png");
     repos.visualReviews.answer(rec.id, JSON.stringify({ observation: "Blue bit 1 says TRY_ALPHA", useful: true }));
     expect(repos.visualReviews.get(rec.id)?.status).toBe("ANSWERED");
+    repos.db.close();
+  });
+
+  it("extracts flag-shaped tokens from a visual-review answer", () => {
+    expect(extractFlagsFromVisualObservation("flag{He110_d4_ba1}")).toEqual(["flag{He110_d4_ba1}"]);
+    expect(extractFlagsFromVisualObservation("  I see flag{He110_d4_ba1} on the chest  ")).toEqual(["flag{He110_d4_ba1}"]);
+    expect(extractFlagsFromVisualObservation("DASCTF{abc}")).toEqual(["DASCTF{abc}"]);
+    expect(extractFlagsFromVisualObservation("just a Baymax drawing")).toEqual([]);
+  });
+
+  it("flag-shaped human review is submitted as a candidate", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "rio-rev-cand-"));
+    dirs.push(dir);
+    const repos = createRepositories(join(dir, "t.sqlite"));
+    repos.challenges.create({
+      id: "ch_p1",
+      remoteId: "url_x",
+      title: "pic",
+      description: "see image",
+      category: "MISC",
+      subcategory: null,
+      score: 100,
+      solveCount: null,
+      lifecycleStatus: "ACTIVE",
+      startStatus: "STARTED",
+      hintStatus: "LOCKED",
+      progressStatus: "UNKNOWN",
+      priority: 0,
+      lastPriorityScore: null,
+      difficultyEstimate: 2,
+      currentSolverType: "MISC",
+      currentSessionId: null,
+      wrongSubmissionCount: 0,
+      solverRestartCount: 0,
+      pausedReason: null,
+      parkedReason: null,
+      blockedReason: null,
+      contentHash: "h",
+      discoveredAt: Date.now(),
+      updatedAt: Date.now(),
+      startedAt: Date.now(),
+      solverStartedAt: Date.now(),
+      wallClockSolveMs: 0,
+      activeSolveMs: 0,
+      remoteCreatedAt: null,
+      remoteUpdatedAt: null,
+    });
+    const manager = new SubmissionManager({
+      repos,
+      adapter: new IdleContestAdapter(),
+      stateMachine: new StateMachine(repos),
+      bus: new EventBus(),
+      logger: createLogger("silent"),
+      autoSubmit: true,
+      confidenceThreshold: 0.85,
+      localMaxWrong: 3,
+      defaultCooldownMs: 0,
+      inject: () => {},
+      onAutoSubmitDisabled: () => {},
+      onCorrect: () => {},
+    });
+    const flags = extractFlagsFromVisualObservation("the chest says flag{He110_d4_ba1}");
+    for (const value of flags) {
+      await manager.onCandidate({
+        challengeId: "ch_p1",
+        sessionId: "",
+        value,
+        confidence: 0.95,
+        reason: "human visual review of artifacts/hidden_rows_4x.png",
+        evidence: [{ type: "human_visual", path: "artifacts/hidden_rows_4x.png", text: "flag{He110_d4_ba1}" }],
+      });
+    }
+    const cands = repos.candidates.listByChallenge("ch_p1");
+    expect(cands).toHaveLength(1);
+    expect(cands[0]!.value).toBe("flag{He110_d4_ba1}");
+    expect(cands[0]!.status).toBe("VERIFIED");
     repos.db.close();
   });
 });

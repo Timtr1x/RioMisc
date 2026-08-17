@@ -1387,9 +1387,19 @@ function VisualReviews({ refreshKey, onOpenChallenge }: { refreshKey: number; on
   const answer = async (id: string, observation: string, useful: boolean) => {
     setBusy(true);
     try {
-      await api(`/visual-reviews/${id}/answer`, { method: "POST", body: { observation, useful } });
+      const r = await api<{ ok: boolean; injected?: boolean; candidates?: string[] }>(`/visual-reviews/${id}/answer`, {
+        method: "POST",
+        body: { observation, useful },
+      });
       setDrafts((s) => ({ ...s, [id]: "" }));
-      setMsg("已回写给人眼观察");
+      const flags = r.candidates ?? [];
+      setMsg(
+        flags.length
+          ? `已回写观察，并提交候选：${flags.join(", ")}`
+          : useful
+            ? "已回写给人眼观察（未识别为 flag 形态，故未交候选）"
+            : "已回写：无明显视觉线索",
+      );
       load();
     } catch (e) {
       setMsg(String((e as Error).message));
@@ -1403,7 +1413,7 @@ function VisualReviews({ refreshKey, onOpenChallenge }: { refreshKey: number; on
   return (
     <div className="panel">
       <h3>视觉复核队列</h3>
-      <p className="muted">Agent 调用 request_visual_review 后不会停工。回答会注入 HUMAN VISUAL OBSERVATION。</p>
+      <p className="muted">Agent 调用 request_visual_review 后不会停工。回答会注入 HUMAN VISUAL OBSERVATION；若内容是 flag 形态，会同时作为候选提交。</p>
       {pending.length === 0 && <div className="muted">没有待复核的图片</div>}
       {pending.map((r) => (
         <div key={r.id} className="panel" style={{ marginTop: 12 }}>
@@ -1426,7 +1436,7 @@ function VisualReviews({ refreshKey, onOpenChallenge }: { refreshKey: number; on
               id={`rev-${r.id}`}
               value={drafts[r.id] ?? ""}
               onChange={(e) => setDrafts((s) => ({ ...s, [r.id]: e.target.value }))}
-              placeholder="例如：Blue bit 1 写着 TRY_ALPHA"
+              placeholder="例如：flag{hello} 或 Blue bit 1 写着 TRY_ALPHA"
             />
           </div>
           <div className="buttons">

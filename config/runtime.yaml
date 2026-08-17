@@ -70,7 +70,7 @@ models:
   autoFallback: false
 
 visual:
-  maxVisionCallsPerChallenge: 5
+  maxVisionCallsPerChallenge: 40
   maxImagesPerCall: 4
 
 server:

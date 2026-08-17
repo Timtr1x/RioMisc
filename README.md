@@ -3,7 +3,7 @@
 西湖论剑 RioMisc：一个能够真实接入 CTF 比赛、自动发现/下载题目、调度 Solver Agent、
 并行解题、获取 Hint、验证 Flag、限速自动提交、崩溃后持久化恢复的完整运行时代理。
 
-> **里程碑状态：** MVP-1 已 RELEASED · MVP-1.1（运行时加固）已完成 · MVP-2 未开始
+> **里程碑状态：** MVP-1 已 RELEASED · MVP-1.1（运行时加固）已完成 · MVP-2 进行中（未宣布 Feature Complete）
 > （详见文末「里程碑状态」）
 
 > **架构三句话**：Control Plane 决定比赛怎么打；Solver Agent 决定一道题怎么解；
@@ -21,17 +21,24 @@ npm run dev          # 启动控制平面 + API (http://127.0.0.1:3000)
 默认 `contest.adapter: none`：空比赛。Dashboard 总览有两个入口：
 
 - **接入比赛**：全自动拉题 / 下载 / 派工 / 交 flag。没有赛事 API 时点「接入演示比赛（Mock）」即可走完整流水线；有 CTFd / DASCTF 时填地址 + Token。
-- **单题模式**：粘贴一道题的 URL 或附件直链。
+- **单题模式**：粘贴一道题的 URL 或附件直链。与接赛入口共存，互不影响。
 
 已配置 Provider + Model 时自动使用 Pi（真实 LLM）；否则回退 Mock Agent。
+正式比赛建议把 `agent.allowMockFallback` 设为 `false`：有 Key 时绝不能悄悄换成 Mock。
 
-要跑内置 11 道演示题，把 `config/runtime.yaml` 改成 `adapter: mock`，系统自动：
+要跑内置演示题，把 `config/runtime.yaml` 改成 `adapter: mock`。目录共 **22** 道
+（21 道可解 + 1 道 WEB 标 unsupported）：原 10 道基础题、QR / WAV / Håstad、
+视觉包（低对比 / 通道 / bitplane / alpha / GIF / 旋转 / 反色）和 DNS exfil pcap。
+
+系统自动：
 
 ```
 发现 → 下载附件(流式+SHA256) → Triage → 排队 → 最多 4 个 Solver 并行
-→ Mock Agent 解题(真实调用 Python/Tool Runtime) → 候选 Flag → 本地验证
-→ 自动提交 → CORRECT → SOLVED
+→ Agent 解题（Pi 或 Mock，同一套 Tool Runtime）→ 候选 Flag → 本地验证
+→ 自动提交（仅当赛事有官方裁判）→ CORRECT → SOLVED
 ```
+
+只跑一部分 mock 题时设 `RIO_MOCK_ONLY=misc-006,misc-015`（逗号分隔 fixture id）。
 
 Dashboard（另开终端）：
 
@@ -64,14 +71,26 @@ npm test                # 单元 + 集成 + E2E（E2E 约 5 分钟）
 覆盖（对应文档 §110-117）：
 
 - 单元：StateMachine 全部合法/非法转换、优先级评分、API 限速、Flag 去重、
-  路径守卫（.. / UNC / 绝对路径 / junction）、ZIP roundtrip 与炸弹限制、fixtures 有效性
+  路径守卫（.. / UNC / 绝对路径 / junction）、ZIP roundtrip 与炸弹限制、
+  fixtures 有效性、视觉解析、复核→候选
 - 集成：MockContest 发现/下载/Hint 解锁/提交、SubmissionManager wrong→feedback→max-wrong→manual submit
-- E2E：11 题无人值守全解、硬崩溃后恢复（不丢任何 challenge/session/workspace）、Hint eligible→fetch
+- E2E：22 题目录、21 题无人值守全解（Mock Agent + 真实 `runTool`）、硬崩溃后恢复、Hint eligible→fetch
+- 评测：`solveRegisteredWithTools` 走同一工具链解 QR / WAV / Håstad / 视觉包 / DNS
+
+真实模型 soak（会打已配置的 Provider，不打印 Key）：
+
+```bash
+npx tsx scripts/llm-soak-mock.ts
+# 默认只跑视觉包 + DNS（misc-006,008–015）；可用 RIO_MOCK_ONLY / RIO_SOAK_MS 覆盖
+```
+
+最近一次 DeepSeek（Pi，非 Mock）对这 9 道新 fixture 为 **9/9 SOLVED**。
+Triage / Reflection 的独立真模型 soak、整本 21 题真模型 soak 还没作为门槛跑完。
 
 ## 架构
 
 ```
-                         Competition API (MockContest / LocalContest / 真实比赛 Adapter)
+                         Competition API (Mock / Local / Idle / CTFd / URL)
                                │
                                ▼
 ┌────────────────────────────────────────────────────┐
@@ -80,6 +99,7 @@ npm test                # 单元 + 集成 + E2E（E2E 约 5 分钟）
 │  EventLog/SQLite · Scheduler · WorkerPool(子进程)   │
 │  HintManager · SubmissionManager · Watchdog        │
 │  RecoveryManager · ModelRegistry · EventBus(SSE)   │
+│  VisualReview · Reflection · StartPolicy           │
 └───────────────┬──────────────────┬─────────────────┘
                 ▼                  ▼
        Solver Worker (fork)   Dashboard / CLI (REST+SSE)
@@ -88,12 +108,13 @@ npm test                # 单元 + 集成 + E2E（E2E 约 5 分钟）
 ┌────────────────────────────────────────────────────┐
 │         AgentRuntimeAdapter (唯一 Agent 接触点)      │
 │   PiAgentRuntimeAdapter (SDK 封装, lazy import)    │
-│   MockAgentRuntime (确定性解题 Agent, 默认)         │
+│   MockAgentRuntime (确定性解题 Agent)               │
 └───────────────────────┬────────────────────────────┘
                         ▼
 ┌────────────────────────────────────────────────────┐
 │   Tool Runtime: FS Guard · ProcessRunner · Python  │
-│   ZIP/PNG/PCAP 检查 · 输出限制(12KB inline)         │
+│   ZIP/PNG/PCAP · 视觉 / Crypto / Misc 语义工具      │
+│   输出限制(12KB inline) · 实验账本 ALREADY_TESTED    │
 └───────────────────────┬────────────────────────────┘
                         ▼
                    Workspace (input/work/artifacts/results/state/agent)
@@ -102,20 +123,44 @@ npm test                # 单元 + 集成 + E2E（E2E 约 5 分钟）
 ## 目录
 
 ```
-apps/server     Fastify API + SSE + 控制平面 + solver worker 子进程
-apps/cli        rio CLI (start/status/challenges/pause/hint/solve …)
-apps/dashboard  React/Vite 监控台
+apps/server         Fastify API + SSE + 控制平面 + solver worker 子进程
+apps/cli            rio CLI (start/status/challenges/pause/hint/solve …)
+apps/dashboard      React/Vite 监控台（含视觉复核、评测页）
 packages/domain         纯类型 + Zod schema（无任何框架依赖）
 packages/database       node:sqlite 仓储层（Repository 模式）
 packages/contest        ContestAdapter · MockContest · Poller · RateLimiter · DiskManager · fixtures
 packages/scheduler      优先级评分 · 资源信号量
 packages/agent-runtime  AgentRuntimeAdapter · MockAgent · Pi 适配器（隔离层）
-packages/tool-runtime   Workspace/FS Guard · ProcessRunner · zip/png/pcap · 工具注册表
+packages/tool-runtime   Workspace/FS Guard · ProcessRunner · 工具注册表
+packages/visual-runtime 概览 / QR / 变换 / bitplane / 频谱图 / GIF / Vision HTTP
+packages/misc-runtime   PCAP / 字符串 / 签名 / 拖尾数据 / 实验账本
+packages/crypto-runtime RSA / CRT / Håstad / LCG / XOR …
 packages/solver         System Prompts · 确定性 Triage
+packages/eval           注册题 runTool 求解 + benchmark
 docker/                 misc/crypto/sage worker 镜像（Docker 可用时启用）
 agent/prompts/          Solver/Triage/Reflection 提示词原文
 config/runtime.yaml     运行配置（Zod 启动校验）
+scripts/llm-soak-mock.ts  真模型 soak（只打已存 Key，不打印明文）
 ```
+
+## 模型怎么调工具
+
+Solver 不会自己去敲文件系统。Pi 适配器把 `TOOL_IMPLS` 全部注册成
+`defineTool`；模型发出 tool call 后，`execute` → `runTool`，结果写回
+workspace `results/tool-NNNN.txt` 和实验账本。Mock Agent 走同一条
+`runTool`，所以演示赛和真模型赛的工具语义一致。
+
+Vision 不是第二条 Agent 循环：Solver 调 `analyze_visual`，VisualRuntime
+本地先做 QR / 通道 / bitplane；`AUTO` / `VISION_MODEL` 才额外打视觉模型
+HTTP。视觉模型返回 map 形 observations 或把 flag 写在 `reasoning_content`
+里时，解析器会 salvage，不再要求必须是数组 JSON。
+
+已经发生过的真实调用（不是纸面设计）：
+
+- 现场 DASCTF PNG（extra IDAT scanlines）：Solver 自己调了
+  `inspect_file` / `extract_archive` / `run_python` / `analyze_visual` /
+  `write_work_file` / `extract_visible_text` 等，单题实验账本 70+ 条。
+- 视觉包 + DNS 的 DeepSeek soak：9/9，Pi runtime，模型自己选工具。
 
 ## 关键机制
 
@@ -127,12 +172,17 @@ config/runtime.yaml     运行配置（Zod 启动校验）
   重新入队 ACTIVE、重驱 SUBMITTING（先查 submission 历史，绝不盲目重交）。
 - **提交安全**：`challenge_id + flag_hash` 唯一约束；同 Flag 永不重复提交；
   本地验证（格式/去重/example 检测/证据）；3 次 Wrong 后 AUTO_SUBMIT_DISABLED。
+- **自动提交**：`autoSubmit` + `confidenceThreshold`（默认 0.85）。
+  CTFd / Mock 有官方裁判，达标就交；URL / idle 没有官方裁判，候选停在
+  VERIFIED，等人在 Dashboard 点接受。视觉复核里长得像 flag 的回答会以
+  0.95 置信度再走一遍候选通道。
 - **Hint**：`startChallenge() + 10min → ELIGIBLE`，策略（stalled 才取）→ FETCHED → 注入 session。
 - **限速优先级**：SUBMIT(0) > HINT(1) > DETAIL(2) > POLL(3) > DOWNLOAD(4)，大附件下载永不阻塞提交。
 - **Secret**：API Key 走 AES-256-GCM 加密文件（`CTF_RUNTIME_MASTER_KEY`），SQLite/日志/prompt 中绝不出现明文。
-- **Mock Agent**：确定性"解题 Agent"，走与真实 LLM 完全相同的工具链
-  （inspect/extract/run_python），可解全部 10 道 mock 题；Pi SDK 可用时
-  `RIO_AGENT_RUNTIME=pi` 切换到真实 LLM，接口不变。
+- **视觉预算**：默认每题最多 40 次 Vision HTTP（`visual.maxVisionCallsPerChallenge`）。
+  提示词要求先 `LOCAL_ONLY`，同一张图不要反复打 Vision。
+- **Mock Agent**：确定性解题 Agent，走与真实 LLM 完全相同的工具链。
+  可解全部 21 道可解 mock 题。有 Provider 时走 Pi，接口不变。
 
 ## 与规格文档的差异（如实记录）
 
@@ -156,8 +206,8 @@ config/runtime.yaml     运行配置（Zod 启动校验）
      收到工具结果。`npm run pi-smoke`（单 session 全链路）和
      `npm run pi-e2e`（完整系统：worker 子进程 → 真实 SDK → 提交 → WRONG 反馈）
      可随时复跑。
-3. **Dashboard/UI**：保持最小可用（Overview/Challenges/Detail/Providers），
-   规格中的其余页面可在此基础上扩展。
+3. **Dashboard/UI**：Vite + React + 现有 CSS。不要引入 Tailwind / shadcn。
+   Overview / Challenges / Detail / Providers / 视觉复核 / 评测页已落地。
 
 ## 使用真实 LLM（Pi 运行时）
 
@@ -169,6 +219,7 @@ config/runtime.yaml     运行配置（Zod 启动校验）
 RIO_AGENT_RUNTIME=pi npm run dev
 
 # 3. 无 Provider 时自动回退 MockAgent（同一工具链，闭环仍可跑通）
+#    正式比赛：agent.allowMockFallback: false
 ```
 
 注意：Pi 会读取 `~/.pi/agent` 下的全局扩展/skills 配置；本系统通过
@@ -209,7 +260,20 @@ API Key 通过 Dashboard「Add Provider」或 CLI 配置，加密落盘。
 > 1.1 的六个退出指标（真 Pi Resume、Recovery 矩阵、UNKNOWN 不重交、Hint 不误取、
 > 大文件无 OOM、30 题 burst + 真实模型）全部达成，按 `开发指南1.1.md` §92 正式标记 RELEASED。
 
-### MVP-2（未开始）
+### MVP-2（进行中，未宣布 Feature Complete）
 
-Specialist Solver · 更强 Triage · Crypto 攻击模块 · Misc 语义工具 ·
-context management · Manager/Reflection · model routing · knowledge reuse
+已落地、且有测试或真模型证据的部分：
+
+- [x] VisualRuntime：概览 / QR / 变换 / bitplane / 频谱图 / GIF 帧 / Vision HTTP
+- [x] Vision 解析 2.0.2：数组或 map 形 observations；从 prose / `reasoning_content` salvage `flag{…}`
+- [x] 视觉复核：像 flag 的人工回答会以 0.95 置信度进入候选
+- [x] Misc / Crypto 语义工具 + 实验账本（`ALREADY_TESTED` + force）
+- [x] Hypothesis 落库 · Artifact `parentArtifactId` DAG · HUMAN VisualEvidence 持久化
+- [x] Mock 目录 22（21 可解 + WEB）；eval / Mock 策略走真实 `runTool`
+- [x] 视觉包 + DNS 真模型 soak 9/9（DeepSeek / Pi）
+
+还没当作门槛关闭的部分：
+
+- [ ] 不宣布 Feature Complete（CryptoState 表、Triage/Reflection 真模型 soak 等仍缺）
+- [ ] 频谱图藏字、MT19937 等更难 fixture
+- [ ] 整本 21 题真模型 soak（目前 Mock E2E 21/22，真模型只 soak 了 9 道新题）

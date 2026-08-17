@@ -1,3 +1,15 @@
+import { looksLikeCtfFlag } from "./submission.js";
+import { normalizeFlagValue } from "./flag.js";
+
+/** Pull flag-shaped tokens from a human visual-review answer. */
+export function extractFlagsFromVisualObservation(observation: string): string[] {
+  const trimmed = normalizeFlagValue(observation);
+  if (!trimmed) return [];
+  if (looksLikeCtfFlag(trimmed)) return [trimmed];
+  const found = [...trimmed.matchAll(/[A-Za-z][A-Za-z0-9_-]{0,31}\{[^\r\n}\s]{1,400}\}/g)].map((m) => m[0]!);
+  return [...new Set(found.map((f) => normalizeFlagValue(f)).filter((f) => looksLikeCtfFlag(f)))];
+}
+
 export function formatHumanVisualObservation(input: {
   sourcePath: string;
   question: string;

@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createLogger, loadConfig, FileSecretStore, type RuntimeConfig } from "@rio/shared";
 import { createRepositories } from "@rio/database";
-import { MockContestAdapter, IdleContestAdapter, LocalContestAdapter, CtfdContestAdapter, DiskManager, type ContestAdapter } from "@rio/contest";
+import { MockContestAdapter, IdleContestAdapter, LocalContestAdapter, CtfdContestAdapter, DiskManager, buildFixtures, type ContestAdapter } from "@rio/contest";
 import { WorkspaceManager, resolvePythonExecutable } from "@rio/tool-runtime";
 import { StateMachine } from "./state-machine.js";
 import { EventBus } from "./control/bus.js";
@@ -93,7 +93,8 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     adapter = new LocalContestAdapter(config.contest.localChallengeDir);
   } else if (config.contest.adapter === "mock") {
     const mock = new MockContestAdapter();
-    mock.loadFixtures();
+    const only = process.env.RIO_MOCK_ONLY?.split(",").map((s) => s.trim()).filter(Boolean);
+    mock.loadFixtures(only?.length ? buildFixtures().filter((f) => only.includes(f.id)) : undefined);
     adapter = mock;
   } else if (config.contest.adapter === "none") {
     adapter = new IdleContestAdapter();

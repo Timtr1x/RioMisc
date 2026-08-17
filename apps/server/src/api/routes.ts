@@ -324,7 +324,7 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     const { id } = req.params as { id: string };
     const body = visualReviewAnswerSchema.parse(req.body ?? {});
     try {
-      const result = control.answerVisualReview(id, body);
+      const result = await control.answerVisualReview(id, body);
       return { ok: true, ...result };
     } catch (e) {
       return reply.code(400).send({ error: (e as Error).message });

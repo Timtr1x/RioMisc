@@ -31,7 +31,7 @@ import { syncRemoteChallenge } from "./challenge-sync.js";
 import { loadContestProfile, saveContestProfile } from "./contest-profile.js";
 import { loadModelAssignments, resolveAssignedModel } from "./model-assignments.js";
 import { buildPlannerInjection, buildCheckpoint, shouldReflect } from "./planner.js";
-import { formatHumanVisualObservation } from "./visual-review.js";
+import { extractFlagsFromVisualObservation, formatHumanVisualObservation } from "./visual-review.js";
 
 export interface ControlPlaneDeps {
   repos: Repositories;
@@ -589,7 +589,7 @@ depended on the previous files.`;
     const assigned = loadModelAssignments(this.deps.repos);
     const vis = assigned.visionModelId ? this.deps.repos.models.get(assigned.visionModelId) : null;
     return {
-      maxVisionCalls: this.deps.config.visual?.maxVisionCallsPerChallenge ?? 5,
+      maxVisionCalls: this.deps.config.visual?.maxVisionCallsPerChallenge ?? 40,
       visionModelId: vis?.modelName ?? assigned.visionModelId,
     };
   }
@@ -1392,7 +1392,10 @@ Treat the rejection as negative evidence and continue solving.`;
     this.deps.submission.resumeSolvingAfterUnknown(challengeId);
   }
 
-  answerVisualReview(id: string, input: { observation: string; useful?: boolean }): { injected: boolean } {
+  async answerVisualReview(
+    id: string,
+    input: { observation: string; useful?: boolean },
+  ): Promise<{ injected: boolean; candidates: string[] }> {
     const rec = this.deps.repos.visualReviews.get(id);
     if (!rec) throw new Error("unknown visual review");
     const useful = input.useful !== false;
@@ -1406,6 +1409,7 @@ Treat the rejection as negative evidence and continue solving.`;
       observation: input.observation,
       useful,
     });
+    const flags = useful ? extractFlagsFromVisualObservation(input.observation) : [];
     this.deps.repos.visualEvidence.create({
       challengeId: rec.challengeId,
       sourceArtifactId: this.deps.repos.artifacts.findByPath(rec.challengeId, rec.sourcePath)?.id ?? null,
@@ -1414,18 +1418,30 @@ Treat the rejection as negative evidence and continue solving.`;
       question: rec.question,
       analyzer: "HUMAN",
       observations: useful
-        ? [{ type: "OTHER", description: input.observation, confidence: 0.9 }]
-        : [{ type: "OTHER", description: "No useful visual clue", confidence: 0.8 }],
+        ? flags.length
+          ? flags.map((value) => ({ type: "TEXT" as const, value, description: input.observation, confidence: 0.95 }))
+          : [{ type: "OTHER" as const, description: input.observation, confidence: 0.9 }]
+        : [{ type: "OTHER" as const, description: "No useful visual clue", confidence: 0.8 }],
       summary: useful ? input.observation : "No useful visual clue",
-      confidence: useful ? 0.9 : 0.8,
+      confidence: useful ? (flags.length ? 0.95 : 0.9) : 0.8,
     });
+    for (const value of flags) {
+      await this.deps.submission.onCandidate({
+        challengeId: rec.challengeId,
+        sessionId: "",
+        value,
+        confidence: 0.95,
+        reason: `human visual review of ${rec.sourcePath}`,
+        evidence: [{ type: "human_visual", path: rec.sourcePath, text: input.observation }],
+      });
+    }
     const injected = this.injectWorker(rec.challengeId, text);
     this.deps.bus.publish({
       type: "VISUAL_REVIEW_ANSWERED",
       challengeId: rec.challengeId,
-      payload: { id, useful, injected },
+      payload: { id, useful, injected, candidates: flags },
     });
-    return { injected };
+    return { injected, candidates: flags };
   }
 
   cancelVisualReview(id: string): void {

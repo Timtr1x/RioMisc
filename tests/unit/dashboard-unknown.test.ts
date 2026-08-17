@@ -33,6 +33,7 @@ describe("dashboard UNKNOWN reconciliation", () => {
     expect(src).toContain("视觉复核");
     expect(src).toContain("request_visual_review");
     expect(src).toContain("HUMAN VISUAL OBSERVATION");
+    expect(src).toContain("同时作为候选提交");
     expect(src).toContain("评测");
     expect(src).toContain("实验账本");
     expect(src).toContain("跑全部评测");

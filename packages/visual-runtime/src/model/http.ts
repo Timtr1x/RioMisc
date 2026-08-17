@@ -47,7 +47,7 @@ export class HttpVisionAdapter implements VisionModelAdapter {
     const url = chatEndpoint(this.opts.baseUrl, this.opts.protocol ?? "OPENAI_CHAT_COMPLETIONS");
     const payload = {
       model: this.opts.modelId,
-      max_tokens: 800,
+      max_tokens: 4096,
       messages: [
         { role: "system", content: VISION_SYSTEM_PROMPT },
         {
@@ -65,13 +65,31 @@ export class HttpVisionAdapter implements VisionModelAdapter {
       body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error(`vision HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    const json = (await res.json()) as { choices?: { message?: { content?: unknown } }[] };
-    const content = json.choices?.[0]?.message?.content;
-    const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((c) => (c as { text?: string }).text ?? "").join("") : "";
+    const json = (await res.json()) as {
+      choices?: { message?: { content?: unknown; reasoning_content?: unknown } }[];
+    };
+    const text = visionMessageText(json.choices?.[0]?.message);
     const parsed = parseVisionModelJson(text);
     this.opts.cache?.set(key, parsed);
     return { ...parsed, analyzer: "VISION_MODEL", cached: false };
   }
+}
+
+export function visionMessageText(message: { content?: unknown; reasoning_content?: unknown } | undefined): string {
+  if (!message) return "";
+  const chunks: string[] = [];
+  const push = (v: unknown) => {
+    if (typeof v === "string" && v.trim()) chunks.push(v);
+    else if (Array.isArray(v)) {
+      for (const part of v) {
+        if (typeof part === "string") chunks.push(part);
+        else if (part && typeof part === "object" && "text" in part) chunks.push(String((part as { text?: string }).text ?? ""));
+      }
+    }
+  };
+  push(message.content);
+  push(message.reasoning_content);
+  return chunks.join("\n");
 }
 
 export function chatEndpoint(baseUrl: string, protocol: string): string {
