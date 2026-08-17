@@ -300,7 +300,6 @@ Hint 不误取、大文件 bounded IO、URL 单题 SSRF 防护、Provider DEGRAD
 
 **MVP-2.5**：Pi 只注册 CORE 15 + discover/help/execute；Manager OFF/SHADOW/ACTIVE
 （默认 OFF）；Reflection OFF/HEURISTIC/LLM/HYBRID（默认 HYBRID）。
-没有 Challenger、没有一题多 Solver、Manager 挂了不会停比赛。
 
 ### 还没当门槛关掉
 
