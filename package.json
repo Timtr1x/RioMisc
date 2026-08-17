@@ -18,6 +18,7 @@
     "stress-burst": "tsx scripts/stress-burst.ts",
     "stress-large-file": "tsx scripts/stress-large-file.ts",
     "test": "vitest run",
+    "docs:tools": "tsx scripts/docs-tools.ts",
     "test:ci": "vitest run tests/unit tests/integration",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.json",

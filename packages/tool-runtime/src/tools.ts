@@ -19,14 +19,10 @@ import {
   requestVisualReviewParamsSchema,
   renderSpectrogramParamsSchema,
   extractKeyframesParamsSchema,
-  pathOnlySchema,
-  carveSchema,
-  specialistParamsSchema,
-  hypothesisParamsSchema,
-  cryptoTextSchema,
-  imageTransformSchema,
-  extractBitplaneSchema,
 } from "@rio/domain";
+import { hintsForInspection } from "./catalog/hints.js";
+import type { ToolHint } from "./catalog/types.js";
+import { TOOL_CATALOG, getCatalogTool, listDirectPiTools } from "./catalog/catalog.js";
 import { WorkspaceManager, type WorkspaceLayout } from "./workspace.js";
 import { ProcessRunner, type ProcessResult, DEFAULT_TIMEOUTS } from "./process.js";
 import { inspectFilePath, detectMagic } from "./inspect.js";
@@ -44,23 +40,6 @@ import {
   type VisionModelAdapter,
 } from "@rio/visual-runtime";
 import { experimentKey, LEDGER_SKIP_TOOLS, canonicalizeArgs } from "@rio/misc-runtime";
-import {
-  scanTrailingDataTool,
-  scanEmbeddedSignaturesTool,
-  extractStringsSummaryTool,
-  analyzePcapOverviewTool,
-  extractHttpObjectsTool,
-  extractDnsActivityTool,
-  carveFilesTool,
-  requestSpecialistTool,
-  recordHypothesisTool,
-  parseCryptoValuesTool,
-  analyzeRsaTool,
-  rsaAttackTool,
-  renderTransformTool,
-  extractBitplaneTool,
-  extractVisibleTextTool,
-} from "./semantic-tools.js";
 
 export const MAX_INLINE_CHARS = 12_000;
 export const MAX_TOOL_OUTPUT_BYTES = 64 * 1024 * 1024;
@@ -80,6 +59,7 @@ export interface ToolResult<T = unknown> {
   truncated?: boolean;
   durationMs: number;
   error?: { code: string; message: string };
+  hints?: ToolHint[];
 }
 
 export interface ToolCall<T = unknown> {
@@ -88,7 +68,7 @@ export interface ToolCall<T = unknown> {
 }
 
 export interface AgentEmit {
-  (kind: "progress" | "candidate" | "handoff" | "reflection" | "error" | "visual_evidence" | "visual_review" | "specialist" | "experiment" | "hypothesis", payload: Record<string, unknown>): void;
+  (kind: "progress" | "candidate" | "handoff" | "reflection" | "error" | "visual_evidence" | "visual_review" | "specialist" | "experiment" | "hypothesis" | "tool_telemetry", payload: Record<string, unknown>): void;
 }
 
 export interface ToolContext {
@@ -105,6 +85,8 @@ export interface ToolContext {
   networkIsolation?: "NONE";
   vision?: VisionModelAdapter | null;
   maxVisionCalls?: number;
+  /** Solver domain for empty discover_tools overviews. */
+  solverDomain?: "MISC" | "CRYPTO" | "ANY";
   experiments?: {
     lookup(key: string): { summary: string; outcome: string } | null;
     record(entry: { key: string; tool: string; args: unknown; summary: string; outcome: string; artifactSha256: string }): void;
@@ -130,6 +112,7 @@ export function formatToolResultForModel(result: ToolResult, maxChars = MAX_INLI
   if (result.truncated) payload.truncated = true;
   if (result.error) payload.error = result.error;
   if (result.artifacts?.length) payload.artifacts = result.artifacts;
+  if (result.hints?.length) payload.hints = result.hints;
   let text = JSON.stringify(payload, null, 2);
   if (text.length > maxChars) text = `${text.slice(0, maxChars)}\n…(truncated, ${text.length} chars total)`;
   return text;
@@ -261,7 +244,10 @@ export function inspectFileTool(ctx: ToolContext, params: unknown): Promise<Tool
     const abs = ctx.safeResolve(p.data.path);
     if (!existsSync(abs) || !statSync(abs).isFile()) return Promise.resolve(fail("NOT_FOUND", `no such file: ${p.data.path}`, Date.now() - started));
     const insp = inspectFilePath(abs);
-    return Promise.resolve(ok("inspection done", insp, Date.now() - started));
+    const st = statSync(abs);
+    const buf = st.size <= 4 * 1024 * 1024 ? readFileSync(abs) : undefined;
+    const hints = hintsForInspection(insp, buf);
+    return Promise.resolve(ok("inspection done", { ...insp, hints }, Date.now() - started, { hints }));
   } catch (e) {
     return Promise.resolve(fail("FS", String(e), Date.now() - started));
   }
@@ -601,65 +587,21 @@ export function extractKeyframesTool(ctx: ToolContext, params: unknown): Promise
 }
 
 // ---------------------------------------------------------------------------
-// Registry
+// Registry — backed by the typed Tool Catalog (CORE + DISCOVERABLE).
 // ---------------------------------------------------------------------------
 
-export const TOOL_IMPLS: ToolImpl[] = [
-  { name: "read_challenge_file", description: "Read a file in the workspace. Paths are relative to the workspace ROOT (not work/). Examples: challenge.txt, input/task.zip, artifacts/extracted/flag.txt", schema: readFileParamsSchema, run: readChallengeFile },
-  { name: "list_workspace", description: "List a directory in the workspace. Omit path or use '.' for the root (challenge.txt, input/, work/, artifacts/). Do not use Python os.listdir to find files — use this tool.", schema: listWorkspaceParamsSchema, run: listWorkspace },
-  { name: "write_work_file", description: "Write a script or note. Bare names are placed under work/ (solve.py → work/solve.py).", schema: writeWorkFileParamsSchema, run: writeWorkFile },
-  { name: "inspect_file", description: "Magic bytes, size, sha256, entropy, image dims, pcap summary. Use on every attachment first.", schema: inspectFileParamsSchema, run: inspectFileTool },
-  { name: "extract_archive", description: "Extract a zip (or gunzip) into artifacts/ with zip-bomb limits. path e.g. input/task.zip", schema: extractArchiveParamsSchema, run: extractArchive },
-  { name: "run_python", description: "Run Python. cwd is the workspace ROOT, so open('input/foo.zip') and open('work/solve.py') both work. Prefer writing work/solve.py then scriptPath='work/solve.py'.", schema: runPythonParamsSchema, run: runPython },
-  { name: "search_tool_output", description: "Search a saved tool output file for a substring", schema: z.object({ path: z.string().max(1000), query: z.string().min(1).max(200), maxMatches: z.number().int().min(1).max(200).optional() }), run: searchToolOutput },
-  { name: "read_tool_output_chunk", description: "Read a chunk of a saved tool output file", schema: z.object({ path: z.string().max(1000), offset: z.number().int().min(0).optional(), maxChars: z.number().int().min(100).max(100_000).optional() }), run: readToolOutputChunk },
-  { name: "report_progress", description: "Report progress/hypotheses to the control plane (~every 2 minutes or on major discoveries)", schema: reportProgressParamsSchema, run: reportProgressTool },
-  { name: "submit_flag_candidate", description: "Propose a flag candidate (confidence 0..1, reason required). You cannot submit to the contest yourself — the control plane verifies and submits.", schema: submitFlagCandidateParamsSchema, run: submitFlagCandidateTool },
-  { name: "request_handoff", description: "Ask the control plane to hand off to another solver domain (MISC or CRYPTO)", schema: requestHandoffParamsSchema, run: requestHandoffTool },
-  { name: "request_reflection", description: "Request a reflection pass when stuck", schema: requestReflectionParamsSchema, run: requestReflectionTool },
-  { name: "analyze_visual", description: "Look at an image (overview, QR, channels, bitplanes; AUTO may call a vision model). Prefer LOCAL_ONLY first. Use VISION_MODEL / AUTO only to read visible text or shapes a QR decoder cannot. Do not re-call vision on the same image unless you transformed it (or force=true). Ask a specific question.", schema: analyzeVisualParamsSchema, run: analyzeVisualTool },
-  { name: "request_visual_review", description: "Ask a human to look at an image. Does not block — continue other analysis. Provide a specific question and why you need eyes.", schema: requestVisualReviewParamsSchema, run: requestVisualReviewTool },
-  { name: "render_spectrogram", description: "Render a spectrogram PNG from a WAV file into artifacts/visual/spectrogram.png.", schema: renderSpectrogramParamsSchema, run: renderSpectrogramTool },
-  { name: "extract_keyframes", description: "Extract video/GIF/image keyframes into a contact sheet (ffmpeg for video; PNG/JPEG works without it).", schema: extractKeyframesParamsSchema, run: extractKeyframesTool },
-  { name: "scan_trailing_data", description: "Find bytes after PNG IEND / JPEG FFD9 / GIF trailer / ZIP EOCD.", schema: pathOnlySchema, run: scanTrailingDataTool },
-  { name: "scan_embedded_signatures", description: "Locate ZIP/PNG/JPEG/PDF/PE/ELF/GZIP/7z/RAR/SQLite magic offsets.", schema: pathOnlySchema, run: scanEmbeddedSignaturesTool },
-  { name: "extract_strings_summary", description: "Summarize interesting strings (flags, URLs, base64). Not a full dump.", schema: pathOnlySchema, run: extractStringsSummaryTool },
-  { name: "analyze_pcap_overview", description: "PCAP packet/protocol/HTTP/DNS/conversation overview.", schema: pathOnlySchema, run: analyzePcapOverviewTool },
-  { name: "extract_http_objects", description: "List HTTP requests found in a PCAP.", schema: pathOnlySchema, run: extractHttpObjectsTool },
-  { name: "extract_dns_activity", description: "List DNS names from a PCAP.", schema: pathOnlySchema, run: extractDnsActivityTool },
-  { name: "carve_files", description: "Carve a byte range to artifacts/carved/.", schema: carveSchema, run: carveFilesTool },
-  { name: "request_specialist", description: "Run a short structured specialist (IMAGE/PCAP/ARCHIVE/RSA/PRNG). Does not occupy a worker.", schema: specialistParamsSchema, run: requestSpecialistTool },
-  { name: "record_hypothesis", description: "Record a hypothesis the planner should track.", schema: hypothesisParamsSchema, run: recordHypothesisTool },
-  { name: "parse_crypto_values", description: "Parse n/e/c/p/q from challenge text.", schema: cryptoTextSchema, run: parseCryptoValuesTool },
-  { name: "analyze_rsa_instance", description: "Analyze an RSA instance and list cheap attack candidates. Does not attack.", schema: cryptoTextSchema, run: analyzeRsaTool },
-  { name: "rsa_small_e", description: "Small-e / cube-root RSA.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("rsa_small_e", c, p) },
-  { name: "rsa_fermat", description: "Fermat factorization when p≈q.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("rsa_fermat", c, p) },
-  { name: "rsa_wiener", description: "Wiener attack for small d.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("rsa_wiener", c, p) },
-  { name: "rsa_common_modulus", description: "Common-modulus RSA (n,e1,c1,e2,c2).", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("rsa_common_modulus", c, p) },
-  { name: "rsa_basic_decrypt", description: "Decrypt RSA if n factors or p,q known.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("rsa_basic_decrypt", c, p) },
-  { name: "factor_integer", description: "Factor a (small) integer.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("factor_integer", c, p) },
-  { name: "integer_root", description: "Integer k-th root.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("integer_root", c, p) },
-  { name: "mod_inverse", description: "Modular inverse.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("mod_inverse", c, p) },
-  { name: "gcd", description: "Greatest common divisor.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("gcd", c, p) },
-  { name: "extended_gcd", description: "Extended gcd.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("extended_gcd", c, p) },
-  { name: "crt", description: "Chinese remainder theorem (two congruences).", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("crt", c, p) },
-  { name: "lcg_recover", description: "Recover LCG a,c from samples.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("lcg_recover", c, p) },
-  { name: "aes_inspect", description: "Guess AES mode from ciphertext layout.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("aes_inspect", c, p) },
-  { name: "frequency_analysis", description: "Letter frequency / Caesar hint.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("frequency_analysis", c, p) },
-  { name: "xor_bytes", description: "XOR two byte strings (hex + key).", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("xor_bytes", c, p) },
-  { name: "xor_known_plaintext", description: "Recover keystream from known plaintext.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("xor_known_plaintext", c, p) },
-  { name: "lll_reduce", description: "LLL-reduce an integer lattice given as JSON [[..],[..]] or whitespace rows. Runs locally; uses Sage/fpylll only if installed.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("lll_reduce", c, p) },
-  { name: "discrete_log_if_small", description: "Baby-step giant-step discrete log g^x ≡ h (mod m) for small x.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("discrete_log_if_small", c, p) },
-  { name: "rsa_hastad", description: "Håstad broadcast attack (same e, multiple n,c).", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("rsa_hastad", c, p) },
-  { name: "solve_linear_congruence", description: "Solve ax ≡ b (mod m).", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("solve_linear_congruence", c, p) },
-  { name: "render_transform", description: "grayscale / invert / autocontrast / threshold / rotate90|180|270.", schema: imageTransformSchema, run: renderTransformTool },
-  { name: "extract_bitplane", description: "Extract one channel bit plane to a PNG.", schema: extractBitplaneSchema, run: extractBitplaneTool },
-  { name: "extract_visible_text", description: "OCR visible text. Returns BACKEND_UNAVAILABLE if no OCR engine.", schema: pathOnlySchema, run: extractVisibleTextTool },
-];
+export const TOOL_IMPLS: ToolImpl[] = TOOL_CATALOG().map((t) => ({
+  name: t.name,
+  description: t.summary,
+  schema: t.schema,
+  run: t.run,
+}));
 
 export function toolNames(): string[] {
-  return TOOL_IMPLS.map((t) => t.name);
+  return TOOL_CATALOG().map((t) => t.name);
 }
+
+export { listDirectPiTools, TOOL_CATALOG, getCatalogTool };
 
 export function fingerprintArtifact(ctx: ToolContext, relPath?: string): string {
   if (!relPath) return "none";
@@ -671,7 +613,7 @@ export function fingerprintArtifact(ctx: ToolContext, relPath?: string): string 
 }
 
 export async function runTool(ctx: ToolContext, name: string, params: unknown): Promise<ToolResult> {
-  const impl = TOOL_IMPLS.find((t) => t.name === name);
+  const impl = getCatalogTool(name);
   if (!impl) return { ok: false, summary: `unknown tool ${name}`, durationMs: 0, error: { code: "UNKNOWN_TOOL", message: name } };
   const rec = params as { path?: string; force?: boolean } | null;
   if (ctx.experiments && !LEDGER_SKIP_TOOLS.has(name) && rec?.force !== true) {

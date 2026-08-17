@@ -167,7 +167,7 @@ describe("MVP-2 misc/crypto/planner/eval", () => {
     const dir = mkdtempSync(join(tmpdir(), "rio-m2lll-"));
     dirs.push(dir);
     const ctx = makeCtx(dir);
-    const r = await runTool(ctx, "lll_reduce", { text: "[[1,1,1],[-1,0,2],[3,5,6]]" });
+    const r = await runTool(ctx, "lll_reduce", { matrix: "[[1,1,1],[-1,0,2],[3,5,6]]" });
     expect(r.ok).toBe(true);
     const data = r.data as { backend: string; matrix: string[][] };
     expect(data.backend).toBe("local");
@@ -186,7 +186,7 @@ describe("MVP-2 misc/crypto/planner/eval", () => {
     const dir = mkdtempSync(join(tmpdir(), "rio-m2dl-"));
     dirs.push(dir);
     const ctx = makeCtx(dir);
-    const r = await runTool(ctx, "discrete_log_if_small", { a: "2", b: "14", m: "101" });
+    const r = await runTool(ctx, "discrete_log_if_small", { g: "2", h: "14", m: "101" });
     expect(r.ok).toBe(true);
     expect((r.data as { x: string }).x).toBe("10");
     expect(discreteLogSmall(2n, 14n, 101n)).toBe(10n);

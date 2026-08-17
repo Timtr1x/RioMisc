@@ -828,6 +828,35 @@ depended on the previous files.`;
         }
         break;
       }
+      case "tool_telemetry": {
+        const code = String(msg.code ?? "TOOL_EVENT");
+        logger.info({ event: code, challengeId, sessionId, tool: msg.name ?? msg.query, count: msg.count });
+        try {
+          const raw = repos.settings.get("metrics.tools") ?? "{}";
+          const m = JSON.parse(raw) as Record<string, unknown>;
+          const counts = (m.counts && typeof m.counts === "object" ? m.counts : {}) as Record<string, number>;
+          counts[code] = (counts[code] ?? 0) + 1;
+          const used = Array.isArray(m.uniqueToolsUsed) ? (m.uniqueToolsUsed as string[]) : [];
+          if (typeof msg.name === "string" && msg.name && !used.includes(msg.name)) used.push(msg.name);
+          if (code === "TOOL_EXECUTED_VIA_ROUTER") counts.hidden_tool_calls = (counts.hidden_tool_calls ?? 0) + 1;
+          if (code === "TOOL_DISCOVERY") counts.tool_discovery_calls = (counts.tool_discovery_calls ?? 0) + 1;
+          if (code === "TOOL_HELP_VIEWED") counts.tool_help_calls = (counts.tool_help_calls ?? 0) + 1;
+          if (code === "TOOL_ARGUMENT_INVALID") counts.tool_argument_errors = (counts.tool_argument_errors ?? 0) + 1;
+          const errors = counts.tool_argument_errors ?? 0;
+          const hidden = counts.hidden_tool_calls ?? 0;
+          repos.settings.set(
+            "metrics.tools",
+            JSON.stringify({
+              counts,
+              uniqueToolsUsed: used,
+              tool_argument_error_rate: hidden + errors === 0 ? 0 : errors / (hidden + errors),
+            }),
+          );
+        } catch (e) {
+          logger.debug({ event: "tool_metrics_failed", err: String(e) });
+        }
+        break;
+      }
       case "info":
         logger.info({ event: "worker_info", challengeId, message: String(msg.message ?? "") });
         break;

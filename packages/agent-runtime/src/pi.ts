@@ -10,7 +10,7 @@
 /// so API keys never land in plaintext on disk (§56).
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { TOOL_IMPLS, runTool, formatToolResultForModel, type ToolContext } from "@rio/tool-runtime";
+import { listDirectPiTools, runTool, formatToolResultForModel, type ToolContext } from "@rio/tool-runtime";
 import type { ModelRef } from "@rio/domain";
 import type { AgentRuntimeAdapter, PiProviderSpec, SolverSessionConfig, SolverSessionHandle } from "./adapter.js";
 import { compatFlagsFor, resolveCompatProfile, selectPiProvider } from "./compat.js";
@@ -205,57 +205,25 @@ function toolParameterSchema(Type: TBox, name: string) {
       });
     case "request_reflection":
       return Type.Object({ reason: Type.String() });
-    case "analyze_visual":
-      return Type.Object({
-        path: Type.String({ description: "Workspace-relative image, e.g. input/challenge.png" }),
-        question: Type.Optional(Type.String({ description: "What to look for. Do not ask to 'describe the image'." })),
-        mode: Type.Optional(Type.Union([Type.Literal("AUTO"), Type.Literal("LOCAL_ONLY"), Type.Literal("VISION_MODEL")])),
-        force: Type.Optional(Type.Boolean()),
-      });
-    case "request_visual_review":
-      return Type.Object({
-        path: Type.String(),
-        question: Type.String({ description: "Specific question for the human" }),
-        reason: Type.String({ description: "Why local/vision tools are not enough" }),
-      });
-    case "render_spectrogram":
-      return Type.Object({
-        path: Type.String({ description: "WAV path, e.g. input/secret.wav" }),
-        mode: Type.Optional(Type.Union([Type.Literal("AUTO"), Type.Literal("WIDE"), Type.Literal("DETAIL")])),
-        maxDurationSeconds: Type.Optional(Type.Number()),
-      });
-    case "extract_keyframes":
-      return Type.Object({
-        path: Type.String(),
-        strategy: Type.Optional(Type.Union([Type.Literal("UNIFORM"), Type.Literal("SCENE_CHANGE"), Type.Literal("ALL_IF_SMALL")])),
-        maxFrames: Type.Optional(Type.Number()),
-      });
-    case "render_transform":
-      return Type.Object({
-        path: Type.String(),
-        op: Type.Union([
-          Type.Literal("grayscale"),
-          Type.Literal("invert"),
-          Type.Literal("autocontrast"),
-          Type.Literal("threshold"),
-          Type.Literal("rotate90"),
-          Type.Literal("rotate180"),
-          Type.Literal("rotate270"),
-        ]),
-      });
-    case "extract_bitplane":
-      return Type.Object({
-        path: Type.String(),
-        channel: Type.Union([Type.Number(), Type.String()]),
-        bit: Type.Number(),
-      });
-    case "extract_visible_text":
-      return Type.Object({ path: Type.String() });
     case "record_hypothesis":
       return Type.Object({
         description: Type.String(),
         confidence: Type.Optional(Type.Number()),
         status: Type.Optional(Type.String()),
+      });
+    case "discover_tools":
+      return Type.Object({
+        query: Type.Optional(Type.String({ description: "Technique or capability to search for" })),
+        group: Type.Optional(Type.String({ description: "Optional ToolGroup filter" })),
+        domain: Type.Optional(Type.Union([Type.Literal("MISC"), Type.Literal("CRYPTO"), Type.Literal("ANY")])),
+        limit: Type.Optional(Type.Number({ description: "Default 6, max 10" })),
+      });
+    case "get_tool_help":
+      return Type.Object({ name: Type.String({ description: "Exact catalog tool name" }) });
+    case "execute_tool":
+      return Type.Object({
+        name: Type.String({ description: "DISCOVERABLE catalog tool name" }),
+        args: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
       });
     default:
       return Type.Object({});
@@ -394,11 +362,11 @@ export class PiAgentRuntimeAdapter implements AgentRuntimeAdapter {
 
   async #buildTools(ctx: ToolContext): Promise<ToolDefinition[]> {
     const { defineTool, Type } = await this.#sdkWithTypebox();
-    return TOOL_IMPLS.map((impl) =>
+    return listDirectPiTools().map((impl) =>
       defineTool({
         name: impl.name,
         label: impl.name,
-        description: `${impl.description} Operates inside the challenge workspace only.`,
+        description: `${impl.summary} Operates inside the challenge workspace only.`,
         parameters: toolParameterSchema(Type, impl.name),
         promptSnippet: impl.name,
         async execute(_toolCallId: string, params: Record<string, unknown>) {

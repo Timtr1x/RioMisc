@@ -3,12 +3,34 @@ import { join } from "node:path";
 import {
   pathOnlySchema,
   carveSchema,
-  cryptoTextSchema,
   specialistParamsSchema,
   hypothesisParamsSchema,
   imageTransformSchema,
   extractBitplaneSchema,
+  parseCryptoValuesSchema,
+  analyzeRsaInstanceSchema,
+  rsaSmallESchema,
+  rsaFermatSchema,
+  rsaWienerSchema,
+  rsaCommonModulusSchema,
+  rsaHastadSchema,
+  rsaBasicDecryptSchema,
+  factorIntegerSchema,
+  integerRootSchema,
+  modInverseSchema,
+  gcdSchema,
+  extendedGcdSchema,
+  crtSchema,
+  linearCongruenceSchema,
+  lcgRecoverSchema,
+  aesInspectSchema,
+  frequencyAnalysisSchema,
+  xorBytesSchema,
+  xorKnownPlaintextSchema,
+  lllReduceSchema,
+  discreteLogSchema,
 } from "@rio/domain";
+import { hintsForRsaAnalysis } from "./catalog/hints.js";
 import {
   scanTrailingData,
   scanEmbeddedSignatures,
@@ -198,9 +220,34 @@ export async function extractVisibleTextTool(ctx: ToolContext, params: unknown):
   };
 }
 
+const CRYPTO_SCHEMAS: Record<string, { safeParse(data: unknown): { success: true; data: Record<string, unknown> } | { success: false; error: { issues: { message: string }[] } } }> = {
+  parse_crypto_values: parseCryptoValuesSchema,
+  analyze_rsa_instance: analyzeRsaInstanceSchema,
+  rsa_small_e: rsaSmallESchema,
+  rsa_fermat: rsaFermatSchema,
+  rsa_wiener: rsaWienerSchema,
+  rsa_common_modulus: rsaCommonModulusSchema,
+  rsa_hastad: rsaHastadSchema,
+  rsa_basic_decrypt: rsaBasicDecryptSchema,
+  factor_integer: factorIntegerSchema,
+  integer_root: integerRootSchema,
+  mod_inverse: modInverseSchema,
+  gcd: gcdSchema,
+  extended_gcd: extendedGcdSchema,
+  crt: crtSchema,
+  solve_linear_congruence: linearCongruenceSchema,
+  lcg_recover: lcgRecoverSchema,
+  aes_inspect: aesInspectSchema,
+  frequency_analysis: frequencyAnalysisSchema,
+  xor_bytes: xorBytesSchema,
+  xor_known_plaintext: xorKnownPlaintextSchema,
+  lll_reduce: lllReduceSchema,
+  discrete_log_if_small: discreteLogSchema,
+};
+
 export async function parseCryptoValuesTool(ctx: ToolContext, params: unknown): Promise<ToolResult> {
   const t0 = Date.now();
-  const p = cryptoTextSchema.safeParse(params);
+  const p = parseCryptoValuesSchema.safeParse(params);
   if (!p.success) return fail("VALIDATION", p.error.issues[0]?.message ?? "bad", 0);
   const text = p.data.text ?? (p.data.path ? readFileSync(ctx.safeResolve(p.data.path), "utf8") : "");
   const values = parseCryptoValues(text);
@@ -209,21 +256,32 @@ export async function parseCryptoValuesTool(ctx: ToolContext, params: unknown): 
 
 export async function analyzeRsaTool(ctx: ToolContext, params: unknown): Promise<ToolResult> {
   const t0 = Date.now();
-  const p = cryptoTextSchema.safeParse(params);
+  const p = analyzeRsaInstanceSchema.safeParse(params);
   if (!p.success) return fail("VALIDATION", p.error.issues[0]?.message ?? "bad", 0);
   const text = p.data.text ?? (p.data.path ? readFileSync(ctx.safeResolve(p.data.path), "utf8") : "");
   const values = { ...parseCryptoValues(text), ...strip(p.data) };
   const inst = { n: asBig(values, "n"), e: asBig(values, "e"), c: asBig(values, "c") };
   const r = analyzeRsaInstance(inst);
-  return ok(`RSA ${r.bitLength}b ${r.attackCandidates.map((a) => a.attack).join(",")}`, r, Date.now() - t0);
+  const hints = hintsForRsaAnalysis(r.attackCandidates);
+  return {
+    ...ok(`RSA ${r.bitLength}b ${r.attackCandidates.map((a) => a.attack).join(",")}`, { ...r, hints }, Date.now() - t0),
+    hints,
+  };
 }
 
 export async function rsaAttackTool(name: string, ctx: ToolContext, params: unknown): Promise<ToolResult> {
   const t0 = Date.now();
-  const p = cryptoTextSchema.safeParse(params);
+  const schema = CRYPTO_SCHEMAS[name];
+  const p = schema ? schema.safeParse(params) : { success: false as const, error: { issues: [{ message: `no schema for ${name}` }] } };
   if (!p.success) return fail("VALIDATION", p.error.issues[0]?.message ?? "bad", 0);
-  const text = p.data.text ?? (p.data.path ? readFileSync(ctx.safeResolve(p.data.path), "utf8") : "");
-  const v = { ...parseCryptoValues(text), ...strip(p.data) };
+  const data = p.data as Record<string, unknown>;
+  const text =
+    (typeof data.text === "string" ? data.text : undefined) ??
+    (typeof data.path === "string" ? readFileSync(ctx.safeResolve(data.path), "utf8") : undefined) ??
+    (typeof data.samples === "string" ? data.samples : undefined) ??
+    (typeof data.matrix === "string" ? data.matrix : "") ??
+    "";
+  const v = { ...parseCryptoValues(text), ...strip(data) };
   try {
     if (name === "rsa_small_e") {
       const rec = rsaSmallE(asBig(v, "c")!, asBig(v, "e") ?? 3n, asBig(v, "n"));
@@ -296,7 +354,7 @@ export async function rsaAttackTool(name: string, ctx: ToolContext, params: unkn
       return ok(rec ? `a=${rec.a} c=${rec.c}` : "lcg failed", rec, Date.now() - t0);
     }
     if (name === "aes_inspect") {
-      const buf = p.data.path ? readFileSync(ctx.safeResolve(p.data.path)) : Buffer.from(text, "hex");
+      const buf = typeof data.path === "string" ? readFileSync(ctx.safeResolve(data.path)) : Buffer.from(text, "hex");
       const r = aesInspect(buf);
       return ok(`AES ${r.likelyMode}`, r, Date.now() - t0);
     }

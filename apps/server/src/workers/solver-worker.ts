@@ -5,7 +5,7 @@ import { resolve, join } from "node:path";
 import { sha256File } from "@rio/tool-runtime";
 import {
   WorkspaceManager,
-  toolNames,
+  listDirectPiTools,
   type ToolContext,
   type ArtifactRef,
 } from "@rio/tool-runtime";
@@ -114,6 +114,7 @@ function buildToolContext(config: StartConfig, vision?: VisionModelAdapter | nul
       tmp: resolve(root, "tmp"),
     },
     sessionId: config.sessionId,
+    solverDomain: config.solverType === "CRYPTO" ? "CRYPTO" : config.solverType === "MISC" ? "MISC" : "ANY",
     safeResolve: (p: string) => wm.safeResolve(root, p),
     emit: (kind, payload) => send({ type: kind, ...payload }),
     recordArtifact: (op: string, absPath: string, parent?: string | null): ArtifactRef | null => {
@@ -222,7 +223,7 @@ process.on("message", async (msg: { type: string; [k: string]: unknown }) => {
           vision = pickVisionAdapter(currentConfig, decrypted);
         }
         const ctx = buildToolContext(currentConfig, vision);
-        const tools = toolNames().map((name) => ({ name, description: `Solver tool ${name}` }));
+        const tools = listDirectPiTools().map((t) => ({ name: t.name, description: t.summary }));
         const sessionConfig = {
           sessionId: currentConfig.sessionId,
           challengeId: currentConfig.challengeId,

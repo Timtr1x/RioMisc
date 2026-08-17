@@ -150,8 +150,9 @@ scripts/llm-soak-mock.ts  真模型 soak（只打已存 Key，不打印明文）
 Docker 里已经有 `sagemath/sagemath` 时，`lll_reduce` 才会去用；否则走
 打包的整数 LLL。Windows 上没有官方 fpylll / Sage 轮子，所以默认就是本地实现。
 
-Solver 不会自己去敲文件系统。Pi 适配器把 `TOOL_IMPLS` 全部注册成
-`defineTool`；模型发出 tool call 后，`execute` → `runTool`，结果写回
+Solver 不会自己去敲文件系统。Pi 适配器只把 CORE 工具（约 15 个，含
+`discover_tools` / `get_tool_help` / `execute_tool`）注册成 `defineTool`；
+隐藏的 Misc/Crypto 工具经 catalog 白名单由 `execute_tool` 调用 `runTool`，结果写回
 workspace `results/tool-NNNN.txt` 和实验账本。Mock Agent 走同一条
 `runTool`，所以演示赛和真模型赛的工具语义一致。
 

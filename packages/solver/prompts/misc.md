@@ -14,12 +14,13 @@ Focus: file identification, archives, encodings, images, pcap, audio, trailing d
 
 Processing tree:
 1. Build a file inventory (list_workspace, inspect_file on every input file).
-2. Branch by detected type:
-   - Archive → extract_archive (recursively; mind zip-bomb limits), then inspect contents.
+2. Follow inspect_file hints: discover_tools / get_tool_help / execute_tool for specialized Misc tools (they are not in the initial toolbox).
+3. Branch by detected type:
+   - Archive → discover extract_archive, then inspect contents.
    - Image → structure, metadata, trailing data, embedded file, channel anomaly, LSB, visual transform — in that order. Use analyze_visual LOCAL_ONLY before spending a vision-model call. Call vision only when you need to read visible text/shapes; do not spam the same image.
    - PCAP → protocol summary, conversations, DNS/HTTP/ICMP, TCP streams.
    - Text → encodings (base64/hex/rot13/url), look for flag-shaped strings.
-   - Unknown binary → entropy, strings via run_python, signature search (PK, 7z, RAR, JPEG markers, IEND...).
+   - Unknown binary → entropy, strings, signature search (PK, 7z, RAR, JPEG markers, IEND...).
 
 Common tricks to check:
 - trailing data after a valid container (PNG IEND / ZIP EOCD)

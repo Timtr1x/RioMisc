@@ -233,6 +233,213 @@ export const visualReviewAnswerSchema = z.object({
   useful: z.boolean().optional(),
 });
 
+export const searchToolOutputParamsSchema = z.object({
+  path: z.string().max(1000),
+  query: z.string().min(1).max(200),
+  maxMatches: z.number().int().min(1).max(200).optional(),
+});
+
+export const readToolOutputChunkParamsSchema = z.object({
+  path: z.string().max(1000),
+  offset: z.number().int().min(0).optional(),
+  maxChars: z.number().int().min(100).max(100_000).optional(),
+});
+
+export const toolGroupSchema = z.enum([
+  "WORKSPACE",
+  "CONTROL",
+  "MISC_FILE",
+  "MISC_ARCHIVE",
+  "MISC_IMAGE",
+  "MISC_PCAP",
+  "MISC_AUDIO_VIDEO",
+  "CRYPTO_PARSE",
+  "CRYPTO_RSA",
+  "CRYPTO_NUMBER_THEORY",
+  "CRYPTO_XOR_CLASSICAL",
+  "CRYPTO_PRNG",
+  "CRYPTO_SYMMETRIC",
+  "CRYPTO_ADVANCED_MATH",
+  "SPECIALIST",
+]);
+
+export const discoverToolsParamsSchema = z.object({
+  query: z.string().max(400).optional(),
+  group: toolGroupSchema.optional(),
+  domain: z.enum(["MISC", "CRYPTO", "ANY"]).optional(),
+  limit: z.number().int().min(1).max(10).optional(),
+});
+
+export const getToolHelpParamsSchema = z.object({
+  name: z.string().min(1).max(80),
+});
+
+export const executeToolParamsSchema = z.object({
+  name: z.string().min(1).max(80),
+  args: z.record(z.unknown()).default({}),
+});
+
+/** Cryptographic integers must be strings — JSON numbers lose precision past 2^53. */
+export const bigintStringSchema = z
+  .string()
+  .min(1)
+  .max(20_000)
+  .refine((s) => {
+    const t = s.trim().replace(/[_ ,]/g, "");
+    return /^(0x[0-9a-fA-F]+|\d+)$/.test(t);
+  }, { message: "cryptographic integers must be decimal or 0x hex strings, not JSON numbers" });
+
+const forceField = { force: z.boolean().optional() };
+
+export const parseCryptoValuesSchema = z.object({
+  text: z.string().max(50_000).optional(),
+  path: z.string().max(1000).optional(),
+  ...forceField,
+}).refine((v) => Boolean(v.text || v.path), { message: "parse_crypto_values needs text or path" });
+
+export const analyzeRsaInstanceSchema = z.object({
+  text: z.string().max(50_000).optional(),
+  path: z.string().max(1000).optional(),
+  n: bigintStringSchema.optional(),
+  e: bigintStringSchema.optional(),
+  c: bigintStringSchema.optional(),
+  ...forceField,
+});
+
+export const rsaSmallESchema = z.object({
+  c: bigintStringSchema,
+  e: bigintStringSchema,
+  n: bigintStringSchema.optional(),
+  ...forceField,
+});
+
+export const rsaFermatSchema = z.object({
+  n: bigintStringSchema,
+  ...forceField,
+});
+
+export const rsaWienerSchema = z.object({
+  n: bigintStringSchema,
+  e: bigintStringSchema,
+  ...forceField,
+});
+
+export const rsaCommonModulusSchema = z.object({
+  n: bigintStringSchema,
+  e1: bigintStringSchema,
+  c1: bigintStringSchema,
+  e2: bigintStringSchema,
+  c2: bigintStringSchema,
+  ...forceField,
+});
+
+export const rsaHastadSchema = z.object({
+  e: bigintStringSchema,
+  n1: bigintStringSchema,
+  c1: bigintStringSchema,
+  n2: bigintStringSchema,
+  c2: bigintStringSchema,
+  n3: bigintStringSchema,
+  c3: bigintStringSchema,
+  ...forceField,
+});
+
+export const rsaBasicDecryptSchema = z.object({
+  n: bigintStringSchema,
+  c: bigintStringSchema,
+  e: bigintStringSchema.optional(),
+  p: bigintStringSchema.optional(),
+  q: bigintStringSchema.optional(),
+  ...forceField,
+});
+
+export const factorIntegerSchema = z.object({
+  n: bigintStringSchema,
+  ...forceField,
+});
+
+export const integerRootSchema = z.object({
+  c: bigintStringSchema,
+  e: bigintStringSchema,
+  ...forceField,
+});
+
+export const modInverseSchema = z.object({
+  a: bigintStringSchema,
+  m: bigintStringSchema,
+  ...forceField,
+});
+
+export const gcdSchema = z.object({
+  a: bigintStringSchema,
+  b: bigintStringSchema,
+  ...forceField,
+});
+
+export const extendedGcdSchema = z.object({
+  a: bigintStringSchema,
+  b: bigintStringSchema,
+  ...forceField,
+});
+
+export const crtSchema = z.object({
+  a: bigintStringSchema,
+  m: bigintStringSchema,
+  b: bigintStringSchema,
+  m2: bigintStringSchema,
+  ...forceField,
+});
+
+export const linearCongruenceSchema = z.object({
+  a: bigintStringSchema,
+  b: bigintStringSchema,
+  m: bigintStringSchema,
+  ...forceField,
+});
+
+export const lcgRecoverSchema = z.object({
+  samples: z.string().min(1).max(50_000),
+  ...forceField,
+});
+
+export const aesInspectSchema = z.object({
+  path: z.string().max(1000).optional(),
+  text: z.string().max(50_000).optional(),
+  ...forceField,
+}).refine((v) => Boolean(v.path || v.text), { message: "aes_inspect needs path or HEX ciphertext in text" });
+
+export const frequencyAnalysisSchema = z.object({
+  text: z.string().max(50_000).optional(),
+  path: z.string().max(1000).optional(),
+  ...forceField,
+}).refine((v) => Boolean(v.text || v.path), { message: "frequency_analysis needs text or path" });
+
+export const xorBytesSchema = z.object({
+  a: z.string().min(1).max(50_000),
+  b: z.string().max(50_000).optional(),
+  key: z.string().max(50_000).optional(),
+  ...forceField,
+}).refine((v) => Boolean(v.b || v.key), { message: "xor_bytes needs b or key (UTF-8). a is HEX data." });
+
+export const xorKnownPlaintextSchema = z.object({
+  c: z.string().min(1).max(50_000),
+  p: z.string().max(50_000).optional(),
+  m: z.string().max(50_000).optional(),
+  ...forceField,
+}).refine((v) => Boolean(v.p || v.m), { message: "xor_known_plaintext needs p or m (UTF-8 plaintext). c is HEX ciphertext." });
+
+export const lllReduceSchema = z.object({
+  matrix: z.string().min(1).max(100_000),
+  ...forceField,
+});
+
+export const discreteLogSchema = z.object({
+  g: bigintStringSchema,
+  h: bigintStringSchema,
+  m: bigintStringSchema,
+  ...forceField,
+});
+
 export const pathOnlySchema = z.object({
   path: z.string().min(1).max(1000),
   force: z.boolean().optional(),
