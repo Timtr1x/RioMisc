@@ -7,3 +7,6 @@ data/
 .env.local
 *.log
 .DS_Store
+
+# Local-only development specs — keep on disk, do not publish
+开发指南*.md

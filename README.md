@@ -99,7 +99,7 @@ Triage / Reflection 的独立真模型 soak、整本 21 题真模型 soak 还没
 │  EventLog/SQLite · Scheduler · WorkerPool(子进程)   │
 │  HintManager · SubmissionManager · Watchdog        │
 │  RecoveryManager · ModelRegistry · EventBus(SSE)   │
-│  VisualReview · Reflection · StartPolicy           │
+│  VisualReview · Reflection · Manager · StartPolicy │
 └───────────────┬──────────────────┬─────────────────┘
                 ▼                  ▼
        Solver Worker (fork)   Dashboard / CLI (REST+SSE)
@@ -124,8 +124,8 @@ Triage / Reflection 的独立真模型 soak、整本 21 题真模型 soak 还没
 
 ```
 apps/server         Fastify API + SSE + 控制平面 + solver worker 子进程
-apps/cli            rio CLI (start/status/challenges/pause/hint/solve …)
-apps/dashboard      React/Vite 监控台（含视觉复核、评测页）
+apps/cli            rio CLI（status / challenges / manager / reflection / solve …）
+apps/dashboard      React/Vite 监控台（含调度、视觉复核、评测页）
 packages/domain         纯类型 + Zod schema（无任何框架依赖）
 packages/database       node:sqlite 仓储层（Repository 模式）
 packages/contest        ContestAdapter · MockContest · Poller · RateLimiter · DiskManager · fixtures
@@ -213,7 +213,7 @@ HTTP。视觉模型返回 map 形 observations 或把 flag 写在 `reasoning_con
      `npm run pi-e2e`（完整系统：worker 子进程 → 真实 SDK → 提交 → WRONG 反馈）
      可随时复跑。
 3. **Dashboard/UI**：Vite + React + 现有 CSS。不要引入 Tailwind / shadcn。
-   Overview / Challenges / Detail / Providers / 视觉复核 / 评测页已落地。
+   Overview / Challenges / Detail / 调度 / Providers / 视觉复核 / 评测页已落地。
 
 ## 使用真实 LLM（Pi 运行时）
 
@@ -264,7 +264,7 @@ API Key 通过 Dashboard「Add Provider」或 CLI 配置，加密落盘。
 - [x] 验收：typecheck / unit+integration / E2E / pi-smoke / pi-e2e 全部通过
 
 > 1.1 的六个退出指标（真 Pi Resume、Recovery 矩阵、UNKNOWN 不重交、Hint 不误取、
-> 大文件无 OOM、30 题 burst + 真实模型）全部达成，按 `开发指南1.1.md` §92 正式标记 RELEASED。
+> 大文件无 OOM、30 题 burst + 真实模型）全部达成，正式标记 RELEASED。
 
 ### MVP-2（进行中，未宣布 Feature Complete）
 
@@ -278,6 +278,8 @@ API Key 通过 Dashboard「Add Provider」或 CLI 配置，加密落盘。
 - [x] Hypothesis 落库 · Artifact `parentArtifactId` DAG · HUMAN VisualEvidence 持久化
 - [x] Mock 目录 22（21 可解 + WEB）；eval / Mock 策略走真实 `runTool`
 - [x] 视觉包 + DNS 真模型 soak 9/9（DeepSeek / Pi）
+- [x] 工具渐进披露：Pi 只注册 CORE（≤15）+ `discover_tools` / `get_tool_help` / `execute_tool`
+- [x] Manager 派发（OFF / SHADOW / ACTIVE，默认 OFF）+ Reflection 四模式（默认 HYBRID）
 
 还没当作门槛关闭的部分：
 
