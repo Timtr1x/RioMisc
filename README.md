@@ -1,49 +1,73 @@
 # RioMisc — CTF Misc/Crypto Autonomous Agent Runtime
 
-西湖论剑 RioMisc：一个能够真实接入 CTF 比赛、自动发现/下载题目、调度 Solver Agent、
-并行解题、获取 Hint、验证 Flag、限速自动提交、崩溃后持久化恢复的完整运行时代理。
+西湖论剑 RioMisc：接入 CTF 比赛后自动发现 / 下载题目、调度 Solver、并行解题、
+取 Hint、校验 Flag、限速提交，崩溃后从 SQLite 恢复。只处理 Misc 和 Crypto；
+Web / Pwn / Reverse 标 `UNSUPPORTED`，不启动 Solver。
 
-> **里程碑状态：** MVP-1 已 RELEASED · MVP-1.1（运行时加固）已完成 · MVP-2 进行中（未宣布 Feature Complete）
-> （详见文末「里程碑状态」）
+> **状态：** MVP-1 与 MVP-1.1 已 RELEASED。MVP-2（视觉 / 语义工具 / 规划账本）
+> 和 2.5（工具渐进披露、Manager 派发、四模式 Reflection）已落地，有测试。
+> **未宣布 Feature Complete**：整本 21 题真模型 soak、Triage/Reflection 独立
+> 真模型 soak 还没当门槛跑完。
 
 > **架构三句话**：Control Plane 决定比赛怎么打；Solver Agent 决定一道题怎么解；
 > Tool Runtime 决定 Agent 可以安全地做什么。
 >
-> NativeTrusted 模式不能阻止 Agent 生成的 Python 主动访问宿主机其他文件或网络。RioMisc 通过 Tool 路径守卫、环境变量过滤、超时和进程树清理降低风险，但这不是 OS 安全边界。MVP-1.1 默认继续采用该模式。
+> 执行模式是 **NativeTrusted**，不是 OS 沙箱。Agent 写出的 Python 仍可能访问
+> 宿主机文件或网络。路径守卫、环境变量过滤、超时和进程树清理会降低风险，
+> 但不是安全边界。
 
-## 快速开始（Demo）
+## 快速开始
 
 ```bash
 npm install
-npm run dev          # 启动控制平面 + API (http://127.0.0.1:3000)
+npm run dev                       # 控制平面 + API  http://127.0.0.1:3000
+npm run dev -w apps/dashboard     # 监控台          http://127.0.0.1:5173
 ```
 
-默认 `contest.adapter: none`：空比赛。Dashboard 总览有两个入口：
+需要 Node ≥ 22.5（内置 `node:sqlite`）和本机 Python 3。默认 `contest.adapter: none`，开机是空比赛。
 
-- **接入比赛**：全自动拉题 / 下载 / 派工 / 交 flag。没有赛事 API 时点「接入演示比赛（Mock）」即可走完整流水线；有 CTFd / DASCTF 时填地址 + Token。
-- **单题模式**：粘贴一道题的 URL 或附件直链。与接赛入口共存，互不影响。
+**部署不会再下载一份「解题工具箱」。** `npm install` 只装 Node 包（含 Pi SDK）。
+inspect / ZIP / PCAP / RSA / LLL / 视觉等写在仓库 catalog 里。Python 必须事先装好，
+缺了进程起不来。`ffmpeg`、Sage 是可选增强，没有就跳过对应能力。
+赛场步骤见 [docs/deploy.md](docs/deploy.md)。
 
-已配置 Provider + Model 时自动使用 Pi（真实 LLM）；否则回退 Mock Agent。
-正式比赛建议把 `agent.allowMockFallback` 设为 `false`：有 Key 时绝不能悄悄换成 Mock。
+Dashboard 总览两个入口，可同时用：
 
-要跑内置演示题，把 `config/runtime.yaml` 改成 `adapter: mock`。目录共 **22** 道
-（21 道可解 + 1 道 WEB 标 unsupported）：原 10 道基础题、QR / WAV / Håstad、
-视觉包（低对比 / 通道 / bitplane / alpha / GIF / 旋转 / 反色）和 DNS exfil pcap。
+- **接入比赛**：自动拉题 / 下载 / 派工 / 交 flag。没有赛事 API 时点「接入演示比赛（Mock）」；
+  CTFd / DASCTF 填地址 + Token（或 Cookie）。也可在 `config/runtime.yaml` 写
+  `adapter: ctfd` + `baseUrl`，开机即连。
+- **单题模式**：粘贴题目页 URL 或附件直链，不依赖比赛 API。
 
-系统自动：
+已配置可用的 Provider + Model 时，下一道 Solver 自动走 Pi（真 LLM）；否则回退 Mock。
+正式比赛把 `agent.allowMockFallback` 设为 `false`：没模型就停，不要假装在解。
+
+内置 Mock 目录 **22** 道（21 可解 + 1 道 WEB 标 unsupported）：基础编解码 / 压缩 /
+PNG 拖尾 / LSB / HTTP PCAP、XOR / 小 RSA / 共模 / LCG / Håstad、QR / WAV、
+视觉包（低对比 / 通道 / bitplane / alpha / GIF / 旋转 / 反色）和 DNS exfil。
+yaml 改 `adapter: mock`，或设 `RIO_MOCK_ONLY=misc-006,misc-015` 只跑一部分。
+
+接上比赛或 Mock 之后的流水线：
 
 ```
-发现 → 下载附件(流式+SHA256) → Triage → 排队 → 最多 4 个 Solver 并行
-→ Agent 解题（Pi 或 Mock，同一套 Tool Runtime）→ 候选 Flag → 本地验证
-→ 自动提交（仅当赛事有官方裁判）→ CORRECT → SOLVED
+发现 → 下载附件（流式 + SHA256）→ Triage → 排队
+  →（可选）Manager 决定本轮谁占 Solver 位
+  → 最多 solverConcurrency 个 Solver（默认 4）
+  → Agent 解题（Pi 或 Mock，同一套 Tool Runtime）
+  → 候选 Flag → 本地验证
+  → 有官方裁判才自动提交 → CORRECT → SOLVED
 ```
 
-只跑一部分 mock 题时设 `RIO_MOCK_ONLY=misc-006,misc-015`（逗号分隔 fixture id）。
+**Manager 默认关。** 打开它不会多出「去平台拉题」；拉题靠比赛接入。
+Manager 只在几十道题抢 4 个槽时做派发。
 
-Dashboard（另开终端）：
-
-```bash
-npm run dev -w apps/dashboard     # http://127.0.0.1:5173
+```yaml
+# config/runtime.yaml
+manager:
+  enabled: false          # true 才调用 Manager
+  mode: SHADOW            # OFF | SHADOW（只记录）| ACTIVE（闸调度）
+reflection:
+  enabledByDefault: true
+  mode: HYBRID            # OFF | HEURISTIC | LLM | HYBRID
 ```
 
 CLI：
@@ -51,238 +75,236 @@ CLI：
 ```bash
 npm run cli -- status
 npm run cli -- challenges
-npm run cli -- challenge ch_crypto-002
+npm run cli -- manager status
+npm run cli -- manager enable          # SHADOW
+npm run cli -- strategy ch_crypto-002
+npm run cli -- reflect ch_crypto-002
 ```
 
-单题模式（不依赖比赛 API）：
+本地文件夹单题（`challenge.json` + `attachments/`，`answer.json` 可选）：
 
 ```bash
-mkdir /tmp/ch && cd /tmp/ch
-# challenge.json + attachments/ + answer.json
-npm run solve -- /tmp/ch --timeout 300
+npm run solve -- /path/to/challenge --timeout 300
 ```
 
 ## 测试
 
 ```bash
-npm test                # 单元 + 集成 + E2E（E2E 约 5 分钟）
+npm test                 # 单元 + 集成 + E2E（E2E 大约 10 分钟）
+npm run test:ci          # 只跑单元 + 集成
+npm run typecheck
+npm run docs:tools       # 从 catalog 生成 docs/tools/
 ```
 
-覆盖（对应文档 §110-117）：
+当前覆盖（都走仓库里的实现，不是另写一套）：
 
-- 单元：StateMachine 全部合法/非法转换、优先级评分、API 限速、Flag 去重、
-  路径守卫（.. / UNC / 绝对路径 / junction）、ZIP roundtrip 与炸弹限制、
-  fixtures 有效性、视觉解析、复核→候选
-- 集成：MockContest 发现/下载/Hint 解锁/提交、SubmissionManager wrong→feedback→max-wrong→manual submit
-- E2E：22 题目录、21 题无人值守全解（Mock Agent + 真实 `runTool`）、硬崩溃后恢复、Hint eligible→fetch
-- 评测：`solveRegisteredWithTools` 走同一工具链解 QR / WAV / Håstad / 视觉包 / DNS
+- 单元：状态机、优先级、Flag 去重、路径守卫、ZIP 炸弹限制、视觉解析、
+  工具披露 catalog、Manager snapshot / Policy / TTL / debounce、
+  Reflection 门闩 / fingerprint / 四模式
+- 集成：Contest 发现下载提交、StartPolicy、Manager 40 题 / 4 槽派发、
+  Manager 失败仍启动 Solver、Reflection 注入同一 worker、题级 Reflection OFF
+- E2E：22 题 Mock 目录、21 题无人值守全解（Mock Agent + 真 `runTool`）、
+  硬崩溃恢复、Hint eligible→fetch
+- 评测：`solveRegisteredWithTools` 解 QR / WAV / Håstad / 视觉包 / DNS
 
-真实模型 soak（会打已配置的 Provider，不打印 Key）：
+真模型 soak（打已配置的 Provider，不打印 Key）：
 
 ```bash
 npx tsx scripts/llm-soak-mock.ts
-# 默认只跑视觉包 + DNS（misc-006,008–015）；可用 RIO_MOCK_ONLY / RIO_SOAK_MS 覆盖
+# 默认视觉包 + DNS（misc-006,008–015）；RIO_MOCK_ONLY / RIO_SOAK_MS 可覆盖
 ```
 
-最近一次 DeepSeek（Pi，非 Mock）对这 9 道新 fixture 为 **9/9 SOLVED**。
-Triage / Reflection 的独立真模型 soak、整本 21 题真模型 soak 还没作为门槛跑完。
+最近一次 DeepSeek（Pi，非 Mock）对这 9 道是 **9/9 SOLVED**。
+整本 21 题真模型 soak、Triage / Reflection 独立真模型 soak 没有当门槛跑完。
+
+Pi SDK 冒烟：`npm run pi-smoke`、`npm run pi-e2e`（本地 fake OpenAI SSE）。
 
 ## 架构
 
 ```
-                         Competition API (Mock / Local / Idle / CTFd / URL)
-                               │
-                               ▼
+                    Competition API
+              (Mock / Local / Idle / CTFd / URL)
+                           │
+                           ▼
+                 发现 / 准备 / 便宜 triage
+                           │
+                           ▼
+              Manager Snapshot（可选，默认不调用）
+                           │
+                     Dispatch Plan
+                           │
+                    Policy + Scheduler     ← 唯一启动 Worker 的地方
+           ┌───────────────┼───────────────┐
+           ▼               ▼               ▼
+        Solver A        Solver B        Solver C
+           │               │               │
+       Reflector?      Reflector?      Reflector?
+        （可选，不占 Solver 槽）
+```
+
+硬约束：**一题最多一个 Solver Worker**。Manager 不启动进程、不改 Challenge
+生命周期、不调 Contest API、不交 flag。Reflector 没有工具、没有长期 Session。
+
+```
 ┌────────────────────────────────────────────────────┐
 │                   Control Plane                    │
-│  Poller · ChallengeRegistry · StateMachine         │
-│  EventLog/SQLite · Scheduler · WorkerPool(子进程)   │
-│  HintManager · SubmissionManager · Watchdog        │
-│  RecoveryManager · ModelRegistry · EventBus(SSE)   │
+│  Poller · StateMachine · SQLite · Scheduler        │
+│  WorkerPool · Hint · Submission · Watchdog         │
+│  Recovery · ModelRegistry · EventBus(SSE)          │
 │  VisualReview · Reflection · Manager · StartPolicy │
 └───────────────┬──────────────────┬─────────────────┘
                 ▼                  ▼
-       Solver Worker (fork)   Dashboard / CLI (REST+SSE)
+       Solver Worker (fork)   Dashboard / CLI
                 │
                 ▼
 ┌────────────────────────────────────────────────────┐
-│         AgentRuntimeAdapter (唯一 Agent 接触点)      │
-│   PiAgentRuntimeAdapter (SDK 封装, lazy import)    │
-│   MockAgentRuntime (确定性解题 Agent)               │
+│         AgentRuntimeAdapter（唯一 Agent 接触点）     │
+│   PiAgentRuntimeAdapter · MockAgentRuntime         │
 └───────────────────────┬────────────────────────────┘
                         ▼
 ┌────────────────────────────────────────────────────┐
-│   Tool Runtime: FS Guard · ProcessRunner · Python  │
-│   ZIP/PNG/PCAP · 视觉 / Crypto / Misc 语义工具      │
-│   输出限制(12KB inline) · 实验账本 ALREADY_TESTED    │
-└───────────────────────┬────────────────────────────┘
-                        ▼
-                   Workspace (input/work/artifacts/results/state/agent)
+│  Tool Runtime：CORE ≤15 + discover / help / execute │
+│  FS Guard · ProcessRunner · 实验账本 ALREADY_TESTED  │
+└────────────────────────────────────────────────────┘
 ```
+
+## 工具怎么暴露给模型
+
+工具在本机跑（`NativeTrusted`），不进 Docker。Pi 适配器只把 **15 个 CORE**
+注册成 `defineTool`（工作区读写、inspect、Python、进度 / 交 flag、
+`discover_tools` / `get_tool_help` / `execute_tool`）。其余 **38** 个
+Misc / Crypto / 视觉攻击在 catalog 里，模型必须 `discover → help → execute`。
+`execute_tool` 只能打 DISCOVERABLE 白名单，打不到 CORE。
+
+完整名单由 catalog 生成：`docs/tools/`（`npm run docs:tools`）。
+
+`lll_reduce` 默认走打包的整数 LLL；PATH 上有 `sage`、Python 能
+`import fpylll`、或本机已有 `sagemath/sagemath` 镜像时才改走外部后端。
+Windows 没有官方 fpylll / Sage 轮子，所以默认就是本地实现。
+
+Vision 不是第二条 Agent 循环：Solver 调 `analyze_visual`，本地先做
+QR / 通道 / bitplane；`AUTO` / `VISION_MODEL` 才打视觉模型 HTTP。
+返回 map 形 observations 或把 flag 写在 `reasoning_content` 里时会 salvage。
+
+已经发生过的真实调用：
+
+- 现场 DASCTF PNG（extra IDAT scanlines）：Solver 自己调了
+  `inspect_file` / `extract_archive` / `run_python` / `analyze_visual` 等，
+  单题实验账本 70+ 条。
+- 视觉包 + DNS 的 DeepSeek soak：9/9，Pi，模型自己选工具（含
+  `discover_tools` / `execute_tool`）。
+
+## Manager 和 Reflection
+
+**Manager**（`manager.enabled`，默认 false）
+
+| 模式 | 行为 |
+|---|---|
+| OFF | 不调用模型，调度与 MVP-2 相同 |
+| SHADOW | 出计划并落库，**不拦** Scheduler |
+| ACTIVE | 只有计划允许 `START` 的排队题才能占槽；计划过期或模型失败回退确定性调度 |
+
+人工 Lock / Force Start / Force Hold 永远高于 Manager。
+Dashboard「调度」页、`GET /api/orchestration/status`、`rio manager status` 可看
+模式、健康、槽位和计划历史。
+
+**Reflection**（默认 HYBRID，不占 Solver 槽，最多 `reflection.maxConcurrent` 路）
+
+| 模式 | 行为 |
+|---|---|
+| OFF | 不自动跑；Dashboard「Reflect Now」仍可强制一次 |
+| HEURISTIC | 只用现有启发式，不打模型 |
+| LLM | 打 `reflectionModelId`（否则 primarySolver / primary）；失败记 FAILED |
+| HYBRID | 先打模型，失败再 heuristic，状态 `FALLBACK` |
+
+自动触发：错 Flag、连续 3 次 `NO_SIGNAL`、120s 无进展、重复实验、Solver 请求。
+相同状态 fingerprint 不重复跑。结果注入**同一** Solver；worker 不在线则下次
+start / resume 再送。
+
+模型分配槽：主解题 / 反思 / 视觉 / 分诊 / **Manager**（Dashboard「模型」页）。
+
+## 关键机制
+
+- **状态机**：生命周期只能经 `StateMachine.transition()`，与事件同一事务。
+- **Worker**：每题一个 fork 子进程。SDK 崩溃不影响控制平面。
+- **Lease + 恢复**：心跳 15s / TTL 45s。启动时清过期 lease、ACTIVE 回排队、
+  重驱 SUBMITTING（先查提交历史，绝不盲目重交）。进行中的 Reflection 标 FAILED。
+- **提交**：`challenge_id + flag_hash` 唯一；同 Flag 不重交；3 次 Wrong 后
+  `AUTO_SUBMIT_DISABLED`。CTFd / Mock 有裁判才自动交；URL / idle 停在 VERIFIED。
+- **Hint**：`startChallenge() + 10min → ELIGIBLE`，默认 stalled 才取。
+- **限速**：SUBMIT > HINT > DETAIL > POLL > DOWNLOAD，大附件不挡提交。
+- **Secret**：API Key 走 AES-256-GCM（`CTF_RUNTIME_MASTER_KEY`），不进 SQLite / 日志 / prompt。
+- **视觉预算**：每题最多 40 次 Vision HTTP。提示词要求先 `LOCAL_ONLY`。
+
+## 配置
+
+`config/runtime.yaml` 经 Zod 校验，非法值拒启动。常用块：
+
+```yaml
+contest:      # none | mock | local | ctfd
+challenge:    # startPolicy
+workers:      # solverConcurrency / triageConcurrency
+agent:        # allowMockFallback
+manager:      # enabled / mode / planTtlMs / maxCandidates
+reflection:   # mode / maxConcurrent / cooldownMs
+visual:       # maxVisionCallsPerChallenge
+server:       # 127.0.0.1:3000；非 loopback 需 RIO_API_TOKEN
+```
+
+Provider 在 Dashboard「模型」添加（两阶段连通性测试）。运行时按
+「有没有可用 Provider + Model」选择 Pi 或 Mock；`RIO_AGENT_RUNTIME=pi|mock` 可强制。
+
+Pi 的 `agentDir` 指到 `data/pi`，不读用户 `~/.pi/agent`。
 
 ## 目录
 
 ```
-apps/server         Fastify API + SSE + 控制平面 + solver worker 子进程
-apps/cli            rio CLI（status / challenges / manager / reflection / solve …）
-apps/dashboard      React/Vite 监控台（含调度、视觉复核、评测页）
-packages/domain         纯类型 + Zod schema（无任何框架依赖）
-packages/database       node:sqlite 仓储层（Repository 模式）
-packages/contest        ContestAdapter · MockContest · Poller · RateLimiter · DiskManager · fixtures
-packages/scheduler      优先级评分 · 资源信号量
-packages/agent-runtime  AgentRuntimeAdapter · MockAgent · Pi 适配器（隔离层）
-packages/tool-runtime   Workspace/FS Guard · ProcessRunner · 工具注册表
-packages/visual-runtime 概览 / QR / 变换 / bitplane / 频谱图 / GIF / Vision HTTP
-packages/misc-runtime   PCAP / 字符串 / 签名 / 拖尾数据 / 实验账本
-packages/crypto-runtime RSA / CRT / Håstad / LCG / XOR / 本地 LLL
-packages/solver         System Prompts · 确定性 Triage
-packages/eval           注册题 runTool 求解 + benchmark
-docker/                 可选 Sage 镜像（工具默认本机 NativeTrusted，不强制 Docker）
-agent/prompts/          Solver/Triage/Reflection 提示词原文
-config/runtime.yaml     运行配置（Zod 启动校验）
-scripts/llm-soak-mock.ts  真模型 soak（只打已存 Key，不打印明文）
+apps/server          Fastify API + SSE + 控制平面 + solver worker
+apps/cli             rio CLI
+apps/dashboard       总览 / 题目 / 详情 / 调度 / 模型 / 视觉复核 / 评测
+packages/domain      类型 + Zod（无框架依赖）
+packages/database    node:sqlite 仓储（含 orchestration / reflection_runs）
+packages/contest     ContestAdapter · Mock · CTFd · Poller · fixtures
+packages/scheduler   优先级 · 信号量
+packages/agent-runtime   Adapter · Mock · Pi 0.84
+packages/tool-runtime    Catalog（CORE + DISCOVERABLE）· FS Guard · runTool
+packages/visual-runtime  QR / 变换 / bitplane / 频谱图 / GIF / Vision HTTP
+packages/misc-runtime    PCAP / 字符串 / 实验账本
+packages/crypto-runtime  RSA / CRT / Håstad / LCG / XOR / 本地 LLL
+packages/solver      System prompts · 确定性 Triage
+packages/eval        注册题 runTool 求解
+docs/deploy.md       部署：依赖、不会自动下载什么、赛场清单
+docs/tools/          由 catalog 生成的工具说明
+config/runtime.yaml  运行配置
+scripts/llm-soak-mock.ts   真模型 soak（不打印 Key）
 ```
 
-## 模型怎么调工具
+存储用 Node 内置 `node:sqlite`，不用 better-sqlite3。Dashboard 是 Vite + React +
+现有 CSS，不要加 Tailwind / shadcn。
 
-工具在**本机**跑（`NativeTrusted`），不进 Docker。`docker/` 里的 Sage
-镜像是可选后端：本机 PATH 上有 `sage`、Python 能 `import fpylll`、或
-Docker 里已经有 `sagemath/sagemath` 时，`lll_reduce` 才会去用；否则走
-打包的整数 LLL。Windows 上没有官方 fpylll / Sage 轮子，所以默认就是本地实现。
+## 里程碑
 
-Solver 不会自己去敲文件系统。Pi 适配器只把 CORE 工具（约 15 个，含
-`discover_tools` / `get_tool_help` / `execute_tool`）注册成 `defineTool`；
-隐藏的 Misc/Crypto 工具经 catalog 白名单由 `execute_tool` 调用 `runTool`，结果写回
-workspace `results/tool-NNNN.txt` 和实验账本。Mock Agent 走同一条
-`runTool`，所以演示赛和真模型赛的工具语义一致。
+### 已 RELEASED
 
-Vision 不是第二条 Agent 循环：Solver 调 `analyze_visual`，VisualRuntime
-本地先做 QR / 通道 / bitplane；`AUTO` / `VISION_MODEL` 才额外打视觉模型
-HTTP。视觉模型返回 map 形 observations 或把 flag 写在 `reasoning_content`
-里时，解析器会 salvage，不再要求必须是数组 JSON。
+**MVP-1**：接赛、状态机、Worker/Lease、Mock/Pi Adapter、基础 Misc/Crypto 工具、
+单题模式、提交安全、Dashboard/CLI、崩溃恢复。
 
-已经发生过的真实调用（不是纸面设计）：
+**MVP-1.1**：真 Pi Session Resume、Recovery 矩阵、UNKNOWN 提交不自动重交、
+Hint 不误取、大文件 bounded IO、URL 单题 SSRF 防护、Provider DEGRADED/DOWN、
+非 loopback 需 API token、CI。
 
-- 现场 DASCTF PNG（extra IDAT scanlines）：Solver 自己调了
-  `inspect_file` / `extract_archive` / `run_python` / `analyze_visual` /
-  `write_work_file` / `extract_visible_text` 等，单题实验账本 70+ 条。
-- 视觉包 + DNS 的 DeepSeek soak：9/9，Pi runtime，模型自己选工具。
+### 已落地、未宣布 Feature Complete
 
-## 关键机制
+**MVP-2**：VisualRuntime、视觉复核、语义工具 + 实验账本、Hypothesis / Artifact DAG、
+22 题 Mock 目录、eval 走真 `runTool`、视觉包 + DNS 真模型 9/9。
 
-- **状态机**：所有 Challenge 生命周期转换必须经过 `StateMachine.transition()`，
-  转换 + 事件写入同一 SQLite 事务；禁止散落的 `challenge.status = ...`。
-- **Worker 隔离**：每个 Solver 是独立 fork 的子进程（`tsx` 启动），Agent SDK 崩溃
-  不影响控制平面；Session 持久化在磁盘，Worker 只是临时执行资源（Challenge → Session → Worker）。
-- **Lease + 恢复**：心跳 15s / TTL 45s；启动时 `RecoveryManager` 清理过期 lease、
-  重新入队 ACTIVE、重驱 SUBMITTING（先查 submission 历史，绝不盲目重交）。
-- **提交安全**：`challenge_id + flag_hash` 唯一约束；同 Flag 永不重复提交；
-  本地验证（格式/去重/example 检测/证据）；3 次 Wrong 后 AUTO_SUBMIT_DISABLED。
-- **自动提交**：`autoSubmit` + `confidenceThreshold`（默认 0.85）。
-  CTFd / Mock 有官方裁判，达标就交；URL / idle 没有官方裁判，候选停在
-  VERIFIED，等人在 Dashboard 点接受。视觉复核里长得像 flag 的回答会以
-  0.95 置信度再走一遍候选通道。
-- **Hint**：`startChallenge() + 10min → ELIGIBLE`，策略（stalled 才取）→ FETCHED → 注入 session。
-- **限速优先级**：SUBMIT(0) > HINT(1) > DETAIL(2) > POLL(3) > DOWNLOAD(4)，大附件下载永不阻塞提交。
-- **Secret**：API Key 走 AES-256-GCM 加密文件（`CTF_RUNTIME_MASTER_KEY`），SQLite/日志/prompt 中绝不出现明文。
-- **视觉预算**：默认每题最多 40 次 Vision HTTP（`visual.maxVisionCallsPerChallenge`）。
-  提示词要求先 `LOCAL_ONLY`，同一张图不要反复打 Vision。
-- **Mock Agent**：确定性解题 Agent，走与真实 LLM 完全相同的工具链。
-  可解全部 21 道可解 mock 题。有 Provider 时走 Pi，接口不变。
+**MVP-2.5**：Pi 只注册 CORE 15 + discover/help/execute；Manager OFF/SHADOW/ACTIVE
+（默认 OFF）；Reflection OFF/HEURISTIC/LLM/HYBRID（默认 HYBRID）。
+没有 Challenger、没有一题多 Solver、Manager 挂了不会停比赛。
 
-## 与规格文档的差异（如实记录）
+### 还没当门槛关掉
 
-1. **SQLite 驱动**：规格建议 better-sqlite3 + Drizzle ORM；本机无 VS C++ 工具链，
-   better-sqlite3 编译失败，改用 Node 24 内置 `node:sqlite`（零原生依赖）。
-   Repository 模式（规格硬性要求）不变，未来可无痛换库。
-2. **Pi SDK（重要更新）**：`@earendil-works/pi-coding-agent`（npm 官方 registry
-   有 0.84.1，维护者 mitsuhiko/badlogic，homepage: github.com/earendil-works/pi-mono）。
-   早期一次 `npm install` 因 better-sqlite3 原生编译失败整体回滚，导致包目录为空，
-   并非"空包"。现已安装并**用真实类型完整对接**：
-   - `PiAgentRuntimeAdapter` 用真实 SDK API 重写（`createAgentSession` /
-     `DefaultResourceLoader.systemPromptOverride` / `defineTool`+typebox /
-     `ModelRuntime.create({modelsPath, authPath})` / `setRuntimeApiKey` /
-     `SessionManager.create/open`），`pi-sdk.d.ts` stub 已删除。
-   - Provider 映射：注册表（DB）→ `data/pi/models.json` + `setRuntimeApiKey`
-     运行时注入 → API Key 不落明文（§56）。
-   - 工具 schema 对模型宽容（`evidence` 等可选字段 optional），模型省略字段
-     不再导致校验失败。
-   - 已用**本地 fake OpenAI 端点（SSE）全链路验证**：2 回合真实请求、
-     工具 schema 传递、systemPrompt 注入、工具执行 → `candidate` 事件 → 模型
-     收到工具结果。`npm run pi-smoke`（单 session 全链路）和
-     `npm run pi-e2e`（完整系统：worker 子进程 → 真实 SDK → 提交 → WRONG 反馈）
-     可随时复跑。
-3. **Dashboard/UI**：Vite + React + 现有 CSS。不要引入 Tailwind / shadcn。
-   Overview / Challenges / Detail / 调度 / Providers / 视觉复核 / 评测页已落地。
-
-## 使用真实 LLM（Pi 运行时）
-
-```bash
-# 1. 配置 Provider（Dashboard → Providers 或 API/CLI）
-#    Add Provider: baseUrl + protocol + API key（加密落盘，两阶段测试验证）
-
-# 2. 用 Pi 运行时启动
-RIO_AGENT_RUNTIME=pi npm run dev
-
-# 3. 无 Provider 时自动回退 MockAgent（同一工具链，闭环仍可跑通）
-#    正式比赛：agent.allowMockFallback: false
-```
-
-注意：Pi 会读取 `~/.pi/agent` 下的全局扩展/skills 配置；本系统通过
-`agentDir` 指向 `data/pi` 隔离，避免污染用户全局配置。
-
-## 配置
-
-`config/runtime.yaml` 全部字段 Zod 校验，非法配置直接拒绝启动。
-API Key 通过 Dashboard「Add Provider」或 CLI 配置，加密落盘。
-
-## 里程碑状态
-
-### MVP-1（已 RELEASED）
-
-- [x] Windows 原生启动 · SQLite 自动迁移 · 配置校验 · SecretStore
-- [x] Mock Contest · 轮询 · 动态放题 · 题目更新 · Start · Hint · Submit · 限速 · 重试
-- [x] Workspace · 流式下载 · SHA256 · 磁盘预算 · Artifact 记录
-- [x] 状态机 · 事件日志 · Scheduler · Worker lease · 崩溃恢复
-- [x] Agent Adapter · 持久化/恢复 Session · 模型切换 · Progress/Candidate/Reflection/Handoff
-- [x] Misc 基础套件 · Crypto 基础套件 · 单题模式（rio solve）
-- [x] 本地验证 · 去重 · Cooldown · Wrong 反馈 · Max wrong · Correct→SOLVED
-- [x] Dashboard · CLI · Provider 配置/测试 · 健康监控 · 结构化日志
-- [x] 服务器崩溃恢复 · Worker 崩溃恢复 · API 暂时性失败恢复
-
-### MVP-1.1（运行时加固，已完成）
-
-- [x] 真 Pi Session Resume（DB 记录 `pi_session_file`，worker 恢复原上下文）
-- [x] Crash Recovery 矩阵（PREPARING / ACTIVE / VERIFYING / SUBMITTING）
-- [x] UNKNOWN 提交永不自动重交
-- [x] Hint 不误取：stall 判定 + 失败 backoff + unsupported 不打 API
-- [x] 大文件无 OOM：附件名消毒、bounded IO、ZIP/GZIP/PCAP 限制
-- [x] URL 单题接入：8MB HTML / 128MB 附件 / 30s / 私网 SSRF 防护 / 有限跳转
-- [x] Provider 故障可见：3 次失败 DEGRADED、5 次 DOWN，`/api/health` 暴露
-- [x] 压测实跑：30 题 burst + 256MB 大文件（heapDelta 远小于文件体积）
-- [x] 非 loopback 监听需 `RIO_API_TOKEN` · SQLite 关停幂等 · CI
-- [x] 验收：typecheck / unit+integration / E2E / pi-smoke / pi-e2e 全部通过
-
-> 1.1 的六个退出指标（真 Pi Resume、Recovery 矩阵、UNKNOWN 不重交、Hint 不误取、
-> 大文件无 OOM、30 题 burst + 真实模型）全部达成，正式标记 RELEASED。
-
-### MVP-2（进行中，未宣布 Feature Complete）
-
-已落地、且有测试或真模型证据的部分：
-
-- [x] VisualRuntime：概览 / QR / 变换 / bitplane / 频谱图 / GIF 帧 / Vision HTTP
-- [x] Vision 解析 2.0.2：数组或 map 形 observations；从 prose / `reasoning_content` salvage `flag{…}`
-- [x] 视觉复核：像 flag 的人工回答会以 0.95 置信度进入候选
-- [x] 工具默认本机执行（NativeTrusted）。`lll_reduce` 自带整数 LLL；本机/Docker 有 Sage 或 fpylll 时才改走外部后端
-- [x] Misc / Crypto 语义工具 + 实验账本（`ALREADY_TESTED` + force）
-- [x] Hypothesis 落库 · Artifact `parentArtifactId` DAG · HUMAN VisualEvidence 持久化
-- [x] Mock 目录 22（21 可解 + WEB）；eval / Mock 策略走真实 `runTool`
-- [x] 视觉包 + DNS 真模型 soak 9/9（DeepSeek / Pi）
-- [x] 工具渐进披露：Pi 只注册 CORE（≤15）+ `discover_tools` / `get_tool_help` / `execute_tool`
-- [x] Manager 派发（OFF / SHADOW / ACTIVE，默认 OFF）+ Reflection 四模式（默认 HYBRID）
-
-还没当作门槛关闭的部分：
-
-- [ ] 不宣布 Feature Complete（CryptoState 表、Triage/Reflection 真模型 soak 等仍缺）
-- [ ] 频谱图藏字、MT19937 等更难 fixture
-- [ ] 整本 21 题真模型 soak（目前 Mock E2E 21/22，真模型只 soak 了 9 道新题）
+- 整本 21 题真模型 soak（Mock E2E 是 21/22）
+- Triage / Reflection 独立真模型 soak
+- 频谱图藏字、MT19937 等更难 fixture
+- CryptoState 表、Manager 自动 PARK / 抢占（`allowAutoPark` 保持 false）
