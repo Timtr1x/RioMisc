@@ -230,6 +230,33 @@ function toolParameterSchema(Type: TBox, name: string) {
         strategy: Type.Optional(Type.Union([Type.Literal("UNIFORM"), Type.Literal("SCENE_CHANGE"), Type.Literal("ALL_IF_SMALL")])),
         maxFrames: Type.Optional(Type.Number()),
       });
+    case "render_transform":
+      return Type.Object({
+        path: Type.String(),
+        op: Type.Union([
+          Type.Literal("grayscale"),
+          Type.Literal("invert"),
+          Type.Literal("autocontrast"),
+          Type.Literal("threshold"),
+          Type.Literal("rotate90"),
+          Type.Literal("rotate180"),
+          Type.Literal("rotate270"),
+        ]),
+      });
+    case "extract_bitplane":
+      return Type.Object({
+        path: Type.String(),
+        channel: Type.Union([Type.Number(), Type.String()]),
+        bit: Type.Number(),
+      });
+    case "extract_visible_text":
+      return Type.Object({ path: Type.String() });
+    case "record_hypothesis":
+      return Type.Object({
+        description: Type.String(),
+        confidence: Type.Optional(Type.Number()),
+        status: Type.Optional(Type.String()),
+      });
     default:
       return Type.Object({});
   }

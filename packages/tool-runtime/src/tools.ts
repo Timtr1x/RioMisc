@@ -24,6 +24,8 @@ import {
   specialistParamsSchema,
   hypothesisParamsSchema,
   cryptoTextSchema,
+  imageTransformSchema,
+  extractBitplaneSchema,
 } from "@rio/domain";
 import { WorkspaceManager, type WorkspaceLayout } from "./workspace.js";
 import { ProcessRunner, type ProcessResult, DEFAULT_TIMEOUTS } from "./process.js";
@@ -52,6 +54,9 @@ import {
   parseCryptoValuesTool,
   analyzeRsaTool,
   rsaAttackTool,
+  renderTransformTool,
+  extractBitplaneTool,
+  extractVisibleTextTool,
 } from "./semantic-tools.js";
 
 export const MAX_INLINE_CHARS = 12_000;
@@ -272,7 +277,7 @@ export async function extractArchive(ctx: ToolContext, params: unknown): Promise
     const head = readFileWindow(abs, 0, 8);
     if (isZip(head)) {
       const files = await extractZipFromFile(abs, destAbs, { maxDepth: p.data.maxDepth ?? 8 });
-      const refs = files.slice(0, 50).map((f) => fileArtifact(ctx, join(destAbs, f.path)));
+      const refs = files.slice(0, 50).map((f) => ctx.recordArtifact("extract_archive", join(destAbs, f.path), p.data.path) ?? fileArtifact(ctx, join(destAbs, f.path)));
       return ok(
         `extracted ${files.length} entries to ${destRel}${files.some((f) => f.nestedArchive) ? " (nested archives present — extract again)" : ""}`,
         { dest: destRel, count: files.length, nested: files.filter((f) => f.nestedArchive).map((f) => f.path) },
@@ -283,7 +288,7 @@ export async function extractArchive(ctx: ToolContext, params: unknown): Promise
     if (isGzip(head)) {
       const outPath = join(destAbs, (p.data.path.split(/[\\/]/).pop() ?? "file").replace(/\.gz$/i, "") || "gunzipped.bin");
       await extractGzipFile(abs, outPath, 2 * 1024 ** 3);
-      const ref = ctx.recordArtifact("extract_archive", outPath) ?? fileArtifact(ctx, outPath);
+      const ref = ctx.recordArtifact("extract_archive", outPath, p.data.path) ?? fileArtifact(ctx, outPath);
       return ok(`gunzipped to ${relative(ctx.workspace.root, outPath).replaceAll("\\", "/")}`, { dest: destRel }, Date.now() - started, { artifacts: [ref] });
     }
     return fail("UNSUPPORTED_ARCHIVE", `not a supported archive: ${detectMagic(head)}`, Date.now() - started);
@@ -457,7 +462,7 @@ export async function analyzeVisualTool(ctx: ToolContext, params: unknown): Prom
     );
     const refs: ArtifactRef[] = [];
     for (const d of result.derived) {
-      refs.push(ctx.recordArtifact(d.operation, d.absPath) ?? fileArtifact(ctx, d.absPath));
+      refs.push(ctx.recordArtifact(d.operation, d.absPath, p.data.path) ?? fileArtifact(ctx, d.absPath));
     }
     const evidenceJson = join(artifactDir, `${result.evidence.id}.json`);
     if (existsSync(evidenceJson)) {
@@ -516,7 +521,7 @@ export function renderSpectrogramTool(ctx: ToolContext, params: unknown): Promis
       mode: p.data.mode ?? "AUTO",
       maxDurationSeconds: p.data.maxDurationSeconds,
     });
-    const ref = ctx.recordArtifact("render_spectrogram", destAbs) ?? fileArtifact(ctx, destAbs);
+    const ref = ctx.recordArtifact("render_spectrogram", destAbs, p.data.path) ?? fileArtifact(ctx, destAbs);
     return Promise.resolve(
       ok(
         `spectrogram ${spec.width}x${spec.height} from ${spec.audio.durationSec.toFixed(2)}s ${spec.audio.sampleRate}Hz peak=${spec.audio.peak.toFixed(3)} rms=${spec.audio.rms.toFixed(3)}`,
@@ -565,7 +570,7 @@ export function extractKeyframesTool(ctx: ToolContext, params: unknown): Promise
     const images = frames.map((f) => decodeImageFile(f.absPath));
     const sheetAbs = ctx.safeResolve("artifacts/visual/keyframes-contact-sheet.png");
     composeContactSheet(images.slice(0, maxFrames), sheetAbs);
-    const refs = [ctx.recordArtifact("extract_keyframes", sheetAbs) ?? fileArtifact(ctx, sheetAbs)];
+    const refs = [ctx.recordArtifact("extract_keyframes", sheetAbs, p.data.path) ?? fileArtifact(ctx, sheetAbs)];
     return Promise.resolve(
       ok(
         `extracted ${frames.length} keyframes → artifacts/visual/keyframes-contact-sheet.png`,
@@ -628,10 +633,24 @@ export const TOOL_IMPLS: ToolImpl[] = [
   { name: "xor_bytes", description: "XOR two byte strings (hex + key).", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("xor_bytes", c, p) },
   { name: "xor_known_plaintext", description: "Recover keystream from known plaintext.", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("xor_known_plaintext", c, p) },
   { name: "lll_reduce", description: "LLL (requires Sage backend).", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("lll_reduce", c, p) },
+  { name: "rsa_hastad", description: "Håstad broadcast attack (same e, multiple n,c).", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("rsa_hastad", c, p) },
+  { name: "solve_linear_congruence", description: "Solve ax ≡ b (mod m).", schema: cryptoTextSchema, run: (c, p) => rsaAttackTool("solve_linear_congruence", c, p) },
+  { name: "render_transform", description: "grayscale / invert / autocontrast / threshold / rotate90|180|270.", schema: imageTransformSchema, run: renderTransformTool },
+  { name: "extract_bitplane", description: "Extract one channel bit plane to a PNG.", schema: extractBitplaneSchema, run: extractBitplaneTool },
+  { name: "extract_visible_text", description: "OCR visible text. Returns BACKEND_UNAVAILABLE if no OCR engine.", schema: pathOnlySchema, run: extractVisibleTextTool },
 ];
 
 export function toolNames(): string[] {
   return TOOL_IMPLS.map((t) => t.name);
+}
+
+export function fingerprintArtifact(ctx: ToolContext, relPath?: string): string {
+  if (!relPath) return "none";
+  try {
+    return sha256File(ctx.safeResolve(relPath));
+  } catch {
+    return `path:${relPath}`;
+  }
 }
 
 export async function runTool(ctx: ToolContext, name: string, params: unknown): Promise<ToolResult> {
@@ -639,10 +658,19 @@ export async function runTool(ctx: ToolContext, name: string, params: unknown): 
   if (!impl) return { ok: false, summary: `unknown tool ${name}`, durationMs: 0, error: { code: "UNKNOWN_TOOL", message: name } };
   const rec = params as { path?: string; force?: boolean } | null;
   if (ctx.experiments && !LEDGER_SKIP_TOOLS.has(name) && rec?.force !== true) {
-    const sha = rec?.path ? "path:" + rec.path : "none";
+    const sha = fingerprintArtifact(ctx, rec?.path);
     const key = experimentKey(sha, name, params);
     const hit = ctx.experiments.lookup(key);
     if (hit) {
+      ctx.emit("experiment", {
+        challengeId: ctx.challengeId,
+        key,
+        tool: name,
+        canonicalArgs: canonicalizeArgs(params),
+        summary: hit.summary,
+        outcome: "ALREADY_TESTED",
+        artifactSha256: sha,
+      });
       return {
         ok: true,
         summary: `ALREADY_TESTED: ${hit.summary}`,
@@ -654,7 +682,7 @@ export async function runTool(ctx: ToolContext, name: string, params: unknown): 
   }
   const result = await impl.run(ctx, params, { toolIndex: 0, startedAt: Date.now() });
   if (ctx.experiments && !LEDGER_SKIP_TOOLS.has(name)) {
-    const sha = rec?.path ? "path:" + rec.path : "none";
+    const sha = fingerprintArtifact(ctx, rec?.path);
     const key = experimentKey(sha, name, params);
     const outcome = !result.ok ? "FAILED" : /no trailing|failed|none/i.test(result.summary) ? "NO_SIGNAL" : "NEW_EVIDENCE";
     ctx.experiments.record({ key, tool: name, args: params, summary: result.summary, outcome, artifactSha256: sha });

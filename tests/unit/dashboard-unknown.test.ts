@@ -36,6 +36,8 @@ describe("dashboard UNKNOWN reconciliation", () => {
     expect(src).toContain("评测");
     expect(src).toContain("实验账本");
     expect(src).toContain("跑全部评测");
+    expect(src).toContain("Solve Rate");
+    expect(src).toContain("产物图");
   });
 });
 

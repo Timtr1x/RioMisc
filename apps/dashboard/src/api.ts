@@ -104,11 +104,11 @@ export interface ChallengeDetail {
   wallClockSolveMs: number;
   blockedReason: string | null;
   attachments: { id: string; name: string; sizeBytes: number | null; downloadStatus: string }[];
-  artifacts: { id: string; path: string; operation: string; size: number }[];
+  artifacts: { id: string; path: string; operation: string; size: number; parentArtifactId?: string | null }[];
   visualEvidence?: { id: string; summary: string; analyzer: string; confidence: number; observations: { type: string; value?: string; description: string }[]; createdAt: number }[];
-  hypotheses?: { id: string; description: string; status: string; confidence: number }[];
-  experiments?: { id: string; tool: string; outcome: string; resultSummary: string }[];
-  specialists?: { id: string; kind: string; conclusion: string; confidence: number }[];
+  hypotheses?: { id: string; description: string; status: string; confidence: number; evidenceForJson?: string; evidenceAgainstJson?: string }[];
+  experiments?: { id: string; tool: string; outcome: string; resultSummary: string; canonicalArgs?: string }[];
+  specialists?: { id: string; kind: string; conclusion: string; confidence: number; recommendedActionsJson?: string }[];
   progress: { id: string; summary: string; confidence: number; stalled: number; createdAt: number }[];
   candidates: { id: string; value: string; confidence: number; status: string; reason: string; createdAt: number }[];
   submissions: { id: string; flagValue: string; status: string; submittedAt: number | null; createdAt: number }[];

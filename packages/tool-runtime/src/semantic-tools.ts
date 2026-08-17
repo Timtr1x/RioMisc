@@ -6,6 +6,8 @@ import {
   cryptoTextSchema,
   specialistParamsSchema,
   hypothesisParamsSchema,
+  imageTransformSchema,
+  extractBitplaneSchema,
 } from "@rio/domain";
 import {
   scanTrailingData,
@@ -31,6 +33,7 @@ import {
   rsaFermat,
   rsaWiener,
   rsaCommonModulus,
+  rsaHastad,
   xorBytes,
   xorKnownPlaintext,
   frequencyAnalysis,
@@ -39,6 +42,7 @@ import {
   aesInspect,
   advancedMathUnavailable,
 } from "@rio/crypto-runtime";
+import { decodeImageFile, writeTransformedPng, extractBitplane, encodePng } from "@rio/visual-runtime";
 import type { ToolContext, ToolResult } from "./tools.js";
 
 function fail(code: string, message: string, durationMs: number): ToolResult {
@@ -115,7 +119,7 @@ export async function carveFilesTool(ctx: ToolContext, params: unknown): Promise
   const dest = ctx.safeResolve(destRel);
   mkdirSync(join(dest, ".."), { recursive: true });
   writeFileSync(dest, slice);
-  const ref = ctx.recordArtifact("carve_files", dest);
+  const ref = ctx.recordArtifact("carve_files", dest, p.data.path);
   return ok(`carved ${slice.length}B → ${destRel}`, { path: destRel, size: slice.length }, Date.now() - t0, { artifacts: ref ? [ref] : [] });
 }
 
@@ -133,20 +137,63 @@ export async function recordHypothesisTool(ctx: ToolContext, params: unknown): P
   const t0 = Date.now();
   const p = hypothesisParamsSchema.safeParse(params);
   if (!p.success) return fail("VALIDATION", p.error.issues[0]?.message ?? "bad", 0);
-  ctx.emit("progress", {
+  ctx.emit("hypothesis", {
     challengeId: ctx.challengeId,
     sessionId: ctx.sessionId,
-    summary: `hypothesis: ${p.data.description}`,
-    hypotheses: [p.data.description],
-    confirmedFacts: [],
-    rejectedHypotheses: [],
-    nextActions: [],
+    description: p.data.description,
     confidence: p.data.confidence ?? 0.4,
-    progress: "MINOR",
-    stalled: false,
-    hypothesisStatus: p.data.status ?? "CANDIDATE",
+    status: p.data.status ?? "CANDIDATE",
+    evidenceFor: p.data.evidenceFor ?? [],
+    evidenceAgainst: p.data.evidenceAgainst ?? [],
+    proposedTests: p.data.proposedTests ?? [],
   });
   return ok("hypothesis recorded", p.data, Date.now() - t0);
+}
+
+export async function renderTransformTool(ctx: ToolContext, params: unknown): Promise<ToolResult> {
+  const t0 = Date.now();
+  const p = imageTransformSchema.safeParse(params);
+  if (!p.success) return fail("VALIDATION", p.error.issues[0]?.message ?? "bad", 0);
+  const abs = ctx.safeResolve(p.data.path);
+  const img = decodeImageFile(abs);
+  const destRel = `artifacts/visual/${p.data.op}.png`;
+  const dest = ctx.safeResolve(destRel);
+  writeTransformedPng(img, p.data.op, dest);
+  const ref = ctx.recordArtifact(`render_${p.data.op}`, dest, p.data.path);
+  return ok(`wrote ${destRel}`, { path: destRel, op: p.data.op }, Date.now() - t0, { artifacts: ref ? [ref] : [] });
+}
+
+export async function extractBitplaneTool(ctx: ToolContext, params: unknown): Promise<ToolResult> {
+  const t0 = Date.now();
+  const p = extractBitplaneSchema.safeParse(params);
+  if (!p.success) return fail("VALIDATION", p.error.issues[0]?.message ?? "bad", 0);
+  const ch = typeof p.data.channel === "number" ? p.data.channel : ({ R: 0, G: 1, B: 2, A: 3 } as const)[p.data.channel];
+  const img = decodeImageFile(ctx.safeResolve(p.data.path));
+  const plane = extractBitplane(img, ch as 0 | 1 | 2 | 3, p.data.bit);
+  const destRel = `artifacts/visual/bitplane-${"RGBA"[ch]}${p.data.bit}.png`;
+  const dest = ctx.safeResolve(destRel);
+  mkdirSync(join(dest, ".."), { recursive: true });
+  writeFileSync(dest, encodePng(plane));
+  const ref = ctx.recordArtifact("extract_bitplane", dest, p.data.path);
+  return ok(`bitplane ${"RGBA"[ch]}${p.data.bit}`, { path: destRel }, Date.now() - t0, { artifacts: ref ? [ref] : [] });
+}
+
+export async function extractVisibleTextTool(ctx: ToolContext, params: unknown): Promise<ToolResult> {
+  const t0 = Date.now();
+  const p = pathOnlySchema.safeParse(params);
+  if (!p.success) return fail("VALIDATION", p.error.issues[0]?.message ?? "bad", 0);
+  try {
+    ctx.safeResolve(p.data.path);
+  } catch (e) {
+    return fail("FS", String(e), Date.now() - t0);
+  }
+  return {
+    ok: false,
+    summary: "OCR backend unavailable",
+    data: { code: "BACKEND_UNAVAILABLE", backend: "ocr" },
+    durationMs: Date.now() - t0,
+    error: { code: "BACKEND_UNAVAILABLE", message: "extract_visible_text requires an OCR backend (tesseract) — not bundled" },
+  };
 }
 
 export async function parseCryptoValuesTool(ctx: ToolContext, params: unknown): Promise<ToolResult> {
@@ -187,6 +234,24 @@ export async function rsaAttackTool(name: string, ctx: ToolContext, params: unkn
     if (name === "rsa_wiener") {
       const rec = rsaWiener(asBig(v, "n")!, asBig(v, "e")!);
       return ok(rec ? `d=${rec}` : "wiener failed", { d: rec?.toString() ?? null }, Date.now() - t0);
+    }
+    if (name === "rsa_hastad") {
+      const pairs: { c: bigint; n: bigint }[] = [];
+      if (v.c1 && v.n1) pairs.push({ c: parseBig(v.c1), n: parseBig(v.n1) });
+      if (v.c2 && v.n2) pairs.push({ c: parseBig(v.c2), n: parseBig(v.n2) });
+      if (v.c3 && v.n3) pairs.push({ c: parseBig(v.c3), n: parseBig(v.n3) });
+      const rec = rsaHastad(asBig(v, "e") ?? 3n, pairs);
+      return ok(rec ? `m=${rec}` : "hastad failed", { m: rec?.toString() ?? null }, Date.now() - t0);
+    }
+    if (name === "solve_linear_congruence") {
+      const a = parseBig(v.a ?? "0");
+      const b = parseBig(v.b ?? "0");
+      const m = parseBig(v.m ?? "0");
+      const g = gcd(a, m);
+      if (b % g !== 0n) return ok("no solution", { solutions: [] }, Date.now() - t0);
+      const inv = modInverse(a / g, m / g);
+      const x0 = (((inv! * (b / g)) % (m / g)) + (m / g)) % (m / g);
+      return ok(`x=${x0} (mod ${m / g})`, { x: x0.toString(), modulus: (m / g).toString() }, Date.now() - t0);
     }
     if (name === "rsa_common_modulus") {
       const rec = rsaCommonModulus(asBig(v, "n")!, asBig(v, "e1")!, asBig(v, "c1")!, asBig(v, "e2")!, asBig(v, "c2")!);

@@ -125,6 +125,16 @@ export class ArtifactRepository {
     );
   }
 
+  findByPath(challengeId: string, path: string): Artifact | null {
+    const norm = path.replaceAll("\\", "/");
+    const rows = this.listByChallenge(challengeId);
+    return (
+      rows.find((a) => a.path.replaceAll("\\", "/") === norm) ??
+      rows.find((a) => a.path.replaceAll("\\", "/").endsWith(norm) || norm.endsWith(a.path.replaceAll("\\", "/"))) ??
+      null
+    );
+  }
+
   delete(id: string): void {
     this.db.run("DELETE FROM artifacts WHERE id = ?", id);
   }

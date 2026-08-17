@@ -99,6 +99,38 @@ function shortPath(path: string): string {
   return parts.length <= 3 ? parts.join("/") : parts.slice(-3).join("/");
 }
 
+function parseJsonList(raw?: string): string[] {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw) as unknown;
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function artifactTree(arts: { id: string; path: string; operation: string; parentArtifactId?: string | null }[]): string[] {
+  const byParent = new Map<string | null, typeof arts>();
+  for (const a of arts) {
+    const k = a.parentArtifactId ?? null;
+    const list = byParent.get(k) ?? [];
+    list.push(a);
+    byParent.set(k, list);
+  }
+  const lines: string[] = [];
+  const walk = (parent: string | null, prefix: string) => {
+    for (const a of byParent.get(parent) ?? []) {
+      lines.push(`${prefix}${a.operation} → ${shortPath(a.path)}`);
+      walk(a.id, `${prefix}  `);
+    }
+  };
+  walk(null, "");
+  if (lines.length === 0) {
+    return arts.map((a) => `${a.operation} → ${shortPath(a.path)}`);
+  }
+  return lines;
+}
+
 function contestLabel(status: Status | null): string {
   if (!status) return "…";
   const c = status.contest;
@@ -871,21 +903,30 @@ function Detail({
           <h3 style={{ marginTop: 10 }}>假设</h3>
           {(d.hypotheses ?? []).length === 0 && <div className="muted">无</div>}
           {(d.hypotheses ?? []).map((h) => (
-            <div key={h.id} className="muted">{h.status} · {h.description}</div>
+            <div key={h.id} style={{ marginBottom: 6 }}>
+              <div>{h.status} · 置信度={h.confidence} · {h.description}</div>
+              {parseJsonList(h.evidenceForJson).length > 0 && <div className="ok">正：{parseJsonList(h.evidenceForJson).join("；")}</div>}
+              {parseJsonList(h.evidenceAgainstJson).length > 0 && <div className="err">反：{parseJsonList(h.evidenceAgainstJson).join("；")}</div>}
+            </div>
           ))}
           <h3 style={{ marginTop: 10 }}>实验账本</h3>
           {(d.experiments ?? []).length === 0 && <div className="muted">无</div>}
           {(d.experiments ?? []).slice(-8).map((e) => (
-            <div key={e.id} className="muted">{e.tool} → {e.outcome}: {e.resultSummary}</div>
+            <div key={e.id} className="muted break">{e.tool} → {e.outcome}: {e.resultSummary}{e.canonicalArgs ? ` · ${e.canonicalArgs}` : ""}</div>
           ))}
           <h3 style={{ marginTop: 10 }}>专家结论</h3>
           {(d.specialists ?? []).length === 0 && <div className="muted">无</div>}
           {(d.specialists ?? []).map((s) => (
-            <div key={s.id}>{s.kind}: {s.conclusion}</div>
+            <div key={s.id}>
+              {s.kind}: {s.conclusion}
+              {parseJsonList(s.recommendedActionsJson).length > 0 && (
+                <div className="muted">建议：{parseJsonList(s.recommendedActionsJson).join("，")}</div>
+              )}
+            </div>
           ))}
           <h3 style={{ marginTop: 10 }}>产物图</h3>
-          {d.artifacts.map((a) => (
-            <div key={a.id} className="muted break">{a.operation} → {shortPath(a.path)}</div>
+          {artifactTree(d.artifacts).map((line, i) => (
+            <div key={i} className="muted break">{line}</div>
           ))}
           <h3 style={{ marginTop: 10 }}>视觉证据</h3>
           {(d.visualEvidence ?? []).length === 0 && <div className="muted">还没有 analyze_visual 结果</div>}
@@ -1358,6 +1399,7 @@ function VisualReviews({ refreshKey, onOpenChallenge }: { refreshKey: number; on
   };
 
   const pending = items.filter((r) => r.status === "PENDING");
+  const answered = items.filter((r) => r.status === "ANSWERED");
   return (
     <div className="panel">
       <h3>视觉复核队列</h3>
@@ -1402,16 +1444,30 @@ function VisualReviews({ refreshKey, onOpenChallenge }: { refreshKey: number; on
           </div>
         </div>
       ))}
+      {answered.length > 0 && <h3 style={{ marginTop: 16 }}>已回答</h3>}
+      {answered.slice(0, 8).map((r) => (
+        <div key={r.id} className="muted" style={{ marginTop: 6 }}>
+          {r.challengeId} · {r.sourcePath} · {r.answerJson}
+        </div>
+      ))}
       {msg && <div className="muted" style={{ marginTop: 8 }}>{msg}</div>}
     </div>
   );
 }
 
 function BenchmarkPanel({ refreshKey }: { refreshKey: number }) {
-  const [data, setData] = useState<{ manifests: { id: string; category: string; flag: string; expectedTechniques: string[] }[]; runs: { id: string; manifestId: string; solved: boolean; durationMs: number; error: string | null }[] } | null>(null);
+  const [data, setData] = useState<{
+    manifests: { id: string; category: string; flag: string; expectedTechniques: string[] }[];
+    runs: { id: string; manifestId: string; solved: boolean; durationMs: number; error: string | null }[];
+    summary?: { total: number; solved: number; failed: number; solveRate: number; medianMs: number };
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const load = useCallback(() => {
-    void api<{ manifests: { id: string; category: string; flag: string; expectedTechniques: string[] }[]; runs: { id: string; manifestId: string; solved: boolean; durationMs: number; error: string | null }[] }>("/benchmarks").then(setData);
+    void api<{
+      manifests: { id: string; category: string; flag: string; expectedTechniques: string[] }[];
+      runs: { id: string; manifestId: string; solved: boolean; durationMs: number; error: string | null }[];
+      summary?: { total: number; solved: number; failed: number; solveRate: number; medianMs: number };
+    }>("/benchmarks").then(setData);
   }, []);
   useEffect(() => {
     load();
@@ -1419,12 +1475,20 @@ function BenchmarkPanel({ refreshKey }: { refreshKey: number }) {
   const run = async () => {
     setBusy(true);
     try {
-      await api("/benchmarks/run", { method: "POST", body: {} });
-      load();
+      const r = await api<{
+        results: { id: string; manifestId: string; solved: boolean; durationMs: number; error: string | null }[];
+        summary: { total: number; solved: number; failed: number; solveRate: number; medianMs: number };
+      }>("/benchmarks/run", { method: "POST", body: {} });
+      setData((prev) => ({
+        manifests: prev?.manifests ?? [],
+        runs: r.results,
+        summary: r.summary,
+      }));
     } finally {
       setBusy(false);
     }
   };
+  const s = data?.summary;
   return (
     <div className="panel">
       <h3>Benchmark</h3>
@@ -1432,6 +1496,11 @@ function BenchmarkPanel({ refreshKey }: { refreshKey: number }) {
       <button type="button" className="primary" disabled={busy} onClick={() => void run()}>
         {busy ? "评测中…" : "跑全部评测"}
       </button>
+      {s && (
+        <div className="ok" style={{ marginTop: 10 }}>
+          汇总：{s.total} 题 · 解出 {s.solved} · 失败 {s.failed} · Solve Rate {(s.solveRate * 100).toFixed(0)}% · 中位 {s.medianMs}ms
+        </div>
+      )}
       {(data?.manifests ?? []).map((m) => (
         <div key={m.id} className="muted" style={{ marginTop: 8 }}>
           {m.id} · {m.category} · 期望 {m.expectedTechniques.join(", ")}

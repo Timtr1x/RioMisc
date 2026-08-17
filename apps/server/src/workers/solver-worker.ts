@@ -1,6 +1,6 @@
 // Solver Worker entry (forked child process).
 // Builds the ToolContext, wires IPC, runs the agent runtime (mock or Pi).
-import { statSync } from "node:fs";
+import { statSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { sha256File } from "@rio/tool-runtime";
 import {
@@ -144,11 +144,23 @@ function buildToolContext(config: StartConfig, vision?: VisionModelAdapter | nul
     vision: vision ?? null,
     maxVisionCalls: config.visual?.maxVisionCalls ?? 5,
     experiments: (() => {
+      const file = join(root, "state", "experiments.json");
+      mkdirSync(join(root, "state"), { recursive: true });
       const map = new Map<string, { summary: string; outcome: string }>();
+      try {
+        const rows = JSON.parse(readFileSync(file, "utf8")) as { key: string; summary: string; outcome: string }[];
+        for (const r of rows) map.set(r.key, { summary: r.summary, outcome: r.outcome });
+      } catch {
+        /* first run */
+      }
+      const persist = () => {
+        writeFileSync(file, JSON.stringify([...map.entries()].map(([key, v]) => ({ key, ...v }))));
+      };
       return {
         lookup: (key: string) => map.get(key) ?? null,
         record: (e: { key: string; summary: string; outcome: string }) => {
           map.set(e.key, { summary: e.summary, outcome: e.outcome });
+          persist();
         },
       };
     })(),

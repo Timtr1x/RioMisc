@@ -19,6 +19,26 @@ export function runBenchmark(id?: string): BenchmarkRunResult[] {
   return list.map(runOne);
 }
 
+export function summarizeBenchmark(results: BenchmarkRunResult[]): {
+  total: number;
+  solved: number;
+  failed: number;
+  solveRate: number;
+  medianMs: number;
+  durationMs: number;
+} {
+  const times = results.map((r) => r.durationMs).sort((a, b) => a - b);
+  const solved = results.filter((r) => r.solved).length;
+  return {
+    total: results.length,
+    solved,
+    failed: results.length - solved,
+    solveRate: results.length ? solved / results.length : 0,
+    medianMs: times.length ? times[Math.floor(times.length / 2)]! : 0,
+    durationMs: results.reduce((a, r) => a + r.durationMs, 0),
+  };
+}
+
 export function runOne(m: BenchmarkManifest): BenchmarkRunResult {
   const started = Date.now();
   const techniques: string[] = [];

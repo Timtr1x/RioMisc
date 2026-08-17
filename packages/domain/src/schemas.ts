@@ -229,6 +229,19 @@ export const pathOnlySchema = z.object({
   force: z.boolean().optional(),
 });
 
+export const imageTransformSchema = z.object({
+  path: z.string().min(1).max(1000),
+  op: z.enum(["grayscale", "invert", "autocontrast", "threshold", "rotate90", "rotate180", "rotate270"]),
+  force: z.boolean().optional(),
+});
+
+export const extractBitplaneSchema = z.object({
+  path: z.string().min(1).max(1000),
+  channel: z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3), z.enum(["R", "G", "B", "A"])]),
+  bit: z.number().int().min(0).max(7),
+  force: z.boolean().optional(),
+});
+
 export const carveSchema = z.object({
   path: z.string().min(1).max(1000),
   offset: z.number().int().min(0),
@@ -255,6 +268,10 @@ export const cryptoTextSchema = z.object({
   m2: z.string().optional(),
   samples: z.string().optional(),
   key: z.string().optional(),
+  n1: z.string().optional(),
+  n2: z.string().optional(),
+  n3: z.string().optional(),
+  c3: z.string().optional(),
   force: z.boolean().optional(),
 });
 
@@ -268,6 +285,21 @@ export const hypothesisParamsSchema = z.object({
   description: z.string().min(1).max(2000),
   confidence: z.number().min(0).max(1).optional(),
   status: z.enum(["CANDIDATE", "TESTING", "SUPPORTED", "REJECTED", "CONFIRMED"]).optional(),
+  evidenceFor: z.array(z.string().max(1000)).max(20).optional(),
+  evidenceAgainst: z.array(z.string().max(1000)).max(20).optional(),
+  proposedTests: z
+    .array(
+      z.object({
+        tool: z.string().max(80),
+        args: z.unknown().optional(),
+        expectedInformation: z.string().max(400).optional(),
+        ifPositive: z.string().max(400).optional(),
+        ifNegative: z.string().max(400).optional(),
+        estimatedCost: z.enum(["CHEAP", "NORMAL", "EXPENSIVE"]).optional(),
+      }),
+    )
+    .max(12)
+    .optional(),
 });
 
 export type ReportProgressParams = z.infer<typeof reportProgressParamsSchema>;

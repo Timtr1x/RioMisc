@@ -6,6 +6,7 @@ export { computeVisualOverview } from "./local/overview.js";
 export { decodeQr } from "./local/qr.js";
 export { renderChannelsContactSheet } from "./local/channels.js";
 export { renderBitplanesContactSheet, extractBitplane } from "./local/bitplanes.js";
+export { applyImageTransform, writeTransformedPng, rotateRgba, type ImageTransformOp } from "./local/transforms.js";
 export { decodeWav, encodeWav } from "./local/wav.js";
 export { renderSpectrogramPng } from "./local/spectrogram.js";
 export { composeContactSheet, extractKeyframesWithFfmpeg, loadFrameImages } from "./local/frames.js";

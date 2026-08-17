@@ -666,11 +666,12 @@ depended on the previous files.`;
       }
       case "artifact": {
         try {
+          const absPath = String(msg.absPath ?? "");
           repos.artifacts.create({
             challengeId,
-            parentArtifactId: (msg.parent as string | null) ?? null,
-            path: String(msg.absPath ?? ""),
-            mime: null,
+            parentArtifactId: resolveArtifactParentId(repos, challengeId, (msg.parent as string | null) ?? null),
+            path: absPath,
+            mime: mimeFromPath(absPath),
             size: Number(msg.size ?? 0),
             sha256: String(msg.sha256 ?? ""),
             generatedBy: "TOOL",
@@ -678,6 +679,23 @@ depended on the previous files.`;
           });
         } catch (e) {
           logger.warn({ event: "artifact_record_failed", challengeId, err: String(e) });
+        }
+        break;
+      }
+      case "hypothesis": {
+        try {
+          repos.hypotheses.create({
+            challengeId,
+            description: String(msg.description ?? ""),
+            confidence: Number(msg.confidence ?? 0.4),
+            status: (msg.status as never) ?? "CANDIDATE",
+            evidenceForJson: JSON.stringify(msg.evidenceFor ?? []),
+            evidenceAgainstJson: JSON.stringify(msg.evidenceAgainst ?? []),
+            proposedTestsJson: JSON.stringify(msg.proposedTests ?? []),
+          });
+          bus.publish({ type: "HYPOTHESIS_RECORDED", challengeId, payload: { description: msg.description } });
+        } catch (e) {
+          logger.warn({ event: "hypothesis_record_failed", challengeId, err: String(e) });
         }
         break;
       }
@@ -698,7 +716,7 @@ depended on the previous files.`;
           repos.visualEvidence.create({
             id: ev.id,
             challengeId,
-            sourceArtifactId: ev.sourceArtifactId ?? null,
+            sourceArtifactId: ev.sourceArtifactId ?? repos.artifacts.findByPath(challengeId, String(ev.sourcePath ?? ""))?.id ?? null,
             sourcePath: String(ev.sourcePath ?? ""),
             sourceType: (ev.sourceType as never) ?? "IMAGE",
             question: ev.question ?? null,
@@ -725,6 +743,15 @@ depended on the previous files.`;
             resultSummary: String(msg.summary ?? ""),
             outcome: (msg.outcome as never) ?? "NEW_EVIDENCE",
           });
+          repos.recordedTools.create({
+            challengeId,
+            tool: String(msg.tool ?? ""),
+            canonicalArgs: String(msg.canonicalArgs ?? ""),
+            resultJson: JSON.stringify({ summary: msg.summary, outcome: msg.outcome }),
+            artifactHashesJson: JSON.stringify([msg.artifactSha256 ?? ""]),
+            durationMs: 0,
+          });
+          this.#maybeReflect(challengeId, String(msg.outcome ?? ""));
         } catch {
           /* unique key */
         }
@@ -918,12 +945,17 @@ depended on the previous files.`;
         logger.warn({ event: "solver_stalled", challengeId: c.id, idleMs: idle });
       }
       if (idle > this.deps.config.agent.reflectionAfterStalledMs) {
-        const lastReflect = this.reflectCooldown.get(c.id) ?? 0;
-        if (now - lastReflect > 5 * 60_000) {
-          this.reflectCooldown.set(c.id, now);
-          this.deps.reflection.reflect(c.id, "watchdog_stalled");
-        }
+        this.#maybeReflect(c.id, "stalled");
       }
+      const latest = repos.progress.latestForChallenge(c.id);
+      const secondsSinceProgress = latest ? (now - latest.createdAt) / 1000 : idle / 1000;
+      const trigger = shouldReflect({
+        noSignalStreak: repos.experiments.noSignalStreak(c.id),
+        secondsSinceProgress,
+        wrongFlags: c.wrongSubmissionCount,
+        repeatedTool: repos.experiments.listByChallenge(c.id).some((e) => e.outcome === "ALREADY_TESTED"),
+      });
+      if (trigger) this.#maybeReflect(c.id, trigger);
     }
     // disk alarm
     const free = this.disk.freeDiskGb();
@@ -1374,6 +1406,19 @@ Treat the rejection as negative evidence and continue solving.`;
       observation: input.observation,
       useful,
     });
+    this.deps.repos.visualEvidence.create({
+      challengeId: rec.challengeId,
+      sourceArtifactId: this.deps.repos.artifacts.findByPath(rec.challengeId, rec.sourcePath)?.id ?? null,
+      sourcePath: rec.sourcePath,
+      sourceType: "IMAGE",
+      question: rec.question,
+      analyzer: "HUMAN",
+      observations: useful
+        ? [{ type: "OTHER", description: input.observation, confidence: 0.9 }]
+        : [{ type: "OTHER", description: "No useful visual clue", confidence: 0.8 }],
+      summary: useful ? input.observation : "No useful visual clue",
+      confidence: useful ? 0.9 : 0.8,
+    });
     const injected = this.injectWorker(rec.challengeId, text);
     this.deps.bus.publish({
       type: "VISUAL_REVIEW_ANSWERED",
@@ -1409,6 +1454,26 @@ Treat the rejection as negative evidence and continue solving.`;
 
   runReflection(challengeId: string): ReturnType<ReflectionService["reflect"]> {
     return this.deps.reflection.reflect(challengeId, "manual");
+  }
+
+  #maybeReflect(challengeId: string, trigger: string): void {
+    const now = Date.now();
+    const last = this.reflectCooldown.get(challengeId) ?? 0;
+    if (now - last < 5 * 60_000) return;
+    this.reflectCooldown.set(challengeId, now);
+    const outcome = this.deps.reflection.reflect(challengeId, trigger);
+    const c = this.deps.repos.challenges.get(challengeId);
+    if (c) {
+      const cp = buildCheckpoint(this.deps.repos, challengeId, c.currentSolverType ?? "MISC");
+      this.deps.repos.db.run(
+        `INSERT INTO solver_checkpoints (id, challenge_id, payload_json, created_at) VALUES (?, ?, ?, ?)`,
+        `cp_${Math.random().toString(36).slice(2, 12)}`,
+        challengeId,
+        JSON.stringify(cp),
+        Date.now(),
+      );
+    }
+    void outcome;
   }
 
   switchModel(challengeId: string, modelId: string): void {
@@ -1503,4 +1568,21 @@ Treat the rejection as negative evidence and continue solving.`;
       /* ignore */
     }
   }
+}
+
+function mimeFromPath(path: string): string | null {
+  const p = path.toLowerCase();
+  if (p.endsWith(".png")) return "image/png";
+  if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return "image/jpeg";
+  if (p.endsWith(".gif")) return "image/gif";
+  if (p.endsWith(".wav")) return "audio/wav";
+  if (p.endsWith(".zip")) return "application/zip";
+  if (p.endsWith(".json")) return "application/json";
+  return null;
+}
+
+function resolveArtifactParentId(repos: Repositories, challengeId: string, parent: string | null): string | null {
+  if (!parent) return null;
+  if (parent.startsWith("art_")) return parent;
+  return repos.artifacts.findByPath(challengeId, parent)?.id ?? null;
 }

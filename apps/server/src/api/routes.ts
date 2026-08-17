@@ -292,13 +292,14 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
   });
 
   fastify.get("/api/benchmarks", async () => {
-    const { BENCHMARK_MANIFESTS, runBenchmark } = await import("@rio/eval");
-    return { manifests: BENCHMARK_MANIFESTS, runs: repos.benchmarkRuns.list() };
+    const { BENCHMARK_MANIFESTS, summarizeBenchmark } = await import("@rio/eval");
+    const runs = repos.benchmarkRuns.list();
+    return { manifests: BENCHMARK_MANIFESTS, runs, summary: summarizeBenchmark(runs) };
   });
 
   fastify.post("/api/benchmarks/run", async (req) => {
-    const { runBenchmark } = await import("@rio/eval");
     const id = (req.body as { id?: string } | undefined)?.id;
+    const { runBenchmark, summarizeBenchmark } = await import("@rio/eval");
     const results = runBenchmark(id);
     for (const r of results) {
       repos.benchmarkRuns.create({
@@ -311,7 +312,7 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
         error: r.error,
       });
     }
-    return { ok: true, results };
+    return { ok: true, results, summary: summarizeBenchmark(results) };
   });
 
   fastify.get("/api/visual-reviews", async () => {
