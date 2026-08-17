@@ -3,7 +3,7 @@
 // workers → verifies/submits → reacts to hints/feedback/recovery.
 import { hashHex, type RioLogger, type RuntimeConfig, type SecretStore } from "@rio/shared";
 import type { Repositories } from "@rio/database";
-import { SOLVER_CATEGORIES, type Challenge, type SolverType, type ModelRef } from "@rio/domain";
+import { SOLVER_CATEGORIES, type Challenge, type SolverType, type ModelRef, type ManagerMode, type ReflectionMode } from "@rio/domain";
 import type { ContestAdapter } from "@rio/contest";
 import { Poller, ApiRateLimiter, DiskManager, CtfdContestAdapter, IdleContestAdapter, MockContestAdapter, normalizeTrustedOrigins } from "@rio/contest";
 import type { WorkerMessage, StartWorkerConfig } from "./worker-pool.js";
@@ -20,8 +20,14 @@ import { WorkerPool } from "./worker-pool.js";
 import { PreparationService } from "./preparation.js";
 import { SubmissionManager } from "./submission.js";
 import { HintManager } from "./hints.js";
-import { ReflectionService } from "./reflection.js";
 import { RecoveryManager } from "./recovery.js";
+import { HttpAdvisoryRuntime, type AdvisoryAgentRuntime } from "./advisory-runtime.js";
+import { ReflectionExecutor } from "./reflection/reflection-service.js";
+import { evaluateReflectionGate } from "./reflection/reflection-gate.js";
+import { ManagerService } from "./manager/manager-service.js";
+import { ManagerCoordinator } from "./manager/manager-coordinator.js";
+import { admitChallenge, rankAdmitted } from "./manager/scheduler-gate.js";
+
 import { ModelRegistry } from "./registry.js";
 import { acceptIntoSolved } from "./accept.js";
 import { rememberDeletedRemoteId } from "./deleted.js";
@@ -30,7 +36,7 @@ import { isRetryablePrepareError, prepareBackoffMs } from "./prepare-retry.js";
 import { syncRemoteChallenge } from "./challenge-sync.js";
 import { loadContestProfile, saveContestProfile } from "./contest-profile.js";
 import { isModelUsable, resolveAssignedModel } from "./model-assignments.js";
-import { buildPlannerInjection, buildCheckpoint, reflectionHasMaterial, shouldReflect } from "./planner.js";
+import { buildPlannerInjection, buildCheckpoint } from "./planner.js";
 import { extractFlagsFromVisualObservation, formatHumanVisualObservation } from "./visual-review.js";
 
 export interface ControlPlaneDeps {
@@ -48,11 +54,12 @@ export interface ControlPlaneDeps {
   preparation: PreparationService;
   submission: SubmissionManager;
   hints: HintManager;
-  reflection: ReflectionService;
+  reflection: ReflectionExecutor;
   registry: ModelRegistry;
   recovery: RecoveryManager;
   pythonExecutable: string;
   secrets?: SecretStore | null;
+  advisory?: AdvisoryAgentRuntime;
 }
 
 export class ControlPlane {  private poller: Poller;
@@ -74,6 +81,9 @@ export class ControlPlane {  private poller: Poller;
   private readonly bootAt = Date.now();
   private prepareBackoff = new Map<string, { failures: number; nextAt: number }>();
   private startService: ChallengeStartService;
+  private advisory: AdvisoryAgentRuntime;
+  private managerService: ManagerService;
+  private manager: ManagerCoordinator;
   private contestMeta: {
     baseUrl: string | null;
     connectedAt: number | null;
@@ -134,6 +144,26 @@ export class ControlPlane {  private poller: Poller;
       },
       { pingIntervalMs: deps.config.watchdog.heartbeatMs, leaseTtlMs: deps.config.watchdog.leaseTtlMs },
     );
+    this.advisory = deps.advisory ?? new HttpAdvisoryRuntime({ repos: deps.repos, secrets: deps.secrets ?? null, logger: deps.logger });
+    this.managerService = new ManagerService({
+      repos: deps.repos,
+      bus: deps.bus,
+      logger: deps.logger,
+      config: deps.config,
+      advisory: this.advisory,
+      solverSlotsUsed: () => this.workerPool.activeCount(),
+      reflectionSlotsUsed: () => deps.reflection.slots.used,
+      contestConnected: () => this.contestMeta.connectedAt !== null || deps.adapter.kind === "mock" || deps.adapter.kind === "ctfd",
+    });
+    this.manager = new ManagerCoordinator({
+      service: this.managerService,
+      repos: deps.repos,
+      bus: deps.bus,
+      logger: deps.logger,
+      debounceMs: deps.config.manager.debounceMs,
+      replanIntervalMs: deps.config.manager.replanIntervalMs,
+      planTtlMs: deps.config.manager.planTtlMs,
+    });
   }
 
   async start(): Promise<void> {
@@ -173,6 +203,11 @@ export class ControlPlane {  private poller: Poller;
     }
 
     await this.deps.recovery.start();
+    this.deps.repos.reflectionRuns.failRunning("PROCESS_RESTART");
+    this.deps.repos.managerPlans.failRunning("PROCESS_RESTART");
+    this.managerService.lastAppliedPlanId = null;
+    this.manager.requestReplan("STARTUP");
+    this.manager.startPeriodic();
 
     this.schedulerTimer = setInterval(() => void this.schedulerTick(), 2500);
     this.schedulerTimer.unref();
@@ -245,6 +280,7 @@ export class ControlPlane {  private poller: Poller;
         );
       }
     }
+    if (changed) this.manager.requestReplan("CHALLENGE_BATCH");
     return { changed };
   }
 
@@ -373,11 +409,27 @@ depended on the previous files.`;
         repos.challenges.update(c.id, { lastPriorityScore: score });
       }
 
-      // 4. schedule workers using the just-computed ranking
+      // 4. schedule workers using the just-computed ranking + Manager gate
       const active = this.workerPool.activeCount();
       const capacity = this.deps.config.workers.solverConcurrency - active;
       if (capacity > 0) {
-        for (const { item: c } of ranked.slice(0, capacity)) {
+        const mode = this.managerService.mode();
+        const livePlanFresh = this.manager.livePlanFresh();
+        const applied = this.manager.applied();
+        const gated = rankAdmitted(
+          ranked.map(({ item: c }) => {
+            const decision = admitChallenge({
+              challenge: c,
+              orchestration: repos.orchestration.getOrCreate(c.id),
+              mode,
+              livePlanFresh,
+              applied,
+            });
+            return { item: c, ...decision, discoveredAt: c.discoveredAt };
+          }),
+        );
+        const admitted = gated.filter((g) => g.admitted);
+        for (const { item: c } of admitted.slice(0, capacity)) {
           if (c.pausedReason || c.blockedReason === "MANUAL_REVIEW_REQUIRED") continue;
           const runtime = resolveAgentRuntime(repos, { allowMockFallback: this.deps.config.agent.allowMockFallback !== false });
           if (runtime === "unavailable") {
@@ -543,10 +595,12 @@ depended on the previous files.`;
     }
     const challengeId = workspaceRoot.replace(/\\/g, "/").split("/").pop() ?? "";
     const planner = challengeId ? buildPlannerInjection(this.deps.repos, challengeId) : "";
+    const pending = challengeId ? this.deps.reflection.pendingMessage(challengeId) : null;
+    if (challengeId && pending) this.deps.reflection.markDelivered(challengeId);
     return buildKickoffMessage({
       challengeText,
       inputFiles,
-      extraNote: [extraNote, planner].filter(Boolean).join("\n\n") || undefined,
+      extraNote: [extraNote, planner, pending].filter(Boolean).join("\n\n") || undefined,
     });
   }
 
@@ -556,7 +610,10 @@ depended on the previous files.`;
       .listByChallenge(challengeId)
       .filter((s) => s.status === "WRONG")
       .map((s) => s.flagValue);
-    return buildResumeMessage({ newHints: hints, wrongFlags, revisionSummary: null });
+    const base = buildResumeMessage({ newHints: hints, wrongFlags, revisionSummary: null });
+    const pending = this.deps.reflection.pendingMessage(challengeId);
+    if (pending) this.deps.reflection.markDelivered(challengeId);
+    return pending ? `${base}\n\n${pending}` : base;
   }
 
   /** Provider specs for the Pi runtime, assembled from the registry (§55). */
@@ -660,7 +717,7 @@ depended on the previous files.`;
         break;
       }
       case "reflection_request": {
-        this.deps.reflection.reflect(challengeId, "solver_request");
+        void this.#maybeReflect(challengeId, "SOLVER_REQUEST", "auto");
         break;
       }
       case "artifact": {
@@ -750,13 +807,17 @@ depended on the previous files.`;
             artifactHashesJson: JSON.stringify([msg.artifactSha256 ?? ""]),
             durationMs: 0,
           });
-          const trigger = shouldReflect({
+          const trigger = evaluateReflectionGate({
             noSignalStreak: repos.experiments.noSignalStreak(challengeId),
             secondsSinceProgress: 0,
             wrongFlags: challenge.wrongSubmissionCount,
             repeatedTool: String(msg.outcome ?? "") === "ALREADY_TESTED",
+            noSignalThreshold: this.deps.config.reflection.triggers.noSignalStreak,
+            stalledMs: this.deps.config.reflection.triggers.stalledMs,
+            wrongFlagEnabled: this.deps.config.reflection.triggers.wrongFlag,
+            repeatedExperimentEnabled: this.deps.config.reflection.triggers.repeatedExperiment,
           });
-          if (trigger) this.#maybeReflect(challengeId, trigger);
+          if (trigger) void this.#maybeReflect(challengeId, trigger, "auto");
         } catch {
           /* unique key */
         }
@@ -897,8 +958,10 @@ depended on the previous files.`;
     if (!c) return;
     if (this.intentionallyStopped.has(challengeId)) {
       this.intentionallyStopped.delete(challengeId);
+      this.manager.requestReplan("SLOT_AVAILABLE");
       return;
     }
+    this.manager.requestReplan("SLOT_AVAILABLE");
     if (c.lifecycleStatus === "ACTIVE") {
       this.deps.logger.warn({ event: "worker_crashed", challengeId, code }, "worker exited unexpectedly — requeueing");
       this.#markSessionInterrupted(challengeId);
@@ -978,19 +1041,24 @@ depended on the previous files.`;
         bus.publish({ type: "SOLVER_STALLED", challengeId: c.id, payload: { idleMs: idle } });
         logger.warn({ event: "solver_stalled", challengeId: c.id, idleMs: idle });
       }
+      if (c.progressStatus === "STALLED") this.manager.requestReplan("SOLVER_STALLED");
       if (idle > this.deps.config.agent.reflectionAfterStalledMs) {
-        this.#maybeReflect(c.id, "stalled");
+        void this.#maybeReflect(c.id, "STALLED", "auto");
       }
       const latest = repos.progress.latestForChallenge(c.id);
       // No progress yet is not a stall — the solver may still be on the first turn.
       const secondsSinceProgress = latest ? (now - latest.createdAt) / 1000 : 0;
-      const trigger = shouldReflect({
+      const trigger = evaluateReflectionGate({
         noSignalStreak: repos.experiments.noSignalStreak(c.id),
         secondsSinceProgress,
         wrongFlags: c.wrongSubmissionCount,
         repeatedTool: repos.experiments.listByChallenge(c.id).some((e) => e.outcome === "ALREADY_TESTED"),
+        noSignalThreshold: this.deps.config.reflection.triggers.noSignalStreak,
+        stalledMs: this.deps.config.reflection.triggers.stalledMs,
+        wrongFlagEnabled: this.deps.config.reflection.triggers.wrongFlag,
+        repeatedExperimentEnabled: this.deps.config.reflection.triggers.repeatedExperiment,
       });
-      if (trigger) this.#maybeReflect(c.id, trigger);
+      if (trigger) void this.#maybeReflect(c.id, trigger, "auto");
     }
     // disk alarm
     const free = this.disk.freeDiskGb();
@@ -1503,27 +1571,17 @@ Treat the rejection as negative evidence and continue solving.`;
     return { bytes: readFileSync(abs), mime, path: abs };
   }
 
-  runReflection(challengeId: string): ReturnType<ReflectionService["reflect"]> {
-    return this.deps.reflection.reflect(challengeId, "manual");
+  runReflection(challengeId: string, mode?: ReflectionMode): ReturnType<ReflectionExecutor["run"]> {
+    return this.deps.reflection.run(challengeId, { trigger: "MANUAL", source: "manual", modeOverride: mode });
   }
 
-  #maybeReflect(challengeId: string, trigger: string): void {
-    const now = Date.now();
-    const last = this.reflectCooldown.get(challengeId) ?? 0;
-    if (now - last < 5 * 60_000) return;
-    const repos = this.deps.repos;
-    if (
-      !reflectionHasMaterial({
-        trigger,
-        hasProgress: Boolean(repos.progress.latestForChallenge(challengeId)),
-        wrongFlags: repos.challenges.get(challengeId)?.wrongSubmissionCount ?? 0,
-        experimentCount: repos.experiments.listByChallenge(challengeId).length,
-      })
-    ) {
-      return;
-    }
-    this.reflectCooldown.set(challengeId, now);
-    const outcome = this.deps.reflection.reflect(challengeId, trigger);
+  runAutomaticReflection(challengeId: string, trigger: string): ReturnType<ReflectionExecutor["run"]> {
+    return this.deps.reflection.run(challengeId, { trigger, source: "auto" });
+  }
+
+  async #maybeReflect(challengeId: string, trigger: string, source: "auto" | "manual"): Promise<void> {
+    const outcome = await this.deps.reflection.run(challengeId, { trigger, source });
+    if (outcome.skipped || !outcome.id) return;
     const c = this.deps.repos.challenges.get(challengeId);
     if (c) {
       const cp = buildCheckpoint(this.deps.repos, challengeId, c.currentSolverType ?? "MISC");
@@ -1535,7 +1593,6 @@ Treat the rejection as negative evidence and continue solving.`;
         Date.now(),
       );
     }
-    void outcome;
   }
 
   switchModel(challengeId: string, modelId: string): void {
@@ -1572,6 +1629,7 @@ Treat the rejection as negative evidence and continue solving.`;
     this.releaseLlmSlot(challengeId);
     const session = this.deps.repos.sessions.activeForChallenge(challengeId);
     if (session) this.deps.repos.sessions.setStatus(session.id, "ENDED");
+    this.manager.requestReplan("CHALLENGE_SOLVED");
   }
 
   status(): Record<string, unknown> {
@@ -1609,7 +1667,107 @@ Treat the rejection as negative evidence and continue solving.`;
         health: p.health,
         consecutiveFailures: p.consecutiveFailures,
       })),
+      orchestration: this.orchestrationStatus(),
     };
+  }
+
+  orchestrationStatus(): Record<string, unknown> {
+    const mode = this.managerService.mode();
+    const model = this.deps.repos.models.get(this.deps.repos.settings.get("models.assignments") ? "" : "") ?? null;
+    void model;
+    const assigned = resolveAssignedModel(this.deps.repos, "manager");
+    const fallback = this.managerService.lastFallback;
+    const health = mode === "OFF" ? "OFF" : fallback ? "DEGRADED" : "HEALTHY";
+    return {
+      mode,
+      enabled: mode !== "OFF",
+      health,
+      modelId: assigned?.modelName ?? assigned?.id ?? null,
+      lastReplanAt: this.managerService.lastReplanAt,
+      lastTrigger: this.managerService.lastTrigger,
+      livePlanId: this.managerService.lastAppliedPlanId,
+      livePlanFresh: this.manager.livePlanFresh(),
+      fallback,
+      inFlight: this.manager.inFlight,
+      solverSlots: { used: this.workerPool.activeCount(), total: this.deps.config.workers.solverConcurrency },
+      reflectionSlots: { used: this.deps.reflection.slots.used, total: this.deps.reflection.slots.max },
+      nextPeriodicMs: this.deps.config.manager.replanIntervalMs,
+    };
+  }
+
+  listManagerPlans(limit = 20) {
+    return this.deps.repos.managerPlans.list(limit).map((p) => ({
+      ...p,
+      decisions: this.deps.repos.managerDecisions.listByPlan(p.id),
+    }));
+  }
+
+  getManagerPlan(id: string) {
+    const plan = this.deps.repos.managerPlans.get(id);
+    if (!plan) return null;
+    return { ...plan, decisions: this.deps.repos.managerDecisions.listByPlan(id), snapshot: this.managerService.lastSnapshot };
+  }
+
+  requestManagerReplan(trigger: "MANUAL" | "STARTUP" = "MANUAL"): void {
+    this.manager.requestReplan(trigger);
+  }
+
+  getChallengeOrchestration(id: string) {
+    const c = this.deps.repos.challenges.get(id);
+    if (!c) throw new Error("unknown challenge");
+    const orch = this.deps.repos.orchestration.getOrCreate(id);
+    return {
+      ...orch,
+      reflectionEnabled: this.deps.reflection.isEnabledFor(id),
+      reflectionMode: this.deps.reflection.modeFor(id),
+    };
+  }
+
+  patchChallengeOrchestration(
+    id: string,
+    patch: Partial<{
+      strategyLocked: boolean;
+      manualDispatch: "AUTO" | "FORCE_START" | "FORCE_HOLD";
+      reflectionOverride: "INHERIT" | "ON" | "OFF";
+      reflectionModeOverride: ReflectionMode | null;
+    }>,
+  ) {
+    const c = this.deps.repos.challenges.get(id);
+    if (!c) throw new Error("unknown challenge");
+    const next = this.deps.repos.orchestration.update(id, patch);
+    this.manager.requestReplan("MANUAL");
+    return next;
+  }
+
+  listReflections(id: string) {
+    if (!this.deps.repos.challenges.get(id)) throw new Error("unknown challenge");
+    return this.deps.repos.reflectionRuns.listByChallenge(id);
+  }
+
+  setManagerMode(mode: ManagerMode): void {
+    this.managerService.setMode(mode);
+    if (mode !== "OFF") this.manager.requestReplan("MANUAL");
+  }
+
+  workerActiveCount(): number {
+    return this.workerPool.activeCount();
+  }
+
+  reflectionInFlight(): number {
+    return this.deps.reflection.slots.used;
+  }
+
+  managerInFlight(): number {
+    return this.manager.inFlight;
+  }
+
+  async runSchedulerTick(): Promise<void> {
+    await this.schedulerTick();
+  }
+
+  async flushManager(): Promise<void> {
+    this.manager.requestReplan("MANUAL");
+    await this.manager.runIfNeeded();
   }
 
   async stop(): Promise<void> {
@@ -1622,6 +1780,7 @@ Treat the rejection as negative evidence and continue solving.`;
     if (this.schedulerTimer) clearInterval(this.schedulerTimer);
     if (this.hintTimer) clearInterval(this.hintTimer);
     if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+    this.manager.stop();
     this.workerPool.stopAll();
     this.deps.submission.stop();
     await new Promise((r) => setTimeout(r, 2200));

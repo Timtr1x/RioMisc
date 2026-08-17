@@ -73,6 +73,31 @@ visual:
   maxVisionCallsPerChallenge: 40
   maxImagesPerCall: 4
 
+# Manager is OFF by default so MVP-2 scheduler behavior is unchanged.
+# Set enabled: true (mode SHADOW or ACTIVE) to turn on contest dispatch.
+manager:
+  enabled: false
+  mode: SHADOW                 # OFF | SHADOW | ACTIVE
+  replanIntervalMs: 30000
+  debounceMs: 5000
+  planTtlMs: 90000
+  maxCandidates: 40
+  failureMode: DETERMINISTIC_FALLBACK
+  allowAutoPark: false
+  callTimeoutMs: 45000
+
+reflection:
+  enabledByDefault: true
+  mode: HYBRID                 # OFF | HEURISTIC | LLM | HYBRID
+  maxConcurrent: 2
+  cooldownMs: 300000
+  callTimeoutMs: 45000
+  triggers:
+    stalledMs: 120000
+    noSignalStreak: 3
+    wrongFlag: true
+    repeatedExperiment: true
+
 server:
   host: 127.0.0.1
   port: 3000

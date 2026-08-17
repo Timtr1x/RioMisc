@@ -2,7 +2,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Repositories } from "@rio/database";
 import type { RioLogger, SecretStore, RuntimeConfig } from "@rio/shared";
-import { setPriorityParamsSchema, switchModelParamsSchema, manualCandidateParamsSchema, providerCreateSchema, modelCreateSchema, modelPatchSchema, modelAssignmentsSchema, modelCapabilitiesSchema, visualReviewAnswerSchema } from "@rio/domain";
+import { setPriorityParamsSchema, switchModelParamsSchema, manualCandidateParamsSchema, providerCreateSchema, modelCreateSchema, modelPatchSchema, modelAssignmentsSchema, modelCapabilitiesSchema, visualReviewAnswerSchema, challengeOrchestrationPatchSchema, reflectionRunBodySchema, orchestrationSettingsPatchSchema } from "@rio/domain";
 import type { ControlPlane } from "../control/control-plane.js";
 import type { ModelRegistry } from "../control/registry.js";
 import type { EventBus } from "../control/bus.js";
@@ -26,7 +26,7 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     const origin = req.headers.origin;
     if (origin === "http://127.0.0.1:5173" || origin === "http://localhost:5173") {
       reply.header("Access-Control-Allow-Origin", origin);
-      reply.header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+      reply.header("Access-Control-Allow-Methods", "GET,POST,PATCH,PUT,DELETE,OPTIONS");
       reply.header("Access-Control-Allow-Headers", "content-type");
     }
     if (req.method === "OPTIONS") {
@@ -162,8 +162,39 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     return { ok: true, hint };
   });
   fastify.post("/api/challenges/:id/reflection", async (req) => {
-    const result = control.runReflection((req.params as { id: string }).id);
+    const result = await control.runReflection((req.params as { id: string }).id);
     return { ok: true, ...result };
+  });
+  fastify.get("/api/challenges/:id/orchestration", async (req, reply) => {
+    try {
+      return control.getChallengeOrchestration((req.params as { id: string }).id);
+    } catch (e) {
+      return reply.code(404).send({ error: (e as Error).message });
+    }
+  });
+  fastify.patch("/api/challenges/:id/orchestration", async (req, reply) => {
+    try {
+      const body = challengeOrchestrationPatchSchema.parse(req.body ?? {});
+      return { ok: true, orchestration: control.patchChallengeOrchestration((req.params as { id: string }).id, body) };
+    } catch (e) {
+      return reply.code(400).send({ error: (e as Error).message });
+    }
+  });
+  fastify.get("/api/challenges/:id/reflections", async (req, reply) => {
+    try {
+      return { items: control.listReflections((req.params as { id: string }).id) };
+    } catch (e) {
+      return reply.code(404).send({ error: (e as Error).message });
+    }
+  });
+  fastify.post("/api/challenges/:id/reflection/run", async (req, reply) => {
+    try {
+      const body = reflectionRunBodySchema.parse(req.body ?? {});
+      const result = await control.runReflection((req.params as { id: string }).id, body.mode);
+      return { ok: true, ...result };
+    } catch (e) {
+      return reply.code(400).send({ error: (e as Error).message });
+    }
   });
   fastify.post("/api/challenges/:id/model", async (req) => {
     const body = switchModelParamsSchema.parse(req.body);
@@ -373,6 +404,37 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     repos.models.update(id, { enabled: false });
     pruneUnusableAssignments(repos);
     return { ok: true };
+  });
+
+  // -------------------------------------------------------------------------
+  // Orchestration (Manager + Reflection)
+  // -------------------------------------------------------------------------
+
+  fastify.get("/api/orchestration/status", async () => control.orchestrationStatus());
+  fastify.get("/api/orchestration/plans", async (req) => {
+    const limit = Number((req.query as { limit?: string }).limit ?? 20);
+    return { items: control.listManagerPlans(Number.isFinite(limit) ? limit : 20) };
+  });
+  fastify.get("/api/orchestration/plans/:id", async (req, reply) => {
+    const plan = control.getManagerPlan((req.params as { id: string }).id);
+    if (!plan) return reply.code(404).send({ error: "unknown plan" });
+    return plan;
+  });
+  fastify.post("/api/orchestration/replan", async () => {
+    control.requestManagerReplan("MANUAL");
+    return { ok: true };
+  });
+  fastify.get("/api/orchestration/settings", async () => ({
+    manager: deps.config.manager,
+    reflection: deps.config.reflection,
+    runtime: control.orchestrationStatus(),
+  }));
+  fastify.patch("/api/orchestration/settings", async (req) => {
+    const body = orchestrationSettingsPatchSchema.parse(req.body ?? {});
+    if (body.managerMode) control.setManagerMode(body.managerMode);
+    else if (body.managerEnabled === false) control.setManagerMode("OFF");
+    else if (body.managerEnabled === true) control.setManagerMode("SHADOW");
+    return { ok: true, runtime: control.orchestrationStatus() };
   });
 
   // -------------------------------------------------------------------------

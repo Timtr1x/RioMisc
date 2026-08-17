@@ -129,6 +129,9 @@ export class ChallengeRepository {
       this.db.run("DELETE FROM submissions WHERE challenge_id = ?", id);
       this.db.run("DELETE FROM worker_leases WHERE challenge_id = ?", id);
       this.db.run("DELETE FROM domain_events WHERE challenge_id = ?", id);
+      this.db.run("DELETE FROM challenge_orchestration WHERE challenge_id = ?", id);
+      this.db.run("DELETE FROM reflection_runs WHERE challenge_id = ?", id);
+      this.db.run("DELETE FROM manager_decisions WHERE challenge_id = ?", id);
       this.db.run("DELETE FROM challenges WHERE id = ?", id);
     });
   }

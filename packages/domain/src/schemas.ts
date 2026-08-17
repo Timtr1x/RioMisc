@@ -201,6 +201,62 @@ export const modelAssignmentsSchema = z.object({
   reflectionModelId: z.string().nullable().optional(),
   visionModelId: z.string().nullable().optional(),
   triageModelId: z.string().nullable().optional(),
+  managerModelId: z.string().nullable().optional(),
+});
+
+export const reflectionModeSchema = z.enum(["OFF", "HEURISTIC", "LLM", "HYBRID"]);
+export const managerModeSchema = z.enum(["OFF", "SHADOW", "ACTIVE"]);
+export const manualDispatchSchema = z.enum(["AUTO", "FORCE_START", "FORCE_HOLD"]);
+export const reflectionOverrideSchema = z.enum(["INHERIT", "ON", "OFF"]);
+export const dispatchActionSchema = z.enum(["START", "HOLD", "CONTINUE"]);
+
+export const challengeOrchestrationPatchSchema = z.object({
+  strategyLocked: z.boolean().optional(),
+  manualDispatch: manualDispatchSchema.optional(),
+  reflectionOverride: reflectionOverrideSchema.optional(),
+  reflectionModeOverride: reflectionModeSchema.nullable().optional(),
+});
+
+export const reflectionRunBodySchema = z.object({
+  mode: reflectionModeSchema.optional(),
+});
+
+export const orchestrationSettingsPatchSchema = z.object({
+  managerMode: managerModeSchema.optional(),
+  managerEnabled: z.boolean().optional(),
+});
+
+export const llmReflectionResultSchema = z.object({
+  diagnosis: z.string().min(1).max(1500),
+  likelyMistakes: z.array(z.string().max(500)).max(8),
+  missedEvidence: z.array(z.string().max(500)).max(8),
+  recommendedNextSteps: z
+    .array(
+      z.object({
+        action: z.string().min(1).max(400),
+        reason: z.string().min(1).max(400),
+        expectedSignal: z.string().min(1).max(400),
+      }),
+    )
+    .max(6),
+  shouldContinueCurrentDirection: z.boolean(),
+  recommendHandoff: z.enum(["MISC", "CRYPTO"]).nullable(),
+  confidence: z.number().min(0).max(1),
+});
+
+export const dispatchPlanSchema = z.object({
+  summary: z.string().max(2000),
+  decisions: z
+    .array(
+      z.object({
+        challengeId: z.string().min(1).max(200),
+        action: dispatchActionSchema,
+        priority: z.number(),
+        reflectionEnabled: z.boolean().nullable(),
+        reason: z.string().max(500),
+      }),
+    )
+    .max(80),
 });
 
 export const analyzeVisualParamsSchema = z.object({

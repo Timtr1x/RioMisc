@@ -115,6 +115,138 @@ export interface ModelAssignments {
   reflectionModelId: string | null;
   visionModelId: string | null;
   triageModelId: string | null;
+  managerModelId: string | null;
+}
+
+export type AssignmentSlot = "primarySolver" | "reflection" | "triage" | "vision" | "manager";
+
+export type ReflectionMode = "OFF" | "HEURISTIC" | "LLM" | "HYBRID";
+
+export type ReflectionTrigger =
+  | "STALLED"
+  | "NO_SIGNAL_STREAK"
+  | "WRONG_FLAG"
+  | "REPEATED_EXPERIMENT"
+  | "SOLVER_REQUEST"
+  | "MANUAL";
+
+export type ReflectionRunStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FALLBACK" | "FAILED" | "SKIPPED";
+
+export type ManagerMode = "OFF" | "SHADOW" | "ACTIVE";
+
+export type ManagerTrigger =
+  | "CHALLENGE_BATCH"
+  | "SLOT_AVAILABLE"
+  | "CHALLENGE_SOLVED"
+  | "SOLVER_STALLED"
+  | "SCORE_CHANGED"
+  | "MANUAL"
+  | "PERIODIC"
+  | "STARTUP";
+
+export type ManagerPlanStatus = "PENDING" | "RUNNING" | "APPLIED" | "PARTIAL" | "FAILED" | "FALLBACK";
+
+export type DispatchAction = "START" | "HOLD" | "CONTINUE";
+
+export type ManualDispatch = "AUTO" | "FORCE_START" | "FORCE_HOLD";
+
+export type ReflectionOverride = "INHERIT" | "ON" | "OFF";
+
+export type DecisionApplyStatus = "APPLIED" | "REJECTED" | "CLAMPED";
+
+export interface ReflectionStep {
+  action: string;
+  reason: string;
+  expectedSignal: string;
+}
+
+export interface StructuredReflectionResult {
+  diagnosis: string;
+  likelyMistakes: string[];
+  missedEvidence: string[];
+  recommendedNextSteps: ReflectionStep[];
+  shouldContinueCurrentDirection: boolean;
+  recommendHandoff: "MISC" | "CRYPTO" | null;
+  confidence: number;
+}
+
+export interface DispatchDecision {
+  challengeId: string;
+  action: DispatchAction;
+  priority: number;
+  reflectionEnabled: boolean | null;
+  reason: string;
+}
+
+export interface DispatchPlan {
+  summary: string;
+  decisions: DispatchDecision[];
+}
+
+export interface ChallengeOrchestration {
+  challengeId: string;
+  strategyLocked: boolean;
+  manualDispatch: ManualDispatch;
+  reflectionOverride: ReflectionOverride;
+  reflectionModeOverride: ReflectionMode | null;
+  managerAction: DispatchAction | null;
+  managerPriority: number | null;
+  managerReflectionEnabled: boolean | null;
+  managerReason: string | null;
+  managerPlanId: string | null;
+  managerUpdatedAt: number | null;
+  updatedAt: number;
+}
+
+export interface ManagerPlanRecord {
+  id: string;
+  status: ManagerPlanStatus;
+  providerId: string | null;
+  modelId: string | null;
+  trigger: string;
+  snapshotHash: string | null;
+  summary: string | null;
+  error: string | null;
+  createdAt: number;
+  startedAt: number | null;
+  completedAt: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  durationMs: number;
+}
+
+export interface ManagerDecisionRecord {
+  id: string;
+  planId: string;
+  challengeId: string;
+  action: DispatchAction;
+  priority: number;
+  reflectionEnabled: boolean | null;
+  reason: string;
+  status: DecisionApplyStatus;
+  rejectionReason: string | null;
+  createdAt: number;
+}
+
+export interface ReflectionRunRecord {
+  id: string;
+  challengeId: string;
+  trigger: ReflectionTrigger;
+  mode: ReflectionMode;
+  providerId: string | null;
+  modelId: string | null;
+  fingerprint: string;
+  status: ReflectionRunStatus;
+  snapshotJson: string;
+  resultJson: string | null;
+  error: string | null;
+  createdAt: number;
+  startedAt: number | null;
+  completedAt: number | null;
+  deliveredAt: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  durationMs: number;
 }
 
 export type VisualSourceType =

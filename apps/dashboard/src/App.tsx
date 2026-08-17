@@ -1,14 +1,15 @@
 // RioMisc Dashboard — single page with tabs: Overview / Challenges / Detail / Providers.
 import { useCallback, useEffect, useState } from "react";
-import { api, useEvents, fmtMs, type Status, type ChallengeRow, type ChallengeDetail, type VisualReviewRow } from "./api.js";
+import { api, useEvents, fmtMs, type Status, type ChallengeRow, type ChallengeDetail, type VisualReviewRow, type OrchestrationStatus, type ManagerPlanRow, type ChallengeOrchestrationView, type ReflectionRunRow } from "./api.js";
 import { applyTheme, readTheme, type Theme } from "./theme.js";
 
-type Tab = "overview" | "challenges" | "detail" | "providers" | "reviews" | "benchmark";
+type Tab = "overview" | "challenges" | "detail" | "orchestration" | "providers" | "reviews" | "benchmark";
 
 const TAB_LABEL: Record<Tab, string> = {
   overview: "总览",
   challenges: "题目",
   detail: "详情",
+  orchestration: "调度",
   providers: "模型",
   reviews: "视觉复核",
   benchmark: "评测",
@@ -262,7 +263,7 @@ export function App() {
         </div>
       </header>
       <nav>
-        {(["overview", "challenges", "detail", "providers", "reviews", "benchmark"] as Tab[]).map((t) => (
+        {(["overview", "challenges", "detail", "orchestration", "providers", "reviews", "benchmark"] as Tab[]).map((t) => (
           <button key={t} className={tab === t ? "active" : ""} onClick={() => { setTab(t); window.location.hash = t; }}>
             {TAB_LABEL[t]}
           </button>
@@ -312,6 +313,7 @@ export function App() {
           }}
         />
       )}
+      {tab === "orchestration" && <OrchestrationPanel refreshKey={refreshKey} onOpenChallenge={(id) => { setSelectedId(id); setTab("detail"); }} />}
       {tab === "providers" && <Providers refresh={refresh} refreshKey={refreshKey} />}
       {tab === "reviews" && <VisualReviews refreshKey={refreshKey} onOpenChallenge={(id) => { setSelectedId(id); setTab("detail"); }} />}
       {tab === "benchmark" && <BenchmarkPanel refreshKey={refreshKey} />}
@@ -820,6 +822,7 @@ function Detail({
         {note && <div className="ok" style={{ marginTop: 8 }}>{note}</div>}
         {err && <div className="err">{err}</div>}
       </div>
+      <ChallengeOrchestrationCard id={id} refreshKey={refreshKey} />
 
       {d.candidates.length > 0 && (
         <div className="panel flag-banner">
@@ -1087,6 +1090,7 @@ type ModelAssignments = {
   reflectionModelId: string | null;
   visionModelId: string | null;
   triageModelId: string | null;
+  managerModelId: string | null;
 };
 type ModelRow = {
   id: string;
@@ -1126,6 +1130,206 @@ function parseLimit(raw: string, min: number, max: number): number | null {
 
 function isOn(v: number | boolean | undefined): boolean {
   return v !== 0 && v !== false;
+}
+
+function ChallengeOrchestrationCard({ id, refreshKey }: { id: string; refreshKey: number }) {
+  const [orch, setOrch] = useState<ChallengeOrchestrationView | null>(null);
+  const [runs, setRuns] = useState<ReflectionRunRow[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    if (!id) return;
+    void api<ChallengeOrchestrationView>(`/challenges/${id}/orchestration`).then(setOrch).catch(() => setOrch(null));
+    void api<{ items: ReflectionRunRow[] }>(`/challenges/${id}/reflections`).then((r) => setRuns(r.items)).catch(() => setRuns([]));
+  }, [id]);
+
+  useEffect(() => {
+    load();
+  }, [load, refreshKey]);
+
+  const patch = async (body: Record<string, unknown>) => {
+    setBusy(true);
+    try {
+      await api(`/challenges/${id}/orchestration`, { method: "PATCH", body });
+      load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!orch) return null;
+  return (
+    <div className="panel">
+      <h3>调度 / Reflection</h3>
+      <p>
+        Manager 决策 <b>{orch.managerAction ?? "—"}</b> · 优先级 <b>{orch.managerPriority ?? "—"}</b>
+      </p>
+      <p className="muted">{orch.managerReason ?? "尚无 Manager 理由"}</p>
+      <p>
+        Strategy Lock <b>{orch.strategyLocked ? "ON" : "OFF"}</b> · Dispatch <b>{orch.manualDispatch}</b> · Reflection{" "}
+        <b>{orch.reflectionEnabled ? "ON" : "OFF"} / {orch.reflectionMode ?? "—"}</b>
+      </p>
+      <div className="buttons">
+        <button type="button" disabled={busy} onClick={() => void patch({ strategyLocked: !orch.strategyLocked })}>
+          {orch.strategyLocked ? "Unlock" : "Lock Strategy"}
+        </button>
+        <button type="button" disabled={busy} onClick={() => void patch({ manualDispatch: "AUTO" })}>Auto</button>
+        <button type="button" disabled={busy} onClick={() => void patch({ manualDispatch: "FORCE_START" })}>Force Start</button>
+        <button type="button" disabled={busy} onClick={() => void patch({ manualDispatch: "FORCE_HOLD" })}>Force Hold</button>
+        <button type="button" disabled={busy} onClick={() => void patch({ reflectionOverride: "ON" })}>Reflection On</button>
+        <button type="button" disabled={busy} onClick={() => void patch({ reflectionOverride: "OFF" })}>Reflection Off</button>
+        <button type="button" disabled={busy} onClick={() => void patch({ reflectionModeOverride: "HEURISTIC" })}>Heuristic</button>
+        <button type="button" disabled={busy} onClick={() => void patch({ reflectionModeOverride: "LLM" })}>LLM</button>
+        <button type="button" disabled={busy} onClick={() => void patch({ reflectionModeOverride: "HYBRID" })}>Hybrid</button>
+        <button
+          type="button"
+          className="primary"
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            void api(`/challenges/${id}/reflection/run`, { method: "POST", body: {} }).finally(() => {
+              setBusy(false);
+              load();
+            });
+          }}
+        >
+          Reflect Now
+        </button>
+      </div>
+      <h4>Reflection History</h4>
+      {runs.length === 0 && <div className="muted">还没有反思记录</div>}
+      {runs.slice(0, 8).map((r) => {
+        let diagnosis = r.error ?? "";
+        try {
+          if (r.resultJson) diagnosis = String((JSON.parse(r.resultJson) as { diagnosis?: string }).diagnosis ?? diagnosis);
+        } catch {
+          /* ignore */
+        }
+        return (
+          <div key={r.id} className="muted" style={{ marginBottom: 6 }}>
+            {new Date(r.createdAt).toLocaleTimeString()} {r.trigger} · {r.mode}/{r.status}
+            {diagnosis ? ` · ${diagnosis.slice(0, 160)}` : ""}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function OrchestrationPanel({ refreshKey, onOpenChallenge }: { refreshKey: number; onOpenChallenge: (id: string) => void }) {
+  const [status, setStatus] = useState<OrchestrationStatus | null>(null);
+  const [plans, setPlans] = useState<ManagerPlanRow[]>([]);
+  const [openPlan, setOpenPlan] = useState<string | null>(null);
+  const [challenges, setChallenges] = useState<ChallengeRow[]>([]);
+  const [err, setErr] = useState("");
+
+  const load = useCallback(() => {
+    void api<OrchestrationStatus>("/orchestration/status").then(setStatus).catch((e) => setErr(String((e as Error).message)));
+    void api<{ items: ManagerPlanRow[] }>("/orchestration/plans").then((r) => setPlans(r.items)).catch(() => {});
+    void api<ChallengeRow[]>("/challenges").then(setChallenges).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 2500);
+    return () => clearInterval(t);
+  }, [load, refreshKey]);
+
+  const setMode = async (managerMode: string) => {
+    await api("/orchestration/settings", { method: "PATCH", body: { managerMode } });
+    load();
+  };
+
+  const health = status?.health ?? "OFF";
+  const active = challenges.filter((c) => c.status === "ACTIVE");
+  const queued = challenges.filter((c) => c.status === "QUEUED");
+
+  return (
+    <>
+      <div className="panel" data-testid="orchestration-status">
+        <h3>Manager 调度</h3>
+        <div className="header-meta">
+          <span className="chip">状态 <b>{health}</b></span>
+          <span className="chip">模式 <b>{status?.mode ?? "…"}</b></span>
+          <span className="chip">模型 <b>{status?.modelId ?? "未指定"}</b></span>
+          <span className="chip">Solver <b>{status?.solverSlots.used ?? 0}/{status?.solverSlots.total ?? 0}</b></span>
+          <span className="chip">Reflection <b>{status?.reflectionSlots.used ?? 0}/{status?.reflectionSlots.total ?? 0}</b></span>
+          <span className="chip">上次 <b>{status?.lastReplanAt ? `${Math.round((Date.now() - status.lastReplanAt) / 1000)}s 前` : "—"}</b></span>
+        </div>
+        <p className="muted">
+          触发 {status?.lastTrigger ?? "—"} · 计划 {status?.livePlanFresh ? "有效" : "过期/无"} · in-flight {status?.inFlight ?? 0}
+          {status?.fallback ? " · 已回退确定性调度" : ""}
+        </p>
+        <div className="buttons">
+          <button type="button" onClick={() => void setMode("OFF")}>OFF</button>
+          <button type="button" onClick={() => void setMode("SHADOW")}>SHADOW</button>
+          <button type="button" onClick={() => void setMode("ACTIVE")}>ACTIVE</button>
+          <button type="button" className="primary" onClick={() => void api("/orchestration/replan", { method: "POST" }).then(load)}>立刻 Replan</button>
+        </div>
+        {err && <div className="err">{err}</div>}
+      </div>
+      <div className="panel">
+        <h3>Active Solvers</h3>
+        <table>
+          <thead>
+            <tr><th>题目</th><th>分类</th><th>分</th><th>进展</th><th>决策</th></tr>
+          </thead>
+          <tbody>
+            {active.map((c) => (
+              <tr key={c.id} onClick={() => onOpenChallenge(c.id)} style={{ cursor: "pointer" }}>
+                <td>{shortTitle(c.title)}</td>
+                <td>{c.category}</td>
+                <td>{c.score ?? "—"}</td>
+                <td>{zhProgress(c.progress)}</td>
+                <td>CONTINUE</td>
+              </tr>
+            ))}
+            {active.length === 0 && <tr><td colSpan={5} className="muted">没有正在解的题</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <div className="panel">
+        <h3>Queue</h3>
+        <table>
+          <thead>
+            <tr><th>题目</th><th>分</th><th>优先级</th><th>状态</th></tr>
+          </thead>
+          <tbody>
+            {queued.slice(0, 20).map((c) => (
+              <tr key={c.id} onClick={() => onOpenChallenge(c.id)} style={{ cursor: "pointer" }}>
+                <td>{shortTitle(c.title)}</td>
+                <td>{c.score ?? "—"}</td>
+                <td>{c.priorityScore ?? "—"}</td>
+                <td>{zhLife(c.status)}</td>
+              </tr>
+            ))}
+            {queued.length === 0 && <tr><td colSpan={4} className="muted">队列为空</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <div className="panel">
+        <h3>Plan History</h3>
+        {plans.map((p) => (
+          <div key={p.id} style={{ marginBottom: 10 }}>
+            <button type="button" className="ghost" onClick={() => setOpenPlan(openPlan === p.id ? null : p.id)}>
+              {new Date(p.createdAt).toLocaleTimeString()} · {p.trigger} · {p.status} · {p.modelId ?? "—"} · {p.durationMs}ms
+            </button>
+            {openPlan === p.id && (
+              <ul>
+                {(p.decisions ?? []).map((d) => (
+                  <li key={`${p.id}-${d.challengeId}`}>
+                    {d.action} {d.challengeId} p={d.priority} ({d.status}{d.rejectionReason ? ` ${d.rejectionReason}` : ""}): {d.reason}
+                  </li>
+                ))}
+                {(p.decisions ?? []).length === 0 && <li className="muted">无逐条决策</li>}
+              </ul>
+            )}
+          </div>
+        ))}
+        {plans.length === 0 && <div className="muted">还没有 Manager 计划</div>}
+      </div>
+    </>
+  );
 }
 
 function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: number }) {
@@ -1512,7 +1716,7 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
       <div className="panel">
         <h3>运行时模型分配</h3>
         <p className="muted">不要用角色写死「视觉模型」。一个模型可以同时解题和看图。分配只是告诉系统哪一个负责哪件事。</p>
-        {(["primarySolverModelId", "reflectionModelId", "visionModelId", "triageModelId"] as const).map((slot) => {
+        {(["primarySolverModelId", "reflectionModelId", "visionModelId", "triageModelId", "managerModelId"] as const).map((slot) => {
           const label =
             slot === "primarySolverModelId"
               ? "主解题模型"
@@ -1520,7 +1724,9 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
                 ? "反思模型"
                 : slot === "visionModelId"
                   ? "视觉模型"
-                  : "分诊模型";
+                  : slot === "managerModelId"
+                    ? "调度 Manager 模型"
+                    : "分诊模型";
           const enabledProviderIds = new Set(providers.map((p) => p.id));
           const all = (data?.models ?? []).filter((m) => isOn(m.enabled) && enabledProviderIds.has(m.providerId));
           const assigned = data?.assignments?.[slot] ?? "";

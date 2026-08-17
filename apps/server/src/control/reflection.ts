@@ -104,49 +104,4 @@ export function reflectionMessage(outcome: ReflectionOutcome): string {
   return lines.join("\n");
 }
 
-export class ReflectionService {
-  constructor(
-    private deps: {
-      repos: Repositories;
-      bus: EventBus;
-      logger: RioLogger;
-      inject: (challengeId: string, message: string) => boolean;
-    },
-  ) {}
 
-  /** Run a reflection pass and inject the result into the solver. */
-  reflect(challengeId: string, trigger: string): ReflectionOutcome & { injected: boolean } {
-    const { repos } = this.deps;
-    const challenge = repos.challenges.get(challengeId);
-    if (!challenge) throw new Error("unknown challenge");
-    const latest = repos.progress.latestForChallenge(challengeId);
-    const wrongFlags = repos.submissions
-      .listByChallenge(challengeId)
-      .filter((s) => s.status === "WRONG")
-      .map((s) => s.flagValue);
-    const hints = repos.hints.listForChallenge(challengeId).map((h) => h.content);
-    const experiments = repos.experiments.listByChallenge(challengeId);
-    const outcome = buildReflection(
-      challenge,
-      latest
-        ? {
-            summary: latest.summary,
-            hypotheses: safeJsonArray(latest.hypothesesJson),
-            confirmedFacts: safeJsonArray(latest.confirmedFactsJson),
-            rejectedHypotheses: safeJsonArray(latest.rejectedHypothesesJson),
-            nextActions: safeJsonArray(latest.nextActionsJson),
-            confidence: latest.confidence,
-          }
-        : null,
-      wrongFlags,
-      hints,
-      experiments.map((e) => `${e.tool}:${e.outcome}`),
-    );
-    const injected = this.deps.inject(challengeId, reflectionMessage(outcome));
-    const payload = { trigger, ...outcome, injected };
-    repos.events.append("REFLECTION_RUN", challengeId, payload);
-    this.deps.bus.publish({ type: "REFLECTION_RUN", challengeId, payload });
-    this.deps.logger.info({ event: "reflection", challengeId, trigger, injected });
-    return { ...outcome, injected };
-  }
-}

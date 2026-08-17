@@ -97,6 +97,32 @@ export const runtimeConfigSchema = z.object({
     maxImagesPerCall: z.number().int().min(1).max(8).default(4),
   }).default({}),
 
+  manager: z.object({
+    enabled: z.boolean().default(false),
+    mode: z.enum(["OFF", "SHADOW", "ACTIVE"]).default("SHADOW"),
+    replanIntervalMs: z.number().int().min(5_000).max(600_000).default(30_000),
+    debounceMs: z.number().int().min(0).max(60_000).default(5_000),
+    planTtlMs: z.number().int().min(10_000).max(600_000).default(90_000),
+    maxCandidates: z.number().int().min(1).max(200).default(40),
+    failureMode: z.enum(["DETERMINISTIC_FALLBACK"]).default("DETERMINISTIC_FALLBACK"),
+    allowAutoPark: z.boolean().default(false),
+    callTimeoutMs: z.number().int().min(1_000).max(180_000).default(45_000),
+  }).default({}),
+
+  reflection: z.object({
+    enabledByDefault: z.boolean().default(true),
+    mode: z.enum(["OFF", "HEURISTIC", "LLM", "HYBRID"]).default("HYBRID"),
+    maxConcurrent: z.number().int().min(1).max(16).default(2),
+    cooldownMs: z.number().int().min(0).max(3_600_000).default(300_000),
+    callTimeoutMs: z.number().int().min(1_000).max(180_000).default(45_000),
+    triggers: z.object({
+      stalledMs: z.number().int().min(1_000).default(120_000),
+      noSignalStreak: z.number().int().min(1).max(50).default(3),
+      wrongFlag: z.boolean().default(true),
+      repeatedExperiment: z.boolean().default(true),
+    }).default({}),
+  }).default({}),
+
   server: z.object({
     host: z.string().default(process.env.RIO_HOST ?? "127.0.0.1"),
     port: z.number().int().min(1).max(65535).default(Number(process.env.RIO_PORT ?? 3000)),
@@ -112,6 +138,14 @@ export const runtimeConfigSchema = z.object({
 });
 
 export type RuntimeConfig = z.infer<typeof runtimeConfigSchema>;
+
+export type EffectiveManagerMode = "OFF" | "SHADOW" | "ACTIVE";
+
+/** enabled=false (default) keeps MVP-2 scheduler behavior regardless of mode. */
+export function effectiveManagerMode(cfg: Pick<RuntimeConfig, "manager">): EffectiveManagerMode {
+  if (!cfg.manager.enabled || cfg.manager.mode === "OFF") return "OFF";
+  return cfg.manager.mode;
+}
 
 export function defaultConfig(): RuntimeConfig {
   return runtimeConfigSchema.parse({});

@@ -42,6 +42,66 @@ export interface Status {
   networkIsolation?: boolean;
   providers: { id: string; name: string; health: string; consecutiveFailures?: number }[];
   pendingVisualReviews?: number;
+  orchestration?: OrchestrationStatus;
+}
+
+export interface OrchestrationStatus {
+  mode: string;
+  enabled: boolean;
+  health: string;
+  modelId: string | null;
+  lastReplanAt: number | null;
+  lastTrigger: string | null;
+  livePlanId: string | null;
+  livePlanFresh: boolean;
+  fallback: boolean;
+  inFlight: number;
+  solverSlots: { used: number; total: number };
+  reflectionSlots: { used: number; total: number };
+  nextPeriodicMs?: number;
+}
+
+export interface ManagerPlanRow {
+  id: string;
+  status: string;
+  trigger: string;
+  summary: string | null;
+  modelId: string | null;
+  durationMs: number;
+  createdAt: number;
+  decisions?: {
+    challengeId: string;
+    action: string;
+    priority: number;
+    reason: string;
+    status: string;
+    rejectionReason: string | null;
+  }[];
+}
+
+export interface ChallengeOrchestrationView {
+  challengeId: string;
+  strategyLocked: boolean;
+  manualDispatch: string;
+  reflectionOverride: string;
+  reflectionModeOverride: string | null;
+  managerAction: string | null;
+  managerPriority: number | null;
+  managerReflectionEnabled: boolean | null;
+  managerReason: string | null;
+  reflectionEnabled?: boolean;
+  reflectionMode?: string;
+}
+
+export interface ReflectionRunRow {
+  id: string;
+  trigger: string;
+  mode: string;
+  status: string;
+  resultJson: string | null;
+  error: string | null;
+  createdAt: number;
+  deliveredAt: number | null;
 }
 
 export interface VisualReviewRow {

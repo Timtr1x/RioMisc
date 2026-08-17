@@ -103,6 +103,7 @@ describe("model capabilities and assignments", () => {
       reflectionModelId: null,
       visionModelId: null,
       triageModelId: null,
+      managerModelId: null,
     });
     patchModelAssignments(repos, { visionModelId: vis.id, primarySolverModelId: txt.id });
     const loaded = loadModelAssignments(repos);
@@ -173,6 +174,7 @@ describe("model capabilities and assignments", () => {
       reflectionModelId: null,
       visionModelId: null,
       triageModelId: null,
+      managerModelId: null,
     });
     expect(patchModelAssignments(repos, { primarySolverModelId: dead.id }).primarySolverModelId).toBeNull();
     expect(patchModelAssignments(repos, { primarySolverModelId: live.id }).primarySolverModelId).toBe(live.id);

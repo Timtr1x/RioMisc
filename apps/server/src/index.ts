@@ -11,7 +11,8 @@ import { EventBus } from "./control/bus.js";
 import { PreparationService } from "./control/preparation.js";
 import { SubmissionManager } from "./control/submission.js";
 import { HintManager } from "./control/hints.js";
-import { ReflectionService } from "./control/reflection.js";
+import { ReflectionExecutor } from "./control/reflection/reflection-service.js";
+import { HttpAdvisoryRuntime, type AdvisoryAgentRuntime } from "./control/advisory-runtime.js";
 import { RecoveryManager } from "./control/recovery.js";
 import { ModelRegistry } from "./control/registry.js";
 import { ControlPlane } from "./control/control-plane.js";
@@ -38,7 +39,7 @@ export interface Runtime {
   close(): Promise<void>;
 }
 
-export async function startRuntime(opts: { configPath?: string; configOverrides?: Partial<RuntimeConfig>; skipApi?: boolean } = {}): Promise<Runtime> {
+export async function startRuntime(opts: { configPath?: string; configOverrides?: Partial<RuntimeConfig>; skipApi?: boolean; advisory?: AdvisoryAgentRuntime } = {}): Promise<Runtime> {
   const config = opts.configOverrides
     ? ({ ...loadConfig(opts.configPath), ...opts.configOverrides } as RuntimeConfig)
     : loadConfig(opts.configPath);
@@ -168,7 +169,8 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     inject,
   });
 
-  const reflection = new ReflectionService({ repos, bus, logger, inject });
+  const advisory = opts.advisory ?? new HttpAdvisoryRuntime({ repos, secrets, logger });
+  const reflection = new ReflectionExecutor({ repos, bus, logger, config, advisory, inject });
 
   const recovery = new RecoveryManager({
     repos,
@@ -203,6 +205,7 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
     recovery,
     pythonExecutable: python.path,
     secrets,
+    advisory,
   });
 
   await control.start();

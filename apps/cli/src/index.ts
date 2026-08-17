@@ -251,6 +251,111 @@ export async function main(argv: string[]): Promise<void> {
       process.exit(1);
     });
 
+  const manager = program.command("manager").description("Contest Manager orchestration");
+  manager.command("status").description("Show Manager health and slots").action(async () => {
+    const s = await api("/api/orchestration/status");
+    console.log(JSON.stringify(s, null, 2));
+  });
+  manager.command("enable").description("Enable Manager in SHADOW mode").action(async () => {
+    await api("/api/orchestration/settings", { method: "PATCH", body: { managerMode: "SHADOW" } });
+    console.log("manager enabled (SHADOW)");
+  });
+  manager.command("disable").description("Disable Manager").action(async () => {
+    await api("/api/orchestration/settings", { method: "PATCH", body: { managerMode: "OFF" } });
+    console.log("manager disabled");
+  });
+  manager.command("replan").description("Request a Manager replan").action(async () => {
+    await api("/api/orchestration/replan", { method: "POST" });
+    console.log("replan requested");
+  });
+  manager.command("plans").description("List recent Manager plans").action(async () => {
+    const r = (await api("/api/orchestration/plans")) as { items: Record<string, unknown>[] };
+    table(
+      r.items.map((p) => ({
+        id: p.id,
+        status: p.status,
+        trigger: p.trigger,
+        summary: String(p.summary ?? "").slice(0, 40),
+        ms: p.durationMs,
+      })),
+    );
+  });
+
+  program
+    .command("strategy <id> [action]")
+    .description("Show or lock/unlock challenge strategy")
+    .action(async (id, action) => {
+      if (action === "lock") {
+        await api(`/api/challenges/${id}/orchestration`, { method: "PATCH", body: { strategyLocked: true } });
+        console.log("strategy locked", id);
+        return;
+      }
+      if (action === "unlock") {
+        await api(`/api/challenges/${id}/orchestration`, { method: "PATCH", body: { strategyLocked: false } });
+        console.log("strategy unlocked", id);
+        return;
+      }
+      const s = await api(`/api/challenges/${id}/orchestration`);
+      console.log(JSON.stringify(s, null, 2));
+    });
+
+  program
+    .command("dispatch <id> <mode>")
+    .description("Set manual dispatch: auto | start | hold")
+    .action(async (id, mode) => {
+      const map: Record<string, string> = { auto: "AUTO", start: "FORCE_START", hold: "FORCE_HOLD" };
+      const manualDispatch = map[String(mode).toLowerCase()];
+      if (!manualDispatch) throw new Error("mode must be auto|start|hold");
+      await api(`/api/challenges/${id}/orchestration`, { method: "PATCH", body: { manualDispatch } });
+      console.log("dispatch", id, manualDispatch);
+    });
+
+  program
+    .command("reflection-status <id>")
+    .description("Show reflection override and history")
+    .action(async (id) => {
+      const orch = await api(`/api/challenges/${id}/orchestration`);
+      const hist = await api(`/api/challenges/${id}/reflections`);
+      console.log(JSON.stringify({ orchestration: orch, reflections: hist }, null, 2).slice(0, 8000));
+    });
+
+  program
+    .command("reflection-on <id>")
+    .description("Force-enable reflection for a challenge")
+    .action(async (id) => {
+      await api(`/api/challenges/${id}/orchestration`, { method: "PATCH", body: { reflectionOverride: "ON" } });
+      console.log("reflection ON", id);
+    });
+
+  program
+    .command("reflection-off <id>")
+    .description("Disable reflection for a challenge")
+    .action(async (id) => {
+      await api(`/api/challenges/${id}/orchestration`, { method: "PATCH", body: { reflectionOverride: "OFF" } });
+      console.log("reflection OFF", id);
+    });
+
+  program
+    .command("reflection-mode <id> <mode>")
+    .description("Set per-challenge reflection mode (off|heuristic|llm|hybrid)")
+    .action(async (id, mode) => {
+      const reflectionModeOverride = String(mode).toUpperCase();
+      await api(`/api/challenges/${id}/orchestration`, { method: "PATCH", body: { reflectionModeOverride } });
+      console.log("reflection mode", id, reflectionModeOverride);
+    });
+
+  program
+    .command("reflect <id>")
+    .description("Force-run one reflection")
+    .option("--mode <mode>", "OFF|HEURISTIC|LLM|HYBRID")
+    .action(async (id, opts) => {
+      const r = await api(`/api/challenges/${id}/reflection/run`, {
+        method: "POST",
+        body: opts.mode ? { mode: String(opts.mode).toUpperCase() } : {},
+      });
+      console.log(JSON.stringify(r, null, 2).slice(0, 4000));
+    });
+
   program.parseAsync(argv).catch((e) => {
     console.error("error:", e.message);
     process.exit(1);

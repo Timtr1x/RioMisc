@@ -310,4 +310,77 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
   error TEXT,
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS challenge_orchestration (
+  challenge_id TEXT PRIMARY KEY,
+  strategy_locked INTEGER NOT NULL DEFAULT 0,
+  manual_dispatch TEXT NOT NULL DEFAULT 'AUTO',
+  reflection_override TEXT NOT NULL DEFAULT 'INHERIT',
+  reflection_mode_override TEXT,
+  manager_action TEXT,
+  manager_priority INTEGER,
+  manager_reflection_enabled INTEGER,
+  manager_reason TEXT,
+  manager_plan_id TEXT,
+  manager_updated_at INTEGER,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS manager_plans (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  provider_id TEXT,
+  model_id TEXT,
+  trigger TEXT NOT NULL,
+  snapshot_hash TEXT,
+  summary TEXT,
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  started_at INTEGER,
+  completed_at INTEGER,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS manager_plans_created_idx ON manager_plans(created_at);
+
+CREATE TABLE IF NOT EXISTS manager_decisions (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL,
+  challenge_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  priority INTEGER NOT NULL,
+  reflection_enabled INTEGER,
+  reason TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'APPLIED',
+  rejection_reason TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS manager_decisions_plan_idx ON manager_decisions(plan_id);
+CREATE INDEX IF NOT EXISTS manager_decisions_challenge_idx ON manager_decisions(challenge_id);
+
+CREATE TABLE IF NOT EXISTS reflection_runs (
+  id TEXT PRIMARY KEY,
+  challenge_id TEXT NOT NULL,
+  trigger TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  provider_id TEXT,
+  model_id TEXT,
+  fingerprint TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  snapshot_json TEXT NOT NULL DEFAULT '{}',
+  result_json TEXT,
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  started_at INTEGER,
+  completed_at INTEGER,
+  delivered_at INTEGER,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS reflection_runs_challenge_idx ON reflection_runs(challenge_id);
+CREATE INDEX IF NOT EXISTS reflection_runs_created_idx ON reflection_runs(created_at);
+CREATE INDEX IF NOT EXISTS reflection_runs_fingerprint_idx ON reflection_runs(challenge_id, fingerprint);
+CREATE INDEX IF NOT EXISTS reflection_runs_status_idx ON reflection_runs(status);
 `;

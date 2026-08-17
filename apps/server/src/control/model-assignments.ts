@@ -8,6 +8,7 @@ export const EMPTY_MODEL_ASSIGNMENTS: ModelAssignments = {
   reflectionModelId: null,
   visionModelId: null,
   triageModelId: null,
+  managerModelId: null,
 };
 
 export function defaultModelCapabilities(): ModelCapabilities {
@@ -59,6 +60,7 @@ export function parseModelAssignments(raw: string | null): ModelAssignments {
       reflectionModelId: typeof v.reflectionModelId === "string" ? v.reflectionModelId : null,
       visionModelId: typeof v.visionModelId === "string" ? v.visionModelId : null,
       triageModelId: typeof v.triageModelId === "string" ? v.triageModelId : null,
+      managerModelId: typeof v.managerModelId === "string" ? v.managerModelId : null,
     };
   } catch {
     return { ...EMPTY_MODEL_ASSIGNMENTS };
@@ -85,6 +87,7 @@ export function sanitizeModelAssignments(repos: Repositories, next: ModelAssignm
     reflectionModelId: keep(next.reflectionModelId),
     visionModelId: keep(next.visionModelId),
     triageModelId: keep(next.triageModelId),
+    managerModelId: keep(next.managerModelId),
   };
 }
 
@@ -94,6 +97,7 @@ export function saveModelAssignments(repos: Repositories, next: ModelAssignments
     reflectionModelId: next.reflectionModelId || null,
     visionModelId: next.visionModelId || null,
     triageModelId: next.triageModelId || null,
+    managerModelId: next.managerModelId || null,
   });
   repos.settings.set(MODEL_ASSIGNMENTS_KEY, JSON.stringify(cleaned));
   return cleaned;
@@ -108,7 +112,7 @@ export function pruneUnusableAssignments(repos: Repositories): ModelAssignments 
   return saveModelAssignments(repos, loadModelAssignments(repos));
 }
 
-export type AssignmentSlot = "primarySolver" | "reflection" | "triage" | "vision";
+export type AssignmentSlot = "primarySolver" | "reflection" | "triage" | "vision" | "manager";
 
 export function resolveAssignedModel(repos: Repositories, slot: AssignmentSlot) {
   const a = loadModelAssignments(repos);
@@ -119,7 +123,9 @@ export function resolveAssignedModel(repos: Repositories, slot: AssignmentSlot) 
         ? a.reflectionModelId
         : slot === "triage"
           ? a.triageModelId
-          : a.visionModelId;
+          : slot === "manager"
+            ? a.managerModelId
+            : a.visionModelId;
   if (id) {
     const m = repos.models.get(id);
     if (isModelUsable(repos, m)) return m;
