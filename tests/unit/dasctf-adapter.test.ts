@@ -5,6 +5,7 @@ import {
   assertDasctfOk,
   mapDasctfSubmit,
   formatDasctfEndpoints,
+  parseDasctfAttachments,
   DasctfAgentContestAdapter,
 } from "@rio/contest";
 
@@ -48,6 +49,23 @@ describe("dasctf helpers", () => {
     ]);
     expect(text).toContain("10.0.0.1");
     expect(text).toContain("root");
+  });
+
+  it("parses both docs-style files[] and live single attachment object", () => {
+    const multi = parseDasctfAttachments({ files: [{ name: "a.png", url: "https://cdn/a.png", ext: "png" }] }, 1);
+    expect(multi).toHaveLength(1);
+    expect(multi[0]!.name).toBe("a.png");
+    const single = parseDasctfAttachments({
+      key: "k",
+      signature: "s",
+      url: "https://pro-resource.dasctf.com/resource/oss/x.zip",
+      name: "解压缩的附件.zip",
+      previewUrl: "https://pro-resource.dasctf.com/resource/oss/x.zip",
+      extension: "zip",
+    }, 10663);
+    expect(single).toHaveLength(1);
+    expect(single[0]!.name).toBe("解压缩的附件.zip");
+    expect(single[0]!.url).toContain("pro-resource.dasctf.com");
   });
 });
 
@@ -105,7 +123,9 @@ describe("DasctfAgentContestAdapter", () => {
               ? []
               : [{ exposeIps: ["1.2.3.4"], ports: ["80"], users: [], isProxy: false }],
             attachment: {
-              files: [{ name: "a.png", url: "https://cdn.example.com/a.png", ext: "png" }],
+              url: "https://cdn.example.com/a.png",
+              name: "a.png",
+              extension: "png",
             },
           },
         });

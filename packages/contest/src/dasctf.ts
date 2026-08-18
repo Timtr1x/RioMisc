@@ -93,6 +93,46 @@ export function mapDasctfSubmit(json: DasctfEnvelope): SubmissionResult {
   return { ok: false, correct: false, status: "UNKNOWN", message: json.message || "unrecognized submit", raw: json };
 }
 
+/** Live DASCTF may return either docs-style `{files:[…]}` or a single `{url,name,extension}` object. */
+export function parseDasctfAttachments(
+  raw: unknown,
+  challengeId: number,
+): RemoteChallengeDetail["attachments"] {
+  const items: Array<{ name?: string; url?: string; ext?: string; extension?: string }> = [];
+  if (Array.isArray(raw)) {
+    for (const f of raw) {
+      if (typeof f === "string") items.push({ url: f });
+      else if (f && typeof f === "object") items.push(f as { name?: string; url?: string; ext?: string; extension?: string });
+    }
+  } else if (raw && typeof raw === "object") {
+    const obj = raw as { files?: unknown; url?: string; name?: string; ext?: string; extension?: string; previewUrl?: string };
+    if (Array.isArray(obj.files)) {
+      for (const f of obj.files) {
+        if (typeof f === "string") items.push({ url: f });
+        else if (f && typeof f === "object") items.push(f as { name?: string; url?: string; ext?: string; extension?: string });
+      }
+    } else if (obj.url || obj.previewUrl) {
+      items.push({
+        name: obj.name,
+        url: obj.url || obj.previewUrl,
+        ext: obj.ext || obj.extension,
+        extension: obj.extension,
+      });
+    }
+  }
+  return items.map((f, i) => {
+    const url = f.url ? String(f.url) : null;
+    const ext = f.ext || f.extension;
+    const name = String(f.name || (ext ? `attachment.${ext}` : `attachment-${i}`));
+    return {
+      remoteId: `file-${challengeId}-${i}`,
+      name,
+      url,
+      sizeBytes: null as number | null,
+    };
+  });
+}
+
 export function formatDasctfEndpoints(endpoints: unknown): string {
   if (!Array.isArray(endpoints) || endpoints.length === 0) return "";
   const lines: string[] = ["靶机 / 连接信息："];
@@ -275,32 +315,7 @@ export class DasctfAgentContestAdapter implements ContestAdapter {
     const json = await this.#getJson(`/ctf/exercise?exerciseId=${id}`);
     assertDasctfOk(json, `/ctf/exercise?exerciseId=${id}`);
     const d = (json.data ?? {}) as Record<string, unknown>;
-    const fileBags = [
-      (d.attachment as { files?: unknown } | undefined)?.files,
-      (d.file as { files?: unknown } | undefined)?.files,
-      d.files,
-      d.attachments,
-    ];
-    let files: Array<{ name?: string; url?: string; ext?: string }> = [];
-    for (const bag of fileBags) {
-      if (Array.isArray(bag) && bag.length) {
-        files = bag as Array<{ name?: string; url?: string; ext?: string }>;
-        break;
-      }
-    }
-    const attachments = files.map((f, i) => {
-      const url = typeof f === "string" ? f : f.url ? String(f.url) : null;
-      const name =
-        typeof f === "string"
-          ? `attachment-${i}`
-          : String(f.name || (f.ext ? `attachment.${f.ext}` : `attachment-${i}`));
-      return {
-        remoteId: `file-${id}-${i}`,
-        name,
-        url,
-        sizeBytes: null as number | null,
-      };
-    });
+    const attachments = parseDasctfAttachments(d.attachment ?? d.file ?? d.files ?? d.attachments, id);
     let description = stripHtml(String(d.description ?? ""));
     const epText = formatDasctfEndpoints(d.endpoints);
     if (epText) description = `${description}\n\n${epText}`.trim();
@@ -392,7 +407,14 @@ export class DasctfAgentContestAdapter implements ContestAdapter {
   }
 
   #shouldAttach(url: string): boolean {
-    return shouldAttachContestCredential(url, this.baseUrl, this.trustedCredentialOrigins);
+    if (shouldAttachContestCredential(url, this.baseUrl, this.trustedCredentialOrigins)) return true;
+    // Live attachments often live on pro-resource.dasctf.com (signed OSS) — same org as the contest host.
+    try {
+      const host = new URL(url, this.baseUrl).hostname.toLowerCase();
+      return host === "dasctf.com" || host.endsWith(".dasctf.com");
+    } catch {
+      return false;
+    }
   }
 }
 
