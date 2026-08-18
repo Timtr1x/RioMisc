@@ -15,6 +15,7 @@ export function hintsForInspection(insp: FileInspection, buf?: Buffer): ToolHint
   const hints: ToolHint[] = [];
   const magic = insp.magic;
   if (IMAGE.has(magic)) {
+    hints.push({ tool: "inspect_metadata", reason: "Read PNG/JPEG text chunks or comments before heavy visual work." });
     hints.push({ tool: "analyze_visual", reason: "The file is an image and visual evidence may be useful." });
     hints.push({ tool: "extract_bitplane", reason: "LSB / bitplane extraction is a cheap next check on raster images." });
     if (magic === "PNG" && buf && pngHasAlpha(buf)) {
@@ -41,6 +42,7 @@ export function hintsForInspection(insp: FileInspection, buf?: Buffer): ToolHint
     hints.push({ tool: "analyze_pcap_overview", reason: "Start with a packet/protocol/HTTP/DNS overview before carving streams." });
     hints.push({ tool: "extract_http_objects", reason: "HTTP objects in a PCAP are a common flag drop." });
     hints.push({ tool: "extract_dns_activity", reason: "DNS names may carry exfiltrated or encoded data." });
+    hints.push({ tool: "follow_tcp_stream", reason: "Reassemble a TCP stream when overview shows interesting conversations." });
   }
   if (magic === "TEXT") {
     hints.push({ tool: "parse_crypto_values", reason: "Challenge text often contains n/e/c or other crypto parameters." });

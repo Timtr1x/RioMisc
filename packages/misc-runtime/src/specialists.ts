@@ -26,7 +26,13 @@ export function runSpecialist(kind: SpecialistKind, input: { buf?: Buffer; text?
         ...ov.httpRequests.slice(0, 5).map((h) => `${h.method} ${h.host}${h.path}`),
       ],
       rejectedIdeas: [],
-      recommendedActions: ov.httpRequests.length ? ["extract_http_objects"] : ov.dnsNames.length ? ["extract_dns_activity"] : ["follow_tcp_stream"],
+      recommendedActions: ov.httpRequests.length
+        ? ["extract_http_objects", "follow_tcp_stream"]
+        : ov.dnsNames.length
+          ? ["extract_dns_activity"]
+          : ov.tcpStreams > 0
+            ? ["follow_tcp_stream"]
+            : ["analyze_pcap_overview"],
     };
   }
   if ((kind === "ARCHIVE" || kind === "IMAGE") && input.buf) {

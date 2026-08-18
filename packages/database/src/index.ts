@@ -9,6 +9,7 @@ import { AttachmentRepository, ArtifactRepository } from "./repos/attachment.js"
 import { LeaseRepository, ProviderRepository, ModelRepository, SettingsRepository } from "./repos/lease.js";
 import { VisualEvidenceRepository, VisualReviewRepository } from "./repos/visual.js";
 import { HypothesisRepository, ExperimentRepository, SpecialistResultRepository, RecordedToolRepository, BenchmarkRunRepository } from "./repos/intel.js";
+import { CryptoStateRepository } from "./repos/crypto-state.js";
 import { OrchestrationRepository, ManagerPlanRepository, ManagerDecisionRepository, ReflectionRunRepository } from "./repos/orchestration.js";
 
 export interface Repositories {
@@ -33,6 +34,7 @@ export interface Repositories {
   specialists: SpecialistResultRepository;
   recordedTools: RecordedToolRepository;
   benchmarkRuns: BenchmarkRunRepository;
+  cryptoStates: CryptoStateRepository;
   orchestration: OrchestrationRepository;
   managerPlans: ManagerPlanRepository;
   managerDecisions: ManagerDecisionRepository;
@@ -66,6 +68,7 @@ export function createRepositories(dbPath: string): Repositories {
     specialists: new SpecialistResultRepository(db),
     recordedTools: new RecordedToolRepository(db),
     benchmarkRuns: new BenchmarkRunRepository(db),
+    cryptoStates: new CryptoStateRepository(db),
     orchestration: new OrchestrationRepository(db),
     managerPlans: new ManagerPlanRepository(db),
     managerDecisions: new ManagerDecisionRepository(db),
@@ -74,6 +77,7 @@ export function createRepositories(dbPath: string): Repositories {
 }
 
 export { OrchestrationRepository, ManagerPlanRepository, ManagerDecisionRepository, ReflectionRunRepository, defaultOrchestration } from "./repos/orchestration.js";
+export { CryptoStateRepository } from "./repos/crypto-state.js";
 
 export { parseModelCapabilities, serializeModelCapabilities } from "./repos/lease.js";
 export { VisualEvidenceRepository, VisualReviewRepository } from "./repos/visual.js";

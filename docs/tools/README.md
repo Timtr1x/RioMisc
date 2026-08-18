@@ -2,9 +2,9 @@
 
 Generated from `TOOL_CATALOG`. Do not edit by hand. Run `npm run docs:tools`.
 
-- total: 53
+- total: 58
 - CORE (Pi direct): 15
-- DISCOVERABLE: 38
+- DISCOVERABLE: 43
 
 - [misc.md](./misc.md)
 - [crypto.md](./crypto.md)

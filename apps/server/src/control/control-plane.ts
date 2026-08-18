@@ -755,6 +755,48 @@ depended on the previous files.`;
         }
         break;
       }
+      case "crypto_state": {
+        try {
+          const candidates = Array.isArray(msg.attackCandidates)
+            ? (msg.attackCandidates as Array<Record<string, unknown>>).map((c, i) => ({
+                id: String(c.id ?? `cand_${String(c.attack ?? "x")}_${i}`),
+                attack: String(c.attack ?? ""),
+                requirements: Array.isArray(c.requirements) ? (c.requirements as string[]) : [],
+                satisfiedRequirements: Array.isArray(c.satisfiedRequirements) ? (c.satisfiedRequirements as string[]) : [],
+                confidence: Number(c.confidence ?? 0.4),
+                estimatedCost: (c.estimatedCost as never) ?? "LOW",
+                status: (c.status as never) ?? "CANDIDATE",
+              }))
+            : undefined;
+          const attempt = msg.attempt && typeof msg.attempt === "object"
+            ? {
+                attack: String((msg.attempt as { attack?: string }).attack ?? ""),
+                tool: (msg.attempt as { tool?: string }).tool,
+                outcome: ((msg.attempt as { outcome?: string }).outcome as never) ?? "NO_SIGNAL",
+                summary: String((msg.attempt as { summary?: string }).summary ?? ""),
+              }
+            : undefined;
+          const state = repos.cryptoStates.upsert(challengeId, {
+            primitive: (msg.primitive as never) ?? undefined,
+            knownVariables: (msg.knownVariables as never) ?? undefined,
+            unknownVariables: Array.isArray(msg.unknownVariables) ? (msg.unknownVariables as string[]) : undefined,
+            equations: Array.isArray(msg.equations) ? (msg.equations as never) : undefined,
+            constraints: Array.isArray(msg.constraints) ? (msg.constraints as string[]) : undefined,
+            assumptions: Array.isArray(msg.assumptions) ? (msg.assumptions as string[]) : undefined,
+            attackCandidates: candidates,
+            replaceCandidates: Boolean(msg.replaceCandidates),
+            attempt,
+          });
+          bus.publish({
+            type: "CRYPTO_STATE_UPDATED",
+            challengeId,
+            payload: { primitive: state.primitive, updatedAt: state.updatedAt },
+          });
+        } catch (e) {
+          logger.warn({ event: "crypto_state_record_failed", challengeId, err: String(e) });
+        }
+        break;
+      }
       case "visual_evidence": {
         const ev = (msg.evidence ?? msg) as {
           id?: string;

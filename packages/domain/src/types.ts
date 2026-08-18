@@ -688,6 +688,66 @@ export interface BenchmarkRunResult {
   createdAt: number;
 }
 
+export type CryptoPrimitive =
+  | "RSA"
+  | "ECC"
+  | "AES"
+  | "XOR"
+  | "PRNG"
+  | "HASH"
+  | "CLASSICAL"
+  | "CUSTOM"
+  | "UNKNOWN";
+
+export type CryptoAttackCost = "TRIVIAL" | "LOW" | "MEDIUM" | "HIGH";
+export type CryptoAttackCandidateStatus = "CANDIDATE" | "TESTED" | "REJECTED" | "SUCCESS";
+export type CryptoAttackAttemptOutcome = "SUCCESS" | "FAILED" | "NO_SIGNAL" | "SKIPPED";
+
+export interface CryptoValue {
+  value: string;
+  source?: string;
+  confidence?: number;
+}
+
+export interface CryptoEquation {
+  expr: string;
+  satisfied?: boolean;
+}
+
+export interface CryptoAttackCandidate {
+  id: string;
+  attack: string;
+  requirements: string[];
+  satisfiedRequirements: string[];
+  confidence: number;
+  estimatedCost: CryptoAttackCost;
+  status: CryptoAttackCandidateStatus;
+}
+
+export interface CryptoAttackAttempt {
+  id: string;
+  attack: string;
+  tool?: string;
+  outcome: CryptoAttackAttemptOutcome;
+  summary: string;
+  at: number;
+}
+
+/** One live crypto workspace per challenge (upsert, not append-only). */
+export interface CryptoStateRecord {
+  challengeId: string;
+  primitive: CryptoPrimitive;
+  knownVariablesJson: string;
+  unknownVariablesJson: string;
+  equationsJson: string;
+  constraintsJson: string;
+  assumptionsJson: string;
+  attackCandidatesJson: string;
+  attemptsJson: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ContestCapabilities {
   polling: boolean;
   supportsStartChallenge: boolean;

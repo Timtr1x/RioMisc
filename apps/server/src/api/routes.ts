@@ -110,6 +110,20 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
       hypotheses: repos.hypotheses.listByChallenge(id),
       experiments: repos.experiments.listByChallenge(id),
       specialists: repos.specialists.listByChallenge(id),
+      cryptoState: (() => {
+        const s = repos.cryptoStates.get(id);
+        if (!s) return null;
+        return {
+          ...s,
+          knownVariables: JSON.parse(s.knownVariablesJson || "{}"),
+          unknownVariables: JSON.parse(s.unknownVariablesJson || "[]"),
+          equations: JSON.parse(s.equationsJson || "[]"),
+          constraints: JSON.parse(s.constraintsJson || "[]"),
+          assumptions: JSON.parse(s.assumptionsJson || "[]"),
+          attackCandidates: JSON.parse(s.attackCandidatesJson || "[]"),
+          attempts: JSON.parse(s.attemptsJson || "[]"),
+        };
+      })(),
       progress: repos.progress.listForChallenge(id, 50),
       candidates: repos.candidates.listByChallenge(id),
       submissions: repos.submissions.listByChallenge(id),

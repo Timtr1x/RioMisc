@@ -179,4 +179,23 @@ export function applySchemaMigrations(db: RioDb): void {
     `);
     db.run("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (6, ?)", Date.now());
   }
+
+  if (!applied.has(7)) {
+    db.sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS crypto_states (
+        challenge_id TEXT PRIMARY KEY,
+        primitive TEXT NOT NULL DEFAULT 'UNKNOWN',
+        known_variables_json TEXT NOT NULL DEFAULT '{}',
+        unknown_variables_json TEXT NOT NULL DEFAULT '[]',
+        equations_json TEXT NOT NULL DEFAULT '[]',
+        constraints_json TEXT NOT NULL DEFAULT '[]',
+        assumptions_json TEXT NOT NULL DEFAULT '[]',
+        attack_candidates_json TEXT NOT NULL DEFAULT '[]',
+        attempts_json TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    db.run("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (7, ?)", Date.now());
+  }
 }

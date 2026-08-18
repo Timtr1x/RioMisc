@@ -31,6 +31,7 @@ export const LEDGER_SKIP_TOOLS = new Set([
   "request_specialist",
   "list_workspace",
   "record_hypothesis",
+  "update_crypto_state",
   "discover_tools",
   "get_tool_help",
   "execute_tool",

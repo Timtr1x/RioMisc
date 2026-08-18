@@ -5,6 +5,7 @@ import {
   carveSchema,
   specialistParamsSchema,
   hypothesisParamsSchema,
+  updateCryptoStateSchema,
   imageTransformSchema,
   extractBitplaneSchema,
   parseCryptoValuesSchema,
@@ -23,12 +24,18 @@ import {
   crtSchema,
   linearCongruenceSchema,
   lcgRecoverSchema,
+  mt19937RecoverSchema,
   aesInspectSchema,
+  aesMisuseInspectSchema,
+  followTcpStreamSchema,
   frequencyAnalysisSchema,
   xorBytesSchema,
   xorKnownPlaintextSchema,
   lllReduceSchema,
   discreteLogSchema,
+  type CryptoAttackCandidate,
+  type CryptoPrimitive,
+  type CryptoValue,
 } from "@rio/domain";
 import { hintsForRsaAnalysis } from "./catalog/hints.js";
 import {
@@ -37,6 +44,8 @@ import {
   extractStringsSummary,
   analyzePcapOverview,
   extractHttpObjects,
+  followTcpStream,
+  inspectMetadata,
   runSpecialist,
 } from "@rio/misc-runtime";
 import {
@@ -61,7 +70,9 @@ import {
   frequencyAnalysis,
   caesar,
   lcgRecover,
+  mt19937Recover,
   aesInspect,
+  aesMisuseInspect,
   parseIntegerMatrix,
   lllWithBackend,
   discreteLogSmall,
@@ -131,6 +142,82 @@ export async function extractDnsActivityTool(ctx: ToolContext, params: unknown):
   if (!p.success) return fail("VALIDATION", p.error.issues[0]?.message ?? "bad", 0);
   const r = analyzePcapOverview(readFileSync(ctx.safeResolve(p.data.path)));
   return ok(`${r.dnsNames.length} DNS names`, { dnsNames: r.dnsNames }, Date.now() - t0);
+}
+
+export async function inspectMetadataTool(ctx: ToolContext, params: unknown): Promise<ToolResult> {
+  const t0 = Date.now();
+  const p = pathOnlySchema.safeParse(params);
+  if (!p.success) return fail("VALIDATION", p.error.issues[0]?.message ?? "bad", 0);
+  const abs = ctx.safeResolve(p.data.path);
+  const r = inspectMetadata(readFileSync(abs), p.data.path);
+  return ok(`${r.magic} metadata ${r.fields.length} fields`, r, Date.now() - t0);
+}
+
+export async function followTcpStreamTool(ctx: ToolContext, params: unknown): Promise<ToolResult> {
+  const t0 = Date.now();
+  const p = followTcpStreamSchema.safeParse(params);
+  if (!p.success) return fail("VALIDATION", p.error.issues[0]?.message ?? "bad", 0);
+  const r = followTcpStream(readFileSync(ctx.safeResolve(p.data.path)), {
+    streamIndex: p.data.streamIndex,
+    src: p.data.src,
+    dst: p.data.dst,
+    sport: p.data.sport,
+    dport: p.data.dport,
+    maxBytes: p.data.maxBytes,
+  });
+  return ok(`tcp stream ${r.streamKey || "(none)"} ${r.totalPayloadBytes}B`, r, Date.now() - t0);
+}
+
+function emitCryptoState(
+  ctx: ToolContext,
+  patch: {
+    primitive?: CryptoPrimitive;
+    knownVariables?: Record<string, CryptoValue>;
+    unknownVariables?: string[];
+    attackCandidates?: CryptoAttackCandidate[];
+    replaceCandidates?: boolean;
+    attempt?: { attack: string; tool?: string; outcome: "SUCCESS" | "FAILED" | "NO_SIGNAL" | "SKIPPED"; summary: string };
+    assumptions?: string[];
+    constraints?: string[];
+    equations?: { expr: string; satisfied?: boolean }[];
+  },
+): void {
+  ctx.emit("crypto_state", { challengeId: ctx.challengeId, sessionId: ctx.sessionId, ...patch });
+}
+
+function valuesToKnown(values: Record<string, string>, source: string): Record<string, CryptoValue> {
+  const out: Record<string, CryptoValue> = {};
+  for (const [k, v] of Object.entries(values)) {
+    if (v) out[k] = { value: v, source, confidence: 0.8 };
+  }
+  return out;
+}
+
+export async function updateCryptoStateTool(ctx: ToolContext, params: unknown): Promise<ToolResult> {
+  const t0 = Date.now();
+  const p = updateCryptoStateSchema.safeParse(params);
+  if (!p.success) return fail("VALIDATION", p.error.issues[0]?.message ?? "bad", 0);
+  const candidates = (p.data.attackCandidates ?? []).map((c, i) => ({
+    id: c.id ?? `cand_${c.attack}_${i}`,
+    attack: c.attack,
+    requirements: c.requirements ?? [],
+    satisfiedRequirements: c.satisfiedRequirements ?? [],
+    confidence: c.confidence ?? 0.4,
+    estimatedCost: c.estimatedCost ?? "LOW",
+    status: c.status ?? "CANDIDATE",
+  }));
+  emitCryptoState(ctx, {
+    primitive: p.data.primitive,
+    knownVariables: p.data.knownVariables,
+    unknownVariables: p.data.unknownVariables,
+    equations: p.data.equations,
+    constraints: p.data.constraints,
+    assumptions: p.data.assumptions,
+    attackCandidates: candidates.length ? candidates : undefined,
+    replaceCandidates: p.data.replaceCandidates,
+    attempt: p.data.attempt,
+  });
+  return ok("crypto state updated", p.data, Date.now() - t0);
 }
 
 export async function carveFilesTool(ctx: ToolContext, params: unknown): Promise<ToolResult> {
@@ -237,7 +324,9 @@ const CRYPTO_SCHEMAS: Record<string, { safeParse(data: unknown): { success: true
   crt: crtSchema,
   solve_linear_congruence: linearCongruenceSchema,
   lcg_recover: lcgRecoverSchema,
+  mt19937_recover: mt19937RecoverSchema,
   aes_inspect: aesInspectSchema,
+  aes_misuse_inspect: aesMisuseInspectSchema,
   frequency_analysis: frequencyAnalysisSchema,
   xor_bytes: xorBytesSchema,
   xor_known_plaintext: xorKnownPlaintextSchema,
@@ -251,7 +340,14 @@ export async function parseCryptoValuesTool(ctx: ToolContext, params: unknown): 
   if (!p.success) return fail("VALIDATION", p.error.issues[0]?.message ?? "bad", 0);
   const text = p.data.text ?? (p.data.path ? readFileSync(ctx.safeResolve(p.data.path), "utf8") : "");
   const values = parseCryptoValues(text);
-  return ok(`parsed ${Object.keys(values).join(",") || "nothing"}`, { values }, Date.now() - t0);
+  const keys = Object.keys(values);
+  if (keys.length) {
+    emitCryptoState(ctx, {
+      knownVariables: valuesToKnown(values, "parse_crypto_values"),
+      unknownVariables: ["n", "e", "c", "p", "q", "d"].filter((k) => !values[k]),
+    });
+  }
+  return ok(`parsed ${keys.join(",") || "nothing"}`, { values }, Date.now() - t0);
 }
 
 export async function analyzeRsaTool(ctx: ToolContext, params: unknown): Promise<ToolResult> {
@@ -263,6 +359,28 @@ export async function analyzeRsaTool(ctx: ToolContext, params: unknown): Promise
   const inst = { n: asBig(values, "n"), e: asBig(values, "e"), c: asBig(values, "c") };
   const r = analyzeRsaInstance(inst);
   const hints = hintsForRsaAnalysis(r.attackCandidates);
+  const candidates: CryptoAttackCandidate[] = r.attackCandidates.map((a, i) => ({
+    id: `rsa_${a.attack}_${i}`,
+    attack: a.attack,
+    requirements: [],
+    satisfiedRequirements: [],
+    confidence: a.confidence,
+    estimatedCost: a.confidence >= 0.85 ? "TRIVIAL" : a.confidence >= 0.75 ? "LOW" : "MEDIUM",
+    status: "CANDIDATE",
+  }));
+  emitCryptoState(ctx, {
+    primitive: "RSA",
+    knownVariables: valuesToKnown(
+      Object.fromEntries(
+        Object.entries(values).filter(([, v]) => typeof v === "string") as [string, string][],
+      ),
+      "analyze_rsa_instance",
+    ),
+    unknownVariables: ["p", "q", "d", "m"].filter((k) => !values[k]),
+    attackCandidates: candidates,
+    replaceCandidates: true,
+    assumptions: [`RSA bitLength=${r.bitLength}`],
+  });
   return {
     ...ok(`RSA ${r.bitLength}b ${r.attackCandidates.map((a) => a.attack).join(",")}`, { ...r, hints }, Date.now() - t0),
     hints,
@@ -285,14 +403,31 @@ export async function rsaAttackTool(name: string, ctx: ToolContext, params: unkn
   try {
     if (name === "rsa_small_e") {
       const rec = rsaSmallE(asBig(v, "c")!, asBig(v, "e") ?? 3n, asBig(v, "n"));
+      emitCryptoState(ctx, {
+        primitive: "RSA",
+        attempt: { attack: "SMALL_E", tool: name, outcome: rec ? "SUCCESS" : "FAILED", summary: rec ? `m=${rec}` : "small-e failed" },
+        knownVariables: rec ? { m: { value: rec.toString(), source: name, confidence: 0.95 } } : undefined,
+      });
       return ok(rec ? `m=${rec}` : "small-e failed", { m: rec?.toString() ?? null }, Date.now() - t0);
     }
     if (name === "rsa_fermat") {
       const rec = rsaFermat(asBig(v, "n")!);
+      emitCryptoState(ctx, {
+        primitive: "RSA",
+        attempt: { attack: "FERMAT", tool: name, outcome: rec ? "SUCCESS" : "FAILED", summary: rec ? `p=${rec.p} q=${rec.q}` : "fermat failed" },
+        knownVariables: rec
+          ? { p: { value: rec.p.toString(), source: name }, q: { value: rec.q.toString(), source: name } }
+          : undefined,
+      });
       return ok(rec ? `p=${rec.p} q=${rec.q}` : "fermat failed", rec ? { p: rec.p.toString(), q: rec.q.toString() } : {}, Date.now() - t0);
     }
     if (name === "rsa_wiener") {
       const rec = rsaWiener(asBig(v, "n")!, asBig(v, "e")!);
+      emitCryptoState(ctx, {
+        primitive: "RSA",
+        attempt: { attack: "WIENER", tool: name, outcome: rec ? "SUCCESS" : "FAILED", summary: rec ? `d=${rec}` : "wiener failed" },
+        knownVariables: rec ? { d: { value: rec.toString(), source: name } } : undefined,
+      });
       return ok(rec ? `d=${rec}` : "wiener failed", { d: rec?.toString() ?? null }, Date.now() - t0);
     }
     if (name === "rsa_hastad") {
@@ -301,6 +436,11 @@ export async function rsaAttackTool(name: string, ctx: ToolContext, params: unkn
       if (v.c2 && v.n2) pairs.push({ c: parseBig(v.c2), n: parseBig(v.n2) });
       if (v.c3 && v.n3) pairs.push({ c: parseBig(v.c3), n: parseBig(v.n3) });
       const rec = rsaHastad(asBig(v, "e") ?? 3n, pairs);
+      emitCryptoState(ctx, {
+        primitive: "RSA",
+        attempt: { attack: "HASTAD", tool: name, outcome: rec ? "SUCCESS" : "FAILED", summary: rec ? `m=${rec}` : "hastad failed" },
+        knownVariables: rec ? { m: { value: rec.toString(), source: name } } : undefined,
+      });
       return ok(rec ? `m=${rec}` : "hastad failed", { m: rec?.toString() ?? null }, Date.now() - t0);
     }
     if (name === "solve_linear_congruence") {
@@ -351,12 +491,71 @@ export async function rsaAttackTool(name: string, ctx: ToolContext, params: unkn
     if (name === "lcg_recover") {
       const nums = (v.samples ?? text).split(/[,\s]+/).filter(Boolean).map((s) => parseBig(s));
       const rec = lcgRecover(nums);
+      emitCryptoState(ctx, {
+        primitive: "PRNG",
+        attempt: {
+          attack: "LCG_RECOVER",
+          tool: name,
+          outcome: rec ? "SUCCESS" : "FAILED",
+          summary: rec ? `a=${rec.a} c=${rec.c} m=${rec.m}` : "lcg failed",
+        },
+        knownVariables: rec
+          ? {
+              a: { value: rec.a.toString(), source: name },
+              c: { value: rec.c.toString(), source: name },
+              m: { value: rec.m.toString(), source: name },
+            }
+          : undefined,
+      });
       return ok(rec ? `a=${rec.a} c=${rec.c}` : "lcg failed", rec, Date.now() - t0);
+    }
+    if (name === "mt19937_recover") {
+      const nums = (v.samples ?? text).split(/[,\s]+/).filter(Boolean).map((s) => Number(BigInt(s.trim()) & 0xffffffffn));
+      const state = mt19937Recover(nums);
+      emitCryptoState(ctx, {
+        primitive: "PRNG",
+        attempt: {
+          attack: "MT19937_RECOVER",
+          tool: name,
+          outcome: state ? "SUCCESS" : "FAILED",
+          summary: state ? `recovered ${state.length} MT state words` : "need ≥624 tempered outputs",
+        },
+      });
+      return ok(state ? `mt state ${state.length}` : "mt19937 need ≥624 outputs", { state }, Date.now() - t0);
     }
     if (name === "aes_inspect") {
       const buf = typeof data.path === "string" ? readFileSync(ctx.safeResolve(data.path)) : Buffer.from(text, "hex");
       const r = aesInspect(buf);
+      emitCryptoState(ctx, {
+        primitive: "AES",
+        attempt: { attack: "AES_INSPECT", tool: name, outcome: "NO_SIGNAL", summary: `mode=${r.likelyMode}` },
+        assumptions: [`AES likelyMode=${r.likelyMode}`],
+      });
       return ok(`AES ${r.likelyMode}`, r, Date.now() - t0);
+    }
+    if (name === "aes_misuse_inspect") {
+      const primary =
+        typeof data.path === "string"
+          ? readFileSync(ctx.safeResolve(data.path))
+          : Buffer.from(String(data.text ?? text), "hex");
+      const secondary =
+        typeof data.path2 === "string"
+          ? readFileSync(ctx.safeResolve(data.path2))
+          : typeof data.text2 === "string"
+            ? Buffer.from(data.text2, "hex")
+            : undefined;
+      const r = aesMisuseInspect(primary, secondary);
+      emitCryptoState(ctx, {
+        primitive: "AES",
+        attempt: {
+          attack: "AES_MISUSE",
+          tool: name,
+          outcome: r.keystreamReuseLikely || r.primary.likelyMode === "ECB" || r.zeroIvLikely ? "SUCCESS" : "NO_SIGNAL",
+          summary: r.findings[0] ?? "aes misuse inspect",
+        },
+        assumptions: r.findings.slice(0, 4),
+      });
+      return ok(r.findings[0] ?? "aes misuse", r, Date.now() - t0);
     }
     if (name === "frequency_analysis") {
       const buf = Buffer.from(text, "utf8");

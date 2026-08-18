@@ -522,31 +522,60 @@ export const carveSchema = z.object({
   force: z.boolean().optional(),
 });
 
-export const cryptoTextSchema = z.object({
-  text: z.string().max(50_000).optional(),
+export const mt19937RecoverSchema = z.object({
+  samples: z.string().min(1).max(200_000),
+  ...forceField,
+});
+
+export const aesMisuseInspectSchema = z.object({
   path: z.string().max(1000).optional(),
-  n: z.string().optional(),
-  e: z.string().optional(),
-  c: z.string().optional(),
-  p: z.string().optional(),
-  q: z.string().optional(),
-  c1: z.string().optional(),
-  c2: z.string().optional(),
-  e1: z.string().optional(),
-  e2: z.string().optional(),
-  a: z.string().optional(),
-  b: z.string().optional(),
-  m: z.string().optional(),
-  m2: z.string().optional(),
-  samples: z.string().optional(),
-  key: z.string().optional(),
-  n1: z.string().optional(),
-  n2: z.string().optional(),
-  n3: z.string().optional(),
-  c3: z.string().optional(),
-  matrix: z.string().optional(),
-  g: z.string().optional(),
-  h: z.string().optional(),
+  text: z.string().max(100_000).optional(),
+  text2: z.string().max(100_000).optional(),
+  path2: z.string().max(1000).optional(),
+  ...forceField,
+}).refine((v) => Boolean(v.path || v.text), { message: "aes_misuse_inspect needs path or HEX ciphertext in text" });
+
+export const followTcpStreamSchema = z.object({
+  path: z.string().min(1).max(1000),
+  streamIndex: z.number().int().min(0).max(10_000).optional(),
+  src: z.string().max(64).optional(),
+  dst: z.string().max(64).optional(),
+  sport: z.number().int().min(0).max(65535).optional(),
+  dport: z.number().int().min(0).max(65535).optional(),
+  maxBytes: z.number().int().min(64).max(2 * 1024 * 1024).optional(),
+  force: z.boolean().optional(),
+});
+
+export const updateCryptoStateSchema = z.object({
+  primitive: z.enum(["RSA", "ECC", "AES", "XOR", "PRNG", "HASH", "CLASSICAL", "CUSTOM", "UNKNOWN"]).optional(),
+  knownVariables: z.record(z.object({
+    value: z.string().max(20_000),
+    source: z.string().max(200).optional(),
+    confidence: z.number().min(0).max(1).optional(),
+  })).optional(),
+  unknownVariables: z.array(z.string().max(80)).max(64).optional(),
+  equations: z.array(z.object({
+    expr: z.string().max(500),
+    satisfied: z.boolean().optional(),
+  })).max(64).optional(),
+  constraints: z.array(z.string().max(400)).max(64).optional(),
+  assumptions: z.array(z.string().max(400)).max(64).optional(),
+  attackCandidates: z.array(z.object({
+    id: z.string().max(80).optional(),
+    attack: z.string().max(80),
+    requirements: z.array(z.string().max(120)).max(20).optional(),
+    satisfiedRequirements: z.array(z.string().max(120)).max(20).optional(),
+    confidence: z.number().min(0).max(1).optional(),
+    estimatedCost: z.enum(["TRIVIAL", "LOW", "MEDIUM", "HIGH"]).optional(),
+    status: z.enum(["CANDIDATE", "TESTED", "REJECTED", "SUCCESS"]).optional(),
+  })).max(32).optional(),
+  attempt: z.object({
+    attack: z.string().max(80),
+    tool: z.string().max(80).optional(),
+    outcome: z.enum(["SUCCESS", "FAILED", "NO_SIGNAL", "SKIPPED"]),
+    summary: z.string().max(1000),
+  }).optional(),
+  replaceCandidates: z.boolean().optional(),
   force: z.boolean().optional(),
 });
 

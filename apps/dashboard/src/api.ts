@@ -169,6 +169,15 @@ export interface ChallengeDetail {
   hypotheses?: { id: string; description: string; status: string; confidence: number; evidenceForJson?: string; evidenceAgainstJson?: string }[];
   experiments?: { id: string; tool: string; outcome: string; resultSummary: string; canonicalArgs?: string }[];
   specialists?: { id: string; kind: string; conclusion: string; confidence: number; recommendedActionsJson?: string }[];
+  cryptoState?: {
+    primitive: string;
+    knownVariables?: Record<string, { value: string; source?: string; confidence?: number }>;
+    unknownVariables?: string[];
+    attackCandidates?: { id: string; attack: string; confidence: number; estimatedCost: string; status: string }[];
+    attempts?: { id: string; attack: string; tool?: string; outcome: string; summary: string; at: number }[];
+    assumptions?: string[];
+    updatedAt?: number;
+  } | null;
   progress: { id: string; summary: string; confidence: number; stalled: number; createdAt: number }[];
   candidates: { id: string; value: string; confidence: number; status: string; reason: string; createdAt: number }[];
   submissions: { id: string; flagValue: string; status: string; submittedAt: number | null; createdAt: number }[];

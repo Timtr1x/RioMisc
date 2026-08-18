@@ -950,6 +950,27 @@ function Detail({
               {parseJsonList(h.evidenceAgainstJson).length > 0 && <div className="err">反：{parseJsonList(h.evidenceAgainstJson).join("；")}</div>}
             </div>
           ))}
+          <h3 style={{ marginTop: 10 }}>CryptoState</h3>
+          {!d.cryptoState && <div className="muted">无</div>}
+          {d.cryptoState && (
+            <div style={{ marginBottom: 8 }}>
+              <div>primitive=<b>{d.cryptoState.primitive}</b></div>
+              {d.cryptoState.unknownVariables && d.cryptoState.unknownVariables.length > 0 && (
+                <div className="muted">unknown: {d.cryptoState.unknownVariables.join(", ")}</div>
+              )}
+              {d.cryptoState.knownVariables && Object.keys(d.cryptoState.knownVariables).length > 0 && (
+                <div className="break">
+                  known: {Object.entries(d.cryptoState.knownVariables).map(([k, v]) => `${k}=${String(v.value).slice(0, 48)}`).join(" · ")}
+                </div>
+              )}
+              {(d.cryptoState.attackCandidates ?? []).slice(0, 6).map((c) => (
+                <div key={c.id} className="muted">{c.status} {c.attack} conf={c.confidence} cost={c.estimatedCost}</div>
+              ))}
+              {(d.cryptoState.attempts ?? []).slice(-4).map((a) => (
+                <div key={a.id} className="break">{a.outcome} {a.attack}{a.tool ? `/${a.tool}` : ""}: {a.summary}</div>
+              ))}
+            </div>
+          )}
           <h3 style={{ marginTop: 10 }}>实验账本</h3>
           {(d.experiments ?? []).length === 0 && <div className="muted">无</div>}
           {(d.experiments ?? []).slice(-8).map((e) => (

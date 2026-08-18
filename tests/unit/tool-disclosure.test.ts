@@ -70,6 +70,22 @@ describe("progressive tool disclosure", () => {
     expect(src).not.toMatch(/TOOL_IMPLS\.map/);
   });
 
+  it("keeps CORE schema payload small and bans the old mega cryptoTextSchema", () => {
+    const direct = listDirectPiTools();
+    let paramChars = 0;
+    for (const tool of direct) {
+      paramChars += JSON.stringify(tool.parameters ?? []).length;
+      paramChars += tool.summary.length;
+    }
+    expect(paramChars).toBeLessThan(12_000);
+    expect(TOOL_CATALOG().every((t) => t.name !== "cryptoTextSchema")).toBe(true);
+    const domainSrc = readFileSync(join(process.cwd(), "packages/domain/src/schemas.ts"), "utf8");
+    expect(domainSrc).not.toContain("export const cryptoTextSchema");
+    const cryptoTools = TOOL_CATALOG().filter((t) => t.domains.includes("CRYPTO") && t.routerExecutable);
+    const uniqueSchemas = new Set(cryptoTools.map((t) => t.schema));
+    expect(uniqueSchemas.size).toBeGreaterThanOrEqual(Math.min(12, cryptoTools.length));
+  });
+
   it("documents every catalog tool and every example passes the real schema", () => {
     for (const tool of TOOL_CATALOG()) {
       expect(tool.summary.length, tool.name).toBeGreaterThan(10);

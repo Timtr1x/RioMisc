@@ -68,7 +68,7 @@ export interface ToolCall<T = unknown> {
 }
 
 export interface AgentEmit {
-  (kind: "progress" | "candidate" | "handoff" | "reflection" | "error" | "visual_evidence" | "visual_review" | "specialist" | "experiment" | "hypothesis" | "tool_telemetry", payload: Record<string, unknown>): void;
+  (kind: "progress" | "candidate" | "handoff" | "reflection" | "error" | "visual_evidence" | "visual_review" | "specialist" | "experiment" | "hypothesis" | "crypto_state" | "tool_telemetry", payload: Record<string, unknown>): void;
 }
 
 export interface ToolContext {

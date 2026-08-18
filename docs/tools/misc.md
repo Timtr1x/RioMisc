@@ -364,6 +364,49 @@ OCR visible text. Returns BACKEND_UNAVAILABLE if no OCR engine is installed.
 
 Text or BACKEND_UNAVAILABLE.
 
+## `follow_tcp_stream`
+
+- group: `MISC_PCAP`
+- exposure: `DISCOVERABLE`
+- cost: `NORMAL`
+- signature: `{ path, streamIndex?, src?, dst?, sport?, dport?, maxBytes?, force? }`
+
+Reassemble one TCP stream from a PCAP (by index or endpoints/ports).
+
+**When to use**
+- Overview showed TCP conversations
+- Need the raw stream bytes / ASCII
+
+**When not to use**
+- UDP-only captures
+- Prefer extract_http_objects when the payload is clearly HTTP
+
+**Parameters**
+
+| name | type | required | description |
+| --- | --- | --- | --- |
+| path | string | yes | Workspace-relative file. |
+| streamIndex | number | no | 0-based stream index from availableStreams. |
+| src | string | no | Optional source IP filter. |
+| dst | string | no | Optional destination IP filter. |
+| sport | number | no | Optional source port. |
+| dport | number | no | Optional destination port. |
+| maxBytes | number | no | Cap reassembled bytes (default 64KiB). |
+| force | boolean | no | Bypass ALREADY_TESTED and re-run. |
+
+**Example**
+
+```json
+{
+  "path": "input/capture.pcap",
+  "streamIndex": 0
+}
+```
+
+**Output**
+
+Stream key, segment previews, reassembled ASCII/HEX.
+
 ## `inspect_file`
 
 - group: `WORKSPACE`
@@ -397,6 +440,41 @@ Cheap inspection: magic, size, sha256, entropy, image dims, pcap summary. Use on
 **Output**
 
 Magic/mime/entropy plus contextual next-tool hints.
+
+## `inspect_metadata`
+
+- group: `MISC_FILE`
+- exposure: `DISCOVERABLE`
+- cost: `CHEAP`
+- signature: `{ path, force? }`
+
+Extract container metadata (PNG tEXt/iTXt/tIME, JPEG COM/Exif presence, PDF info, ZIP comment).
+
+**When to use**
+- PNG/JPEG/PDF/ZIP that may hide clues in metadata
+- Before heavy visual analysis
+
+**When not to use**
+- Not a substitute for analyze_visual or carving
+
+**Parameters**
+
+| name | type | required | description |
+| --- | --- | --- | --- |
+| path | string | yes | Workspace-relative file. |
+| force | boolean | no | Bypass ALREADY_TESTED and re-run. |
+
+**Example**
+
+```json
+{
+  "path": "input/a.png"
+}
+```
+
+**Output**
+
+magic/format plus key/value metadata fields.
 
 ## `list_workspace`
 

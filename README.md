@@ -305,5 +305,6 @@ Hint 不误取、大文件 bounded IO、URL 单题 SSRF 防护、Provider DEGRAD
 
 - 整本 21 题真模型 soak（Mock E2E 是 21/22）
 - Triage / Reflection 独立真模型 soak
-- 频谱图藏字、MT19937 等更难 fixture
-- CryptoState 表、Manager 自动 PARK / 抢占（`allowAutoPark` 保持 false）
+- 频谱图藏字等更难 fixture
+- Manager 自动 PARK / 抢占（`allowAutoPark` 保持 false）
+- 整场 Manager 30～100 题压力验收

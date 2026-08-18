@@ -383,4 +383,18 @@ CREATE INDEX IF NOT EXISTS reflection_runs_challenge_idx ON reflection_runs(chal
 CREATE INDEX IF NOT EXISTS reflection_runs_created_idx ON reflection_runs(created_at);
 CREATE INDEX IF NOT EXISTS reflection_runs_fingerprint_idx ON reflection_runs(challenge_id, fingerprint);
 CREATE INDEX IF NOT EXISTS reflection_runs_status_idx ON reflection_runs(status);
+
+CREATE TABLE IF NOT EXISTS crypto_states (
+  challenge_id TEXT PRIMARY KEY,
+  primitive TEXT NOT NULL DEFAULT 'UNKNOWN',
+  known_variables_json TEXT NOT NULL DEFAULT '{}',
+  unknown_variables_json TEXT NOT NULL DEFAULT '[]',
+  equations_json TEXT NOT NULL DEFAULT '[]',
+  constraints_json TEXT NOT NULL DEFAULT '[]',
+  assumptions_json TEXT NOT NULL DEFAULT '[]',
+  attack_candidates_json TEXT NOT NULL DEFAULT '[]',
+  attempts_json TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `;
