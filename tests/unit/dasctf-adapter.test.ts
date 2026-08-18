@@ -3,8 +3,11 @@ import {
   normalizeDasctfBaseUrl,
   normalizeDasctfFlagPayload,
   parseDasctfRemoteId,
+  parseDasctfRemainingAttempts,
   assertDasctfOk,
   mapDasctfSubmit,
+  isDasctfRateLimitMessage,
+  isDasctfWrongFlagMessage,
   formatDasctfEndpoints,
   parseDasctfAttachments,
   DasctfAgentContestAdapter,
@@ -38,22 +41,35 @@ describe("dasctf helpers", () => {
     expect(normalizeDasctfFlagPayload("DASCTF{C7-TD-HB}")).toBe("C7-TD-HB");
   });
 
-  it("parses remote ids and maps submit", () => {
+  it("maps Agent API submit responses per docs + live 40001 messages", () => {
     expect(parseDasctfRemoteId("dasctf:pro.dasctf.com:1001")).toBe(1001);
-    expect(mapDasctfSubmit({ code: "00000", data: { isCorrect: true } }).status).toBe("CORRECT");
-    expect(mapDasctfSubmit({ code: "00000", data: { isCorrect: false }, message: "wrong" }).status).toBe("WRONG");
+
+    // Correct: code 00000 + isCorrect true
+    const ok = mapDasctfSubmit({ code: "00000", message: "", data: { isCorrect: true } });
+    expect(ok.status).toBe("CORRECT");
+    expect(ok.correct).toBe(true);
+
+    // Wrong: live message (same code 40001 as rate-limit)
+    const wrongMsg = "提交flag错误，请重新提交（当前还有48次提交机会）";
+    expect(isDasctfWrongFlagMessage(wrongMsg)).toBe(true);
+    expect(isDasctfRateLimitMessage(wrongMsg)).toBe(false);
+    expect(parseDasctfRemainingAttempts(wrongMsg)).toBe(48);
+    const wrong = mapDasctfSubmit({ code: "40001", data: {}, message: wrongMsg });
+    expect(wrong.status).toBe("WRONG");
+    expect(wrong.correct).toBe(false);
+    expect((wrong.raw as { remainingAttempts?: number }).remainingAttempts).toBe(48);
+
+    // Rate limit: live message
+    const rateMsg = "请求过于频繁，请稍后重试";
+    expect(isDasctfRateLimitMessage(rateMsg)).toBe(true);
+    expect(isDasctfWrongFlagMessage(rateMsg)).toBe(false);
+    const rate = mapDasctfSubmit({ code: "40001", data: {}, message: rateMsg });
+    expect(rate.status).toBe("RATE_LIMITED");
+    expect(rate.cooldownMs).toBe(60_000);
+
+    // 00000 but not correct
+    expect(mapDasctfSubmit({ code: "00000", data: { isCorrect: false }, message: "" }).status).toBe("WRONG");
     expect(mapDasctfSubmit({ code: "A0001", message: "答案错误" }).status).toBe("WRONG");
-    // Live platform: wrong flag also uses code 40001 — must NOT be rate-limit.
-    expect(
-      mapDasctfSubmit({
-        code: "40001",
-        data: {},
-        message: "提交flag错误，请重新提交（当前还有48次提交机会）",
-      }).status,
-    ).toBe("WRONG");
-    expect(
-      mapDasctfSubmit({ code: "40001", message: "请求过于频繁，请稍后重试" }).status,
-    ).toBe("RATE_LIMITED");
     expect(() => assertDasctfOk({ code: "A0001", message: "nope" }, "/x")).toThrow(/nope/);
   });
 

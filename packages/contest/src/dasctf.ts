@@ -68,11 +68,30 @@ export function assertDasctfOk(json: DasctfEnvelope, path: string): void {
   throw new Error(`${path}: ${msg}`);
 }
 
-/** Live platform reuses code 40001 for both rate-limit and wrong-flag. */
+/**
+ * Agent API submit outcomes (game/api_doc.md + live pro.dasctf.com):
+ * - Correct:  code === "00000" && data.isCorrect === true
+ * - Wrong:    typically code === "40001", message like
+ *             "提交flag错误，请重新提交（当前还有N次提交机会）"
+ * - Rate limit: code === "40001" (or HTTP 429), message like
+ *             "请求过于频繁，请稍后重试"
+ * Same code 40001 is reused — distinguish by message text.
+ */
 export function isDasctfRateLimitMessage(message: string | undefined, httpStatus?: number): boolean {
   if (httpStatus === 429) return true;
-  const msg = (message ?? "").toLowerCase();
-  return /rate|limit|频繁|冷却|稍后重试|too many/.test(msg);
+  const msg = message ?? "";
+  return /请求过于频繁|请稍后重试|rate\s*limit|too many|冷却/i.test(msg);
+}
+
+export function isDasctfWrongFlagMessage(message: string | undefined): boolean {
+  const msg = message ?? "";
+  return /提交flag错误|flag错误|答案错误|请重新提交|incorrect|wrong flag/i.test(msg);
+}
+
+/** Remaining attempts from "...当前还有47次提交机会..."; null if absent. */
+export function parseDasctfRemainingAttempts(message: string | undefined): number | null {
+  const m = /还有\s*(\d+)\s*次/.exec(message ?? "");
+  return m ? Number(m[1]) : null;
 }
 
 /**
@@ -86,31 +105,57 @@ export function normalizeDasctfFlagPayload(flag: string): string {
 }
 
 export function mapDasctfSubmit(json: DasctfEnvelope): SubmissionResult {
+  const msg = json.message ?? "";
+  const remaining = parseDasctfRemainingAttempts(msg);
+
+  // Doc success path
   if (json.code === "00000") {
     const data = (json.data ?? {}) as { isCorrect?: boolean };
     if (data.isCorrect === true) {
-      return { ok: true, correct: true, status: "CORRECT", raw: json };
+      return { ok: true, correct: true, status: "CORRECT", message: msg || undefined, raw: json };
     }
-    // Some platforms still return 00000 with isCorrect=false.
+    // 00000 but not correct — treat as wrong when explicitly false / missing
     return {
       ok: true,
       correct: false,
       status: "WRONG",
-      message: json.message || "incorrect",
-      raw: json,
+      message: msg || "isCorrect=false",
+      raw: { ...json, remainingAttempts: remaining },
     };
   }
-  const msg = json.message ?? "";
+
+  // Rate limit before wrong-flag: both may use code 40001
   if (isDasctfRateLimitMessage(msg)) {
-    return { ok: false, correct: false, status: "RATE_LIMITED", cooldownMs: 60_000, message: msg, raw: json };
+    return {
+      ok: false,
+      correct: false,
+      status: "RATE_LIMITED",
+      cooldownMs: 60_000,
+      message: msg,
+      raw: { ...json, remainingAttempts: remaining },
+    };
   }
-  // Live wrong-flag example: code=40001 message="提交flag错误，请重新提交（当前还有N次提交机会）"
-  if (/flag错误|答案错误|提交.*错误|wrong|incorrect|不正确|失败/.test(msg) || /flag/i.test(msg)) {
-    return { ok: true, correct: false, status: "WRONG", message: msg, raw: json };
+
+  if (isDasctfWrongFlagMessage(msg) || json.code === "40001") {
+    return {
+      ok: true,
+      correct: false,
+      status: "WRONG",
+      message: msg || `code=${json.code}`,
+      raw: { ...json, remainingAttempts: remaining },
+    };
   }
+
   if (json.code) {
-    return { ok: true, correct: false, status: "WRONG", message: msg || `code=${json.code}`, raw: json };
+    return {
+      ok: true,
+      correct: false,
+      status: "WRONG",
+      message: msg || `code=${json.code}`,
+      raw: { ...json, remainingAttempts: remaining },
+    };
   }
+
   return { ok: false, correct: false, status: "UNKNOWN", message: msg || "unrecognized submit", raw: json };
 }
 
