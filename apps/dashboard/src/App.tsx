@@ -185,6 +185,7 @@ function artifactTree(arts: { id: string; path: string; operation: string; paren
 function contestLabel(status: Status | null): string {
   if (!status) return "…";
   const c = status.contest;
+  if (c?.kind === "dasctf" && c.baseUrl) return `DASCTF ${c.baseUrl}`;
   if (c?.kind === "ctfd" && c.baseUrl) return `CTFd ${c.baseUrl}`;
   if (c?.kind === "mock" || status.adapter === "mock") return "演示赛 Mock";
   if (c?.kind === "local" || status.adapter === "local") return "单题本地";
@@ -342,9 +343,13 @@ function Overview({
   const [contestBusy, setContestBusy] = useState(false);
 
   const contest = status?.contest;
-  const connected = contest?.connected === true || status?.adapter === "mock" || status?.adapter === "ctfd";
+  const connected =
+    contest?.connected === true ||
+    status?.adapter === "mock" ||
+    status?.adapter === "ctfd" ||
+    status?.adapter === "dasctf";
 
-  const connectContest = async (kind: "mock" | "ctfd") => {
+  const connectContest = async (kind: "mock" | "ctfd" | "dasctf") => {
     setContestBusy(true);
     setContestMsg(null);
     try {
@@ -354,10 +359,10 @@ function Overview({
           kind === "mock"
             ? { kind: "mock" }
             : {
-                kind: "ctfd",
+                kind,
                 baseUrl: contestUrl.trim(),
                 token: contestToken.trim() || undefined,
-                cookie: contestCookie.trim() || undefined,
+                cookie: kind === "ctfd" ? contestCookie.trim() || undefined : undefined,
                 miscCryptoOnly: true,
                 trustedCredentialOrigins: contestOrigins.trim() || undefined,
               },
@@ -366,7 +371,7 @@ function Overview({
         ok: true,
         text: kind === "mock"
           ? `已接入演示比赛，Poller 正在自动拉题（本次列出 ${r.lastListed} 道），Solver 会自动开做并交 flag。`
-          : `已接入 ${r.baseUrl ?? contestUrl}，列出 ${r.lastListed} 道 Misc/Crypto，正在自动下载并派工。`,
+          : `已接入 ${kind.toUpperCase()} ${r.baseUrl ?? contestUrl}，列出 ${r.lastListed} 道 Misc/Crypto，正在自动下载并派工。`,
       });
     } catch (e) {
       setContestMsg({ ok: false, text: String((e as Error).message) });
@@ -429,7 +434,8 @@ function Overview({
       <div className="panel">
         <h3>接入比赛 — 全自动拉题 / 下载 / 派工 / 交 flag</h3>
         <p className="muted">
-          连上之后 Poller 会周期性拉题单，新题自动进解题流水线。没有赛事 API 时先点「接入演示比赛」。附件在 files.ctf.example.com 这类 CDN 上且需要 Cookie 时，填「信任的附件域名」。
+          连上之后 Poller 会周期性拉题单，新题自动进解题流水线。DASCTF Agent 赛填平台 Host + AccessKey（不是大模型 Key）。
+          没有赛事 API 时先点「接入演示比赛」。附件 CDN 需要带凭证时，填「信任的附件域名」。
         </p>
         <div className="buttons" style={{ marginTop: 0 }}>
           <button type="button" className="primary" onClick={() => void connectContest("mock")} disabled={contestBusy || connected}>
@@ -444,23 +450,23 @@ function Overview({
             <label htmlFor="contest-url">比赛地址</label>
             <input
               id="contest-url"
-              placeholder="https://ctf.example.com"
+              placeholder="https://pro.dasctf.com 或 CTFd 地址"
               value={contestUrl}
               onChange={(e) => setContestUrl(e.target.value)}
             />
           </div>
           <div className="field">
-            <label htmlFor="contest-token">Access Token（可选）</label>
+            <label htmlFor="contest-token">AccessKey / Token</label>
             <input
               id="contest-token"
               type="password"
-              placeholder="Token"
+              placeholder="DASCTF: ak_live_… / CTFd: Token"
               value={contestToken}
               onChange={(e) => setContestToken(e.target.value)}
             />
           </div>
           <div className="field">
-            <label htmlFor="contest-cookie">Cookie（可选）</label>
+            <label htmlFor="contest-cookie">Cookie（仅 CTFd 可选）</label>
             <input
               id="contest-cookie"
               placeholder="Cookie"
@@ -477,6 +483,14 @@ function Overview({
               onChange={(e) => setContestOrigins(e.target.value)}
             />
           </div>
+          <button
+            type="button"
+            className="primary"
+            onClick={() => void connectContest("dasctf")}
+            disabled={contestBusy || !contestUrl.trim() || !contestToken.trim()}
+          >
+            {contestBusy ? "连接中…" : "接入 DASCTF Agent"}
+          </button>
           <button type="button" onClick={() => void connectContest("ctfd")} disabled={contestBusy || !contestUrl.trim()}>
             {contestBusy ? "连接中…" : "接入 CTFd"}
           </button>

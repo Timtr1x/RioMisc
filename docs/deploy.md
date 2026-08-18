@@ -78,6 +78,11 @@ npm run dev -w apps/dashboard     # UI   http://127.0.0.1:5173
 contest:
   adapter: none          # 空盘；Dashboard 再点「接入比赛」
   # adapter: mock        # 内置 22 题演示
+  # --- DASCTF Agent API（game/api_doc.md）---
+  # adapter: dasctf
+  # baseUrl: https://pro.dasctf.com
+  # token: ""            # X-Agent-AccessKey；或环境变量 DASCTF_ACCESS_KEY（勿提交 git）
+  # --- CTFd 兼容 ---
   # adapter: ctfd
   # baseUrl: https://ctf.example.com
   # token: ""            # 或环境变量 CTFD_TOKEN
@@ -102,11 +107,36 @@ reflection:
   mode: HYBRID
 ```
 
-开机后在 Dashboard **模型**：
+### DASCTF Agent 赛（推荐 Dashboard）
 
-1. Add Provider（OpenAI 兼容 / Responses / Anthropic）+ API Key（加密落盘）
-2. 添加模型，点「测试连接」
-3. 分配：主解题、（可选）反思 / 视觉 / 分诊 / Manager
+1. 概览页 → **接入 DASCTF Agent**
+2. 比赛地址：`https://pro.dasctf.com`（控制台 Server Host）
+3. AccessKey：控制台 `ak_live_…`（**只用于比赛接口**，不是大模型 Key）
+4. 连上后 Poller 自动拉 Misc/Crypto；需要靶机时会调 `build-exercise-env`
+
+离线探针（不启动整站）：
+
+```powershell
+$env:DASCTF_ACCESS_KEY="ak_live_..."
+$env:DASCTF_BASE_URL="https://pro.dasctf.com"
+npx tsx scripts/dasctf-probe.ts
+```
+
+### 大模型网关（game/gateway_doc.md）
+
+平台「网关 URL」只替换 Provider 的 **baseUrl**；**API Key 仍是你自己的上游 Key**，不要填平台 AccessKey。
+
+Dashboard → 模型：
+
+1. Add Provider
+   - Protocol：`ANTHROPIC_MESSAGES`（MiniMax Anthropic 兼容）
+   - Base URL：控制台复制的网关 URL，例如  
+     `https://llm-gateway.dasctf.com/llm-gateway/proxy/e/<code>`
+   - API Key：MiniMax / 上游 Key（自行持有）
+2. 添加模型名（与厂商一致），点「测试连接」
+3. 分配主解题（及可选反思 / 视觉 / Manager）
+
+路径注意：Agent 会对 baseUrl 再拼 `/v1/messages`。若你在控制台登记的「原始 URL」已经带 `/v1/messages`，建议改成 `https://api.minimaxi.com/anthropic` 再生成网关，或把 Provider baseUrl 直接填成「完整 messages 端点」（本仓库会识别并以该 URL 原样请求）。
 
 有可用 Provider + Model 后，下一道 Solver 自动走 Pi。不要用
 `RIO_AGENT_RUNTIME=mock` 打正式赛。
@@ -119,8 +149,8 @@ Master key：环境变量 `CTF_RUNTIME_MASTER_KEY`，否则第一次启动写
 ## 4. 赛场建议流程
 
 1. 赛前在本机 `npm install`，跑通 Mock 或 `npm run test:ci`。
-2. `allowMockFallback: false`，配好 Provider 并测试连接。
-3. Dashboard 接入 CTFd，或 yaml 写死 `adapter: ctfd`。
+2. `allowMockFallback: false`，配好 **网关 URL + 自己的模型 Key** 并测试连接。
+3. Dashboard 接入 DASCTF / CTFd，或 yaml + 环境变量（**AccessKey 勿提交仓库**）。
 4. 附件若在另一个域名，把该 origin 填进 `trustedCredentialOrigins`。
 5. 先保持 `manager.enabled: false`；题多再 `SHADOW` 观察，再 `ACTIVE`。
 6. 只让本机浏览器打开 `http://127.0.0.1:5173`，不要把 API 暴露到公网。

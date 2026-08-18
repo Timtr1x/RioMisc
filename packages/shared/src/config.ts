@@ -8,17 +8,18 @@ import type { StartPolicy } from "@rio/domain";
 
 export const runtimeConfigSchema = z.object({
   contest: z.object({
-    adapter: z.enum(["mock", "local", "none", "ctfd"]).default("mock"),
+    adapter: z.enum(["mock", "local", "none", "ctfd", "dasctf"]).default("mock"),
     /** Path to a MockContest scenario JSON file (optional; defaults to built-in fixtures). */
     mockScenario: z.string().nullable().default(null),
     localChallengeDir: z.string().nullable().default(null),
-    /** CTFd / DASCTF base URL when adapter is ctfd (also settable at runtime via Dashboard). */
+    /** Contest base URL when adapter is ctfd/dasctf (also settable at runtime via Dashboard). */
     baseUrl: z.string().nullable().default(null),
+    /** CTFd Token or DASCTF X-Agent-AccessKey (prefer env / Dashboard SecretStore). */
     token: z.string().nullable().default(null),
     cookie: z.string().nullable().default(null),
     /** When true, only ingest Misc / Crypto (and 杂项 / 密码). */
     miscCryptoOnly: z.boolean().default(true),
-    /** Extra origins that may receive Token/Cookie (e.g. files.ctf.example.com). */
+    /** Extra origins that may receive Token/Cookie/AccessKey (e.g. files CDN). */
     trustedCredentialOrigins: z.array(z.string().min(1)).default([]),
     poll: z.object({
       initialMs: z.number().int().min(1000).max(60000).default(5000),

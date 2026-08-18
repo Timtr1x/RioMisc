@@ -5,7 +5,16 @@ import { hashHex, type RioLogger, type RuntimeConfig, type SecretStore } from "@
 import type { Repositories } from "@rio/database";
 import { SOLVER_CATEGORIES, type Challenge, type SolverType, type ModelRef, type ManagerMode, type ReflectionMode } from "@rio/domain";
 import type { ContestAdapter } from "@rio/contest";
-import { Poller, ApiRateLimiter, DiskManager, CtfdContestAdapter, IdleContestAdapter, MockContestAdapter, normalizeTrustedOrigins } from "@rio/contest";
+import {
+  Poller,
+  ApiRateLimiter,
+  DiskManager,
+  CtfdContestAdapter,
+  DasctfAgentContestAdapter,
+  IdleContestAdapter,
+  MockContestAdapter,
+  normalizeTrustedOrigins,
+} from "@rio/contest";
 import type { WorkerMessage, StartWorkerConfig } from "./worker-pool.js";
 import { WorkspaceManager } from "@rio/tool-runtime";
 import { systemPromptFor, buildKickoffMessage } from "@rio/solver";
@@ -118,7 +127,7 @@ export class ControlPlane {  private poller: Poller;
       cooldownAfterChangeMs: deps.config.contest.poll.cooldownAfterChangeMs,
       logger: deps.logger,
     });
-    if (deps.adapter instanceof CtfdContestAdapter) {
+    if (deps.adapter instanceof CtfdContestAdapter || deps.adapter instanceof DasctfAgentContestAdapter) {
       this.contestMeta.baseUrl = deps.adapter.baseUrl;
       this.contestMeta.connectedAt = Date.now();
       this.contestMeta.miscCryptoOnly = deps.adapter.miscCryptoOnly;
@@ -153,7 +162,11 @@ export class ControlPlane {  private poller: Poller;
       advisory: this.advisory,
       solverSlotsUsed: () => this.workerPool.activeCount(),
       reflectionSlotsUsed: () => deps.reflection.slots.used,
-      contestConnected: () => this.contestMeta.connectedAt !== null || deps.adapter.kind === "mock" || deps.adapter.kind === "ctfd",
+      contestConnected: () =>
+        this.contestMeta.connectedAt !== null ||
+        deps.adapter.kind === "mock" ||
+        deps.adapter.kind === "ctfd" ||
+        deps.adapter.kind === "dasctf",
     });
     this.manager = new ManagerCoordinator({
       service: this.managerService,
@@ -174,18 +187,24 @@ export class ControlPlane {  private poller: Poller;
     logger.info({ event: "contest_connected", adapter: adapter.kind, caps }, "contest adapter ready");
     // yaml / env boot only. A restored Dashboard session already saved creds;
     // empty token: "" in yaml must not wipe secrets.enc.
-    if (!restored && (adapter.kind === "ctfd" || adapter.kind === "mock")) {
+    if (!restored && (adapter.kind === "ctfd" || adapter.kind === "dasctf" || adapter.kind === "mock")) {
+      const live =
+        adapter instanceof CtfdContestAdapter || adapter instanceof DasctfAgentContestAdapter ? adapter : null;
       await saveContestProfile(
         this.deps.repos,
         this.deps.secrets ?? null,
         {
-          kind: adapter.kind,
-          baseUrl: adapter instanceof CtfdContestAdapter ? adapter.baseUrl : adapter.kind === "mock" ? "mock://demo" : this.contestMeta.baseUrl,
-          miscCryptoOnly: adapter instanceof CtfdContestAdapter ? adapter.miscCryptoOnly : true,
-          trustedCredentialOrigins: adapter instanceof CtfdContestAdapter ? adapter.trustedCredentialOrigins : [],
+          kind: adapter.kind === "ctfd" || adapter.kind === "dasctf" || adapter.kind === "mock" ? adapter.kind : "idle",
+          baseUrl: live?.baseUrl ?? (adapter.kind === "mock" ? "mock://demo" : this.contestMeta.baseUrl),
+          miscCryptoOnly: live?.miscCryptoOnly ?? true,
+          trustedCredentialOrigins: live?.trustedCredentialOrigins ?? [],
         },
         {
-          token: this.deps.config.contest.token || process.env.CTFD_TOKEN || undefined,
+          token:
+            this.deps.config.contest.token ||
+            process.env.DASCTF_ACCESS_KEY ||
+            process.env.CTFD_TOKEN ||
+            undefined,
           cookie: this.deps.config.contest.cookie || process.env.CTFD_COOKIE || undefined,
         },
       );
@@ -305,7 +324,7 @@ Re-evaluate assumptions affected by this change.`;
   /** Detail refresh for in-play challenges only — never N+1 the whole list. */
   async #refreshLiveChallengeDetails(): Promise<void> {
     const { adapter, repos, bus, logger } = this.deps;
-    if (adapter.kind !== "ctfd") return;
+    if (adapter.kind !== "ctfd" && adapter.kind !== "dasctf") return;
     const live = repos
       .challenges.list()
       .filter(
@@ -1140,7 +1159,7 @@ depended on the previous files.`;
     const kind = this.deps.adapter.kind;
     return {
       kind,
-      connected: kind === "ctfd" || kind === "mock",
+      connected: kind === "ctfd" || kind === "dasctf" || kind === "mock",
       baseUrl: this.contestMeta.baseUrl,
       lastPollAt: this.contestMeta.lastPollAt,
       lastError: this.contestMeta.lastError,
@@ -1152,7 +1171,7 @@ depended on the previous files.`;
   }
 
   async connectContest(opts: {
-    kind?: "mock" | "ctfd";
+    kind?: "mock" | "ctfd" | "dasctf";
     baseUrl?: string | null;
     token?: string | null;
     cookie?: string | null;
@@ -1168,6 +1187,25 @@ depended on the previous files.`;
         miscCryptoOnly: true,
         connected: true,
         trustedCredentialOrigins: [],
+      });
+    } else if (kind === "dasctf") {
+      const baseUrl = opts.baseUrl?.trim();
+      if (!baseUrl) throw new Error("接入 DASCTF 需要比赛平台地址（如 https://pro.dasctf.com）");
+      const accessKey = opts.token?.trim();
+      if (!accessKey) throw new Error("接入 DASCTF 需要 AccessKey（X-Agent-AccessKey）");
+      const trustedCredentialOrigins = normalizeTrustedOrigins(opts.trustedCredentialOrigins);
+      const adapter = new DasctfAgentContestAdapter({
+        baseUrl,
+        accessKey,
+        miscCryptoOnly: opts.miscCryptoOnly,
+        trustedCredentialOrigins,
+      });
+      await adapter.authenticate();
+      await this.#replaceAdapter(adapter, {
+        baseUrl: adapter.baseUrl,
+        miscCryptoOnly: adapter.miscCryptoOnly,
+        connected: true,
+        trustedCredentialOrigins: adapter.trustedCredentialOrigins,
       });
     } else {
       const baseUrl = opts.baseUrl?.trim();
@@ -1207,7 +1245,7 @@ depended on the previous files.`;
       this.deps.repos,
       this.deps.secrets ?? null,
       {
-        kind: status.kind === "ctfd" || status.kind === "mock" ? status.kind : "idle",
+        kind: status.kind === "ctfd" || status.kind === "dasctf" || status.kind === "mock" ? status.kind : "idle",
         baseUrl: status.baseUrl,
         miscCryptoOnly: status.miscCryptoOnly,
         trustedCredentialOrigins: status.trustedCredentialOrigins,

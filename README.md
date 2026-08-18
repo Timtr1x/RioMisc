@@ -34,8 +34,9 @@ inspect / ZIP / PCAP / RSA / LLL / 视觉等写在仓库 catalog 里。Python �
 Dashboard 总览两个入口，可同时用：
 
 - **接入比赛**：自动拉题 / 下载 / 派工 / 交 flag。没有赛事 API 时点「接入演示比赛（Mock）」；
-  CTFd / DASCTF 填地址 + Token（或 Cookie）。也可在 `config/runtime.yaml` 写
-  `adapter: ctfd` + `baseUrl`，开机即连。
+  **DASCTF Agent** 填 Host + AccessKey；CTFd 填地址 + Token/Cookie。
+  也可 yaml 写 `adapter: dasctf|ctfd` + `baseUrl`（AccessKey 用 `DASCTF_ACCESS_KEY`，勿提交 git）。
+  大模型走平台「网关 URL」作 Provider baseUrl，**模型 API Key 仍是你自己的**，不是平台 AccessKey。
 - **单题模式**：粘贴题目页 URL 或附件直链，不依赖比赛 API。
 
 已配置可用的 Provider + Model 时，下一道 Solver 自动走 Pi（真 LLM）；否则回退 Mock。

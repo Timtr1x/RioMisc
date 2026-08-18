@@ -498,12 +498,21 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
       miscCryptoOnly?: boolean;
       trustedCredentialOrigins?: string[] | string;
     };
-    const kind = body.kind === "ctfd" ? "ctfd" : body.kind === "mock" ? "mock" : body.baseUrl ? "ctfd" : "mock";
+    const kind =
+      body.kind === "dasctf"
+        ? "dasctf"
+        : body.kind === "ctfd"
+          ? "ctfd"
+          : body.kind === "mock"
+            ? "mock"
+            : body.baseUrl
+              ? "ctfd"
+              : "mock";
     try {
       const status = await control.connectContest({
         kind,
-        baseUrl: body.baseUrl ?? process.env.CTFD_BASE_URL,
-        token: body.token ?? process.env.CTFD_TOKEN,
+        baseUrl: body.baseUrl ?? process.env.DASCTF_BASE_URL ?? process.env.CTFD_BASE_URL,
+        token: body.token ?? process.env.DASCTF_ACCESS_KEY ?? process.env.CTFD_TOKEN,
         cookie: body.cookie ?? process.env.CTFD_COOKIE,
         miscCryptoOnly: body.miscCryptoOnly,
         trustedCredentialOrigins: body.trustedCredentialOrigins,

@@ -232,6 +232,10 @@ export class ModelRegistry {
    */
   #endpoint(provider: ModelProviderConfig): string {
     const base = provider.baseUrl.replace(/\/+$/, "");
+    // Already a full chat/messages endpoint (or a DASCTF gateway that maps 1:1 to one).
+    if (/\/messages$/i.test(base) || /\/chat\/completions$/i.test(base) || /\/responses$/i.test(base)) {
+      return base;
+    }
     const hasV1 = /\/v\d+$/i.test(base) || /\/v\d+\/[a-z]+$/i.test(base);
     switch (provider.protocol) {
       case "ANTHROPIC_MESSAGES":

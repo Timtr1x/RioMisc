@@ -8,7 +8,7 @@ export const CONTEST_PROFILE_KEY = "contest.profile";
 export const CONTEST_TOKEN_REF = "contest.token";
 export const CONTEST_COOKIE_REF = "contest.cookie";
 
-export type PersistedContestKind = "idle" | "mock" | "ctfd";
+export type PersistedContestKind = "idle" | "mock" | "ctfd" | "dasctf";
 
 export interface PersistedContestProfile {
   kind: PersistedContestKind;
@@ -34,7 +34,7 @@ export function parseContestProfile(raw: string | null): PersistedContestProfile
   if (!raw) return null;
   try {
     const v = JSON.parse(raw) as Partial<PersistedContestProfile> & Record<string, unknown>;
-    if (v.kind !== "idle" && v.kind !== "mock" && v.kind !== "ctfd") return null;
+    if (v.kind !== "idle" && v.kind !== "mock" && v.kind !== "ctfd" && v.kind !== "dasctf") return null;
     return {
       kind: v.kind,
       baseUrl: typeof v.baseUrl === "string" && v.baseUrl ? v.baseUrl : null,

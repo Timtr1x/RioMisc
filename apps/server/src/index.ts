@@ -4,7 +4,16 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createLogger, loadConfig, FileSecretStore, type RuntimeConfig } from "@rio/shared";
 import { createRepositories } from "@rio/database";
-import { MockContestAdapter, IdleContestAdapter, LocalContestAdapter, CtfdContestAdapter, DiskManager, buildFixtures, type ContestAdapter } from "@rio/contest";
+import {
+  MockContestAdapter,
+  IdleContestAdapter,
+  LocalContestAdapter,
+  CtfdContestAdapter,
+  DasctfAgentContestAdapter,
+  DiskManager,
+  buildFixtures,
+  type ContestAdapter,
+} from "@rio/contest";
 import { WorkspaceManager, resolvePythonExecutable } from "@rio/tool-runtime";
 import { StateMachine } from "./state-machine.js";
 import { EventBus } from "./control/bus.js";
@@ -106,6 +115,17 @@ export async function startRuntime(opts: { configPath?: string; configOverrides?
       baseUrl,
       token: config.contest.token ?? process.env.CTFD_TOKEN,
       cookie: config.contest.cookie ?? process.env.CTFD_COOKIE,
+      miscCryptoOnly: config.contest.miscCryptoOnly,
+      trustedCredentialOrigins: config.contest.trustedCredentialOrigins,
+    });
+  } else if (config.contest.adapter === "dasctf") {
+    const baseUrl = config.contest.baseUrl?.trim();
+    if (!baseUrl) throw new Error("contest.adapter=dasctf requires contest.baseUrl");
+    const accessKey = config.contest.token ?? process.env.DASCTF_ACCESS_KEY ?? process.env.CTFD_TOKEN;
+    if (!accessKey?.trim()) throw new Error("contest.adapter=dasctf requires token / DASCTF_ACCESS_KEY");
+    adapter = new DasctfAgentContestAdapter({
+      baseUrl,
+      accessKey,
       miscCryptoOnly: config.contest.miscCryptoOnly,
       trustedCredentialOrigins: config.contest.trustedCredentialOrigins,
     });
