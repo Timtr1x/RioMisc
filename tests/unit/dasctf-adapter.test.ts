@@ -173,8 +173,9 @@ describe("DasctfAgentContestAdapter", () => {
         return json({ code: "00000", data: {} });
       }
       if (url.endsWith("/answer-panel/answer") && method === "POST") {
+        // Adapter strips DASCTF{}/flag{} before POST — platform sees inner payload only.
         const body = JSON.parse(String(init?.body ?? "{}")) as { flag?: string };
-        return json({ code: "00000", data: { isCorrect: body.flag === "flag{ok}" } });
+        return json({ code: "00000", data: { isCorrect: body.flag === "ok" } });
       }
       if (url.includes("cdn.example.com")) {
         return new Response(Buffer.from("png-bytes"), { status: 200 });
