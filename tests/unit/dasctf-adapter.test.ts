@@ -35,7 +35,37 @@ describe("dasctf helpers", () => {
     expect(mapDasctfSubmit({ code: "00000", data: { isCorrect: true } }).status).toBe("CORRECT");
     expect(mapDasctfSubmit({ code: "00000", data: { isCorrect: false }, message: "wrong" }).status).toBe("WRONG");
     expect(mapDasctfSubmit({ code: "A0001", message: "答案错误" }).status).toBe("WRONG");
+    // Live platform: wrong flag also uses code 40001 — must NOT be rate-limit.
+    expect(
+      mapDasctfSubmit({
+        code: "40001",
+        data: {},
+        message: "提交flag错误，请重新提交（当前还有48次提交机会）",
+      }).status,
+    ).toBe("WRONG");
+    expect(
+      mapDasctfSubmit({ code: "40001", message: "请求过于频繁，请稍后重试" }).status,
+    ).toBe("RATE_LIMITED");
     expect(() => assertDasctfOk({ code: "A0001", message: "nope" }, "/x")).toThrow(/nope/);
+  });
+
+  it("submitFlag maps live wrong-flag 40001 to WRONG instead of throwing", async () => {
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/match/notice/match-info")) return json({ code: "00000", data: {} });
+      if (url.endsWith("/answer-panel/answer") && (init?.method ?? "GET").toUpperCase() === "POST") {
+        return json({ code: "40001", data: {}, message: "提交flag错误，请重新提交（当前还有49次提交机会）" });
+      }
+      return new Response("nope", { status: 404 });
+    };
+    const adapter = new DasctfAgentContestAdapter({
+      baseUrl: "https://pro.dasctf.com",
+      accessKey: "ak",
+      fetchImpl,
+    });
+    const r = await adapter.submitFlag("dasctf:pro.dasctf.com:10663", "DASCTF{ni_cai?}");
+    expect(r.status).toBe("WRONG");
+    expect(r.correct).toBe(false);
   });
 
   it("formats endpoints for the challenge brief", () => {

@@ -68,6 +68,13 @@ export function assertDasctfOk(json: DasctfEnvelope, path: string): void {
   throw new Error(`${path}: ${msg}`);
 }
 
+/** Live platform reuses code 40001 for both rate-limit and wrong-flag. */
+export function isDasctfRateLimitMessage(message: string | undefined, httpStatus?: number): boolean {
+  if (httpStatus === 429) return true;
+  const msg = (message ?? "").toLowerCase();
+  return /rate|limit|频繁|冷却|稍后重试|too many/.test(msg);
+}
+
 export function mapDasctfSubmit(json: DasctfEnvelope): SubmissionResult {
   if (json.code === "00000") {
     const data = (json.data ?? {}) as { isCorrect?: boolean };
@@ -83,14 +90,18 @@ export function mapDasctfSubmit(json: DasctfEnvelope): SubmissionResult {
       raw: json,
     };
   }
-  const msg = (json.message ?? "").toLowerCase();
-  if (/rate|limit|频繁|冷却/.test(msg)) {
-    return { ok: false, correct: false, status: "RATE_LIMITED", cooldownMs: 60_000, message: json.message, raw: json };
+  const msg = json.message ?? "";
+  if (isDasctfRateLimitMessage(msg)) {
+    return { ok: false, correct: false, status: "RATE_LIMITED", cooldownMs: 60_000, message: msg, raw: json };
   }
-  if (/wrong|incorrect|错误|失败|不正确/.test(msg) || json.code) {
-    return { ok: true, correct: false, status: "WRONG", message: json.message, raw: json };
+  // Live wrong-flag example: code=40001 message="提交flag错误，请重新提交（当前还有N次提交机会）"
+  if (/flag错误|答案错误|提交.*错误|wrong|incorrect|不正确|失败/.test(msg) || /flag/i.test(msg)) {
+    return { ok: true, correct: false, status: "WRONG", message: msg, raw: json };
   }
-  return { ok: false, correct: false, status: "UNKNOWN", message: json.message || "unrecognized submit", raw: json };
+  if (json.code) {
+    return { ok: true, correct: false, status: "WRONG", message: msg || `code=${json.code}`, raw: json };
+  }
+  return { ok: false, correct: false, status: "UNKNOWN", message: msg || "unrecognized submit", raw: json };
 }
 
 /** Live DASCTF may return either docs-style `{files:[…]}` or a single `{url,name,extension}` object. */
@@ -287,7 +298,8 @@ export class DasctfAgentContestAdapter implements ContestAdapter {
 
   async submitFlag(remoteId: string, flag: string): Promise<SubmissionResult> {
     const id = parseDasctfRemoteId(remoteId);
-    const json = await this.#postJson("/answer-panel/answer", { exerciseId: id, flag });
+    // Wrong flags also come back as code=40001 — parse business body, do not treat as transport error.
+    const json = await this.#postJson("/answer-panel/answer", { exerciseId: id, flag }, { allowBusinessError: true });
     return mapDasctfSubmit(json);
   }
 
@@ -339,12 +351,20 @@ export class DasctfAgentContestAdapter implements ContestAdapter {
     return this.#parseJson(res, path);
   }
 
-  async #postJson(path: string, body: unknown): Promise<DasctfEnvelope> {
+  async #postJson(
+    path: string,
+    body: unknown,
+    opts: { allowBusinessError?: boolean } = {},
+  ): Promise<DasctfEnvelope> {
     const res = await this.#request(path, { method: "POST", body: JSON.stringify(body) });
-    return this.#parseJson(res, path);
+    return this.#parseJson(res, path, opts);
   }
 
-  async #parseJson(res: Response, path: string): Promise<DasctfEnvelope> {
+  async #parseJson(
+    res: Response,
+    path: string,
+    opts: { allowBusinessError?: boolean } = {},
+  ): Promise<DasctfEnvelope> {
     const text = await res.text();
     if (res.status === 401 || res.status === 403) {
       throw new Error(`鉴权失败 (${res.status})：请检查 X-Agent-AccessKey 是否有效`);
@@ -355,13 +375,17 @@ export class DasctfAgentContestAdapter implements ContestAdapter {
     } catch {
       parsed = null;
     }
-    if (res.status === 429 || parsed?.code === "40001") {
+    const rateLimited =
+      res.status === 429 ||
+      (parsed?.code === "40001" && isDasctfRateLimitMessage(parsed.message, res.status));
+    if (rateLimited) {
       throw new DasctfRateLimitError(path, parsed?.message || text.slice(0, 120));
     }
     if (!res.ok) {
       throw new Error(`DASCTF API ${res.status} ${path}: ${text.slice(0, 200)}`);
     }
     if (!parsed) throw new Error("DASCTF API 返回的不是 JSON");
+    if (opts.allowBusinessError) return parsed;
     return parsed;
   }
 
