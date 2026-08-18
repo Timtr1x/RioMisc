@@ -3,6 +3,7 @@ import {
   normalizeDasctfBaseUrl,
   normalizeDasctfFlagPayload,
   resolveDasctfAssetUrl,
+  parseDasctfDownloadBusinessError,
   parseDasctfRemoteId,
   parseDasctfRemainingAttempts,
   assertDasctfOk,
@@ -53,6 +54,14 @@ describe("dasctf helpers", () => {
     expect(
       resolveDasctfAssetUrl("https://pro-resource.dasctf.com/resource/oss/x.zip", agentBase),
     ).toBe("https://pro-resource.dasctf.com/resource/oss/x.zip");
+  });
+
+  it("parses adl-oss HTTP 200 JSON business errors", () => {
+    expect(
+      parseDasctfDownloadBusinessError('{"code":"40401","data":{},"message":"未能读取到有效Token"}'),
+    ).toBe("未能读取到有效Token");
+    expect(parseDasctfDownloadBusinessError("PK\x03\x04...")).toBeNull();
+    expect(parseDasctfDownloadBusinessError('{"code":"00000","data":{}}')).toBeNull();
   });
 
   it("maps Agent API submit responses per docs + live 40001 messages", () => {
@@ -117,7 +126,10 @@ describe("dasctf helpers", () => {
       hits.push(url);
       if (url.endsWith("/match/notice/match-info")) return json({ code: "00000", data: {} });
       if (url.startsWith("https://pro.dasctf.com/adl-oss/")) {
-        return new Response(Buffer.from("zip-bytes"), { status: 200 });
+        return new Response(Buffer.from("zip-bytes"), {
+          status: 200,
+          headers: { "content-type": "application/zip" },
+        });
       }
       return new Response("nope", { status: 404 });
     };
@@ -149,6 +161,46 @@ describe("dasctf helpers", () => {
     expect(dl.bytes).toBe(9);
     expect(hits.some((u) => u.startsWith("https://pro.dasctf.com/adl-oss/resources/abc"))).toBe(true);
     expect(hits.some((u) => u.includes("/slab-match/api/v1/agent/adl-oss"))).toBe(false);
+  });
+
+  it("downloadAttachment fails on adl-oss Token JSON instead of saving it as a file", async () => {
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.endsWith("/match/notice/match-info")) return json({ code: "00000", data: {} });
+      if (url.startsWith("https://pro.dasctf.com/adl-oss/")) {
+        return new Response(JSON.stringify({ code: "40401", data: {}, message: "未能读取到有效Token" }), {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
+      }
+      return new Response("nope", { status: 404 });
+    };
+    const adapter = new DasctfAgentContestAdapter({
+      baseUrl: "https://pro.dasctf.com",
+      accessKey: "ak",
+      fetchImpl,
+    });
+    await adapter.authenticate();
+    const dl = await adapter.downloadAttachment(
+      {
+        remoteId: "dasctf:pro.dasctf.com:10679",
+        title: "0_1_Game",
+        description: "",
+        category: "CRYPTO",
+        score: 200,
+        solveCount: null,
+        createdAt: null,
+        updatedAt: Date.now(),
+        attachments: [],
+      },
+      {
+        remoteId: null,
+        name: "game.zip",
+        url: "/adl-oss/resources/abc?e=1&token=x",
+      },
+    );
+    expect(dl.ok).toBe(false);
+    expect(dl.message).toMatch(/未能读取到有效Token/);
   });
 
   it("formats endpoints for the challenge brief", () => {

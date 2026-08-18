@@ -123,6 +123,39 @@ export function resolveDasctfAssetUrl(url: string, agentApiBase: string): string
   return trimmed.startsWith("/") ? `${origin}${trimmed}` : `${origin}/${trimmed}`;
 }
 
+/**
+ * Live `/adl-oss/...` often returns HTTP 200 with a JSON business error, e.g.
+ * `{"code":"40401","message":"未能读取到有效Token"}`. That is NOT an attachment.
+ * Agent AccessKey (`X-Agent-AccessKey`) authenticates Agent API routes only;
+ * adl-oss appears to expect a separate web-session Token.
+ */
+export function parseDasctfDownloadBusinessError(bodyText: string): string | null {
+  const trimmed = bodyText.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const j = JSON.parse(trimmed) as { code?: unknown; message?: unknown };
+    if (typeof j.code === "string" && j.code !== "00000") {
+      const msg = typeof j.message === "string" ? j.message.trim() : "";
+      return msg || `DASCTF download error code=${j.code}`;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** Whether we should buffer the body and check for JSON business errors before saving. */
+export function shouldProbeDasctfDownloadBody(res: Response): boolean {
+  const ct = (res.headers.get("content-type") ?? "").toLowerCase();
+  const cd = res.headers.get("content-disposition") ?? "";
+  if (/octet-stream|zip|gzip|image\/|audio\/|video\/|pdf|wasm/i.test(ct)) return false;
+  if (/filename=/i.test(cd)) return false;
+  if (/json|text\/plain/i.test(ct)) return true;
+  const len = Number(res.headers.get("content-length") ?? NaN);
+  // Missing/odd content-type with a tiny body — common for gateway JSON errors.
+  return Number.isFinite(len) && len > 0 && len <= 4096;
+}
+
 export function mapDasctfSubmit(json: DasctfEnvelope): SubmissionResult {
   const msg = json.message ?? "";
   const remaining = parseDasctfRemainingAttempts(msg);
@@ -392,6 +425,35 @@ export class DasctfAgentContestAdapter implements ContestAdapter {
     const res = await this.#request(url);
     if (res.status === 429) return { ok: false, bytes: 0, sha256: "", retryable: true, message: "429 rate limited" };
     if (!res.ok) return { ok: false, bytes: 0, sha256: "", retryable: res.status >= 500, message: `HTTP ${res.status}` };
+
+    // adl-oss / some gateways return HTTP 200 + JSON error (e.g. missing web Token).
+    if (shouldProbeDasctfDownloadBody(res)) {
+      const text = await res.text();
+      const business = parseDasctfDownloadBusinessError(text);
+      if (business) {
+        return { ok: false, bytes: 0, sha256: "", retryable: false, message: business };
+      }
+      const buf = Buffer.from(text);
+      const synth = new Response(buf, {
+        status: 200,
+        headers: {
+          "content-type": res.headers.get("content-type") ?? "text/plain",
+          "content-length": String(buf.length),
+        },
+      });
+      const streamedText = await streamResponseToSink(synth, sink);
+      if (!streamedText.ok) {
+        return {
+          ok: false,
+          bytes: streamedText.bytes,
+          sha256: streamedText.sha256,
+          retryable: streamedText.retryable,
+          message: streamedText.message,
+        };
+      }
+      return { ok: true, retryable: false, bytes: streamedText.bytes, sha256: streamedText.sha256 };
+    }
+
     const streamed = await streamResponseToSink(res, sink);
     if (!streamed.ok) {
       return { ok: false, bytes: streamed.bytes, sha256: streamed.sha256, retryable: streamed.retryable, message: streamed.message };
