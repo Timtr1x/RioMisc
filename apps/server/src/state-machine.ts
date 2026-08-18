@@ -31,6 +31,7 @@ export type TransitionEvent =
   | "SOLVER_STOPPED"
   | "RESTART_SOLVER"
   | "REOPEN"
+  | "RETRY_PREPARE"
   | "RECOVER_PREPARING"
   | "RECOVER_ACTIVE"
   | "RECOVER_VERIFYING"
@@ -117,7 +118,11 @@ const T: Partial<Record<ChallengeLifecycleStatus, Partial<Record<TransitionEvent
   SOLVED: {
     REOPEN: "QUEUED",
   },
-  // ERROR, UNSUPPORTED are terminal.
+  ERROR: {
+    /** Operator retry after a fatal prepare failure (e.g. attachment 404). */
+    RETRY_PREPARE: "DISCOVERED",
+  },
+  // UNSUPPORTED remains terminal.
 };
 
 export const EVENT_FOR_TRANSITION: Partial<Record<TransitionEvent, LifecycleEventName>> = {
@@ -141,6 +146,7 @@ export const EVENT_FOR_TRANSITION: Partial<Record<TransitionEvent, LifecycleEven
   SOLVER_STOPPED: "CHALLENGE_QUEUED",
   RESTART_SOLVER: "CHALLENGE_QUEUED",
   REOPEN: "CHALLENGE_QUEUED",
+  RETRY_PREPARE: "CHALLENGE_RECOVERY_RESET_PREPARATION",
   RECOVER_PREPARING: "CHALLENGE_RECOVERY_RESET_PREPARATION",
   RECOVER_ACTIVE: "CHALLENGE_RECOVERY_REQUEUED",
   RECOVER_VERIFYING: "CHALLENGE_RECOVERY_VERIFY_INTERRUPTED",

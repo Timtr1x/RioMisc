@@ -134,6 +134,17 @@ export async function main(argv: string[]): Promise<void> {
     });
 
   program
+    .command("retry-prepare <id>")
+    .description("Retry preparation for a challenge stuck in ERROR (ERROR → DISCOVERED)")
+    .action(async (id) => {
+      const r = (await api(`/api/challenges/${id}/retry-prepare`, { method: "POST" })) as {
+        from?: string;
+        to?: string;
+      };
+      console.log("retry-prepare", id, `${r.from ?? "?"} → ${r.to ?? "?"}`);
+    });
+
+  program
     .command("hint <id>")
     .description("Force-fetch a hint")
     .action(async (id) => {

@@ -84,6 +84,14 @@ describe("StateMachine", () => {
     expect(repos.challenges.get("ch_test")!.lifecycleStatus).toBe("QUEUED");
   });
 
+  it("retries prepare from ERROR back to DISCOVERED", () => {
+    expect(sm.transition("ch_test", "PREPARE_START").to).toBe("PREPARING");
+    expect(sm.transition("ch_test", "PREPARE_FAILED", { payload: { reason: "download failed" } }).to).toBe("ERROR");
+    expect(sm.transition("ch_test", "RETRY_PREPARE").to).toBe("DISCOVERED");
+    expect(repos.challenges.get("ch_test")!.lifecycleStatus).toBe("DISCOVERED");
+    expect(sm.transition("ch_test", "RESTART_SOLVER").allowed).toBe(false);
+  });
+
   it("rejects invalid transitions and keeps state", () => {
     // SOLVED is terminal
     expect(sm.transition("ch_test", "PREPARE_START").to).toBe("PREPARING");

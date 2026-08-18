@@ -1559,6 +1559,48 @@ Treat the rejection as negative evidence and continue solving.`;
     if (!res.allowed) throw new Error(`cannot restart ${challengeId} (${res.from})`);
   }
 
+  /**
+   * Operator recovery for prepare failures stuck in ERROR.
+   * ERROR → DISCOVERED, reset FAILED/PENDING attachments, clear prepare backoff.
+   */
+  retryPrepare(challengeId: string): { from: string; to: string } {
+    const { repos, bus, logger } = this.deps;
+    const challenge = repos.challenges.get(challengeId);
+    if (!challenge) throw new Error("unknown challenge");
+    if (challenge.lifecycleStatus !== "ERROR") {
+      throw new Error(`cannot retry-prepare while ${challenge.lifecycleStatus} (need ERROR)`);
+    }
+
+    this.preparing.delete(challengeId);
+    this.prepareBackoff.delete(challengeId);
+
+    for (const att of repos.attachments.listByChallenge(challengeId)) {
+      if (att.downloadStatus === "FAILED" || att.downloadStatus === "PENDING" || att.downloadStatus === "DOWNLOADING") {
+        repos.attachments.update(att.id, {
+          downloadStatus: "PENDING",
+          localPath: null,
+          sha256: null,
+          downloadedAt: null,
+        });
+      }
+    }
+
+    const res = this.deps.stateMachine.transition(challengeId, "RETRY_PREPARE", {
+      payload: { reason: "manual retry-prepare" },
+    });
+    if (!res.allowed) throw new Error(`cannot retry-prepare ${challengeId} (${res.from})`);
+
+    // Clear prepare blocks outside the transition payload (null must stay null, not "null").
+    repos.challenges.update(challengeId, { blockedReason: null });
+    bus.publish({
+      type: "CHALLENGE_RECOVERY_RESET_PREPARATION",
+      challengeId,
+      payload: { from: res.from, to: res.to, reason: "manual retry-prepare" },
+    });
+    logger.info({ event: "retry_prepare", challengeId, from: res.from, to: res.to });
+    return { from: res.from, to: res.to };
+  }
+
   setPriority(challengeId: string, priority: number): void {
     this.deps.repos.challenges.update(challengeId, { priority });
     this.deps.bus.publish({ type: "PRIORITY_CHANGED", challengeId, payload: { priority } });

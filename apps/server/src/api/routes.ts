@@ -171,6 +171,16 @@ export async function buildApi(deps: ApiDeps): Promise<FastifyInstance> {
     await control.restartSolver((req.params as { id: string }).id);
     return { ok: true };
   });
+  fastify.post("/api/challenges/:id/retry-prepare", async (req, reply) => {
+    try {
+      const result = control.retryPrepare((req.params as { id: string }).id);
+      return { ok: true, ...result };
+    } catch (e) {
+      const message = (e as Error).message;
+      if (/unknown challenge/i.test(message)) return reply.code(404).send({ error: message });
+      return reply.code(400).send({ error: message });
+    }
+  });
   fastify.post("/api/challenges/:id/hint", async (req) => {
     const hint = await control.forceHint((req.params as { id: string }).id);
     return { ok: true, hint };

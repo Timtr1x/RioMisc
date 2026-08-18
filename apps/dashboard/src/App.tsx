@@ -753,6 +753,8 @@ function Detail({
         setNote("已继续，等待调度");
       } else if (path.endsWith("/park")) {
         setNote("已搁置");
+      } else if (path.endsWith("/retry-prepare")) {
+        setNote(`已重新排队准备${r.from && r.to ? `（${String(r.from)} → ${String(r.to)}）` : ""}`);
       } else if (path.endsWith("/hint")) {
         setNote(r.hint ? "已获取 Hint" : "Hint 不可用");
       } else {
@@ -796,6 +798,17 @@ function Detail({
           <button disabled={busy} onClick={() => act(`/challenges/${id}/restart`)} className="danger">
             重启 Solver
           </button>
+          {d.lifecycleStatus === "ERROR" && (
+            <button
+              disabled={busy}
+              onClick={() => {
+                if (!window.confirm(`重新准备「${d.title}」？会从 ERROR 回到 DISCOVERED 并重下失败附件。`)) return;
+                void act(`/challenges/${id}/retry-prepare`);
+              }}
+            >
+              重新准备
+            </button>
+          )}
           <button disabled={busy} onClick={() => act(`/challenges/${id}/hint`)}>
             强制取 Hint
           </button>
