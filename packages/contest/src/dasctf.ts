@@ -104,6 +104,25 @@ export function normalizeDasctfFlagPayload(flag: string): string {
   return m ? m[1]! : trimmed;
 }
 
+/**
+ * Attachment URLs may be absolute CDN links or site-relative paths such as
+ * `/adl-oss/resources/...?token=...`. Relative paths must use the contest
+ * **origin** (e.g. https://pro.dasctf.com), not the Agent API prefix
+ * (`.../slab-match/api/v1/agent`), or downloads 404.
+ */
+export function resolveDasctfAssetUrl(url: string, agentApiBase: string): string {
+  const trimmed = url.trim();
+  if (!trimmed) return trimmed;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  let origin: string;
+  try {
+    origin = new URL(agentApiBase).origin;
+  } catch {
+    throw new Error(`invalid DASCTF agent base for asset URL: ${agentApiBase}`);
+  }
+  return trimmed.startsWith("/") ? `${origin}${trimmed}` : `${origin}/${trimmed}`;
+}
+
 export function mapDasctfSubmit(json: DasctfEnvelope): SubmissionResult {
   const msg = json.message ?? "";
   const remaining = parseDasctfRemainingAttempts(msg);
@@ -369,7 +388,8 @@ export class DasctfAgentContestAdapter implements ContestAdapter {
     sink?: import("node:stream").Writable,
   ): Promise<DownloadResult> {
     if (!attachment.url) return { ok: false, bytes: 0, sha256: "", retryable: false, message: "no attachment url" };
-    const res = await this.#request(attachment.url);
+    const url = resolveDasctfAssetUrl(attachment.url, this.baseUrl);
+    const res = await this.#request(url);
     if (res.status === 429) return { ok: false, bytes: 0, sha256: "", retryable: true, message: "429 rate limited" };
     if (!res.ok) return { ok: false, bytes: 0, sha256: "", retryable: res.status >= 500, message: `HTTP ${res.status}` };
     const streamed = await streamResponseToSink(res, sink);
@@ -387,10 +407,13 @@ export class DasctfAgentContestAdapter implements ContestAdapter {
     const json = await this.#getJson(`/ctf/exercise?exerciseId=${id}`);
     assertDasctfOk(json, `/ctf/exercise?exerciseId=${id}`);
     const d = (json.data ?? {}) as Record<string, unknown>;
-    const attachments = parseDasctfAttachments(d.attachment ?? d.file ?? d.files ?? d.attachments, id);
+    const attachments = parseDasctfAttachments(d.attachment ?? d.file ?? d.files ?? d.attachments, id).map((a) => ({
+      ...a,
+      url: a.url ? resolveDasctfAssetUrl(a.url, this.baseUrl) : null,
+    }));
     let description = stripHtml(String(d.description ?? ""));
-    // Platform rules: visible format is DASCTF{}/flag{}, API wants the inner payload.
-    description = `${description}\n\n【提交说明】flag 外形为 DASCTF{...} 或 flag{...}；交到平台时系统会自动只提交大括号内的内容。`.trim();
+    // Platform match-info rule: shape is DASCTF{}/flag{}; API body sends only `{...}` payload.
+    description = `${description}\n\n【提交说明】flag 格式为 DASCTF{...} 或 flag{...}；调用提交接口时只传大括号内的内容（适配器会自动剥掉前缀）。`.trim();
     const epText = formatDasctfEndpoints(d.endpoints);
     if (epText) description = `${description}\n\n${epText}`.trim();
     const detail: RemoteChallengeDetail = {

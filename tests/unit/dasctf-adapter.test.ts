@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   normalizeDasctfBaseUrl,
   normalizeDasctfFlagPayload,
+  resolveDasctfAssetUrl,
   parseDasctfRemoteId,
   parseDasctfRemainingAttempts,
   assertDasctfOk,
@@ -41,6 +42,19 @@ describe("dasctf helpers", () => {
     expect(normalizeDasctfFlagPayload("DASCTF{C7-TD-HB}")).toBe("C7-TD-HB");
   });
 
+  it("resolves relative /adl-oss attachment URLs against contest origin", () => {
+    const agentBase = "https://pro.dasctf.com/slab-match/api/v1/agent";
+    expect(
+      resolveDasctfAssetUrl(
+        "/adl-oss/resources/abc?e=1&token=x",
+        agentBase,
+      ),
+    ).toBe("https://pro.dasctf.com/adl-oss/resources/abc?e=1&token=x");
+    expect(
+      resolveDasctfAssetUrl("https://pro-resource.dasctf.com/resource/oss/x.zip", agentBase),
+    ).toBe("https://pro-resource.dasctf.com/resource/oss/x.zip");
+  });
+
   it("maps Agent API submit responses per docs + live 40001 messages", () => {
     expect(parseDasctfRemoteId("dasctf:pro.dasctf.com:1001")).toBe(1001);
 
@@ -74,10 +88,13 @@ describe("dasctf helpers", () => {
   });
 
   it("submitFlag maps live wrong-flag 40001 to WRONG instead of throwing", async () => {
+    let postedFlag: string | undefined;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
       if (url.endsWith("/match/notice/match-info")) return json({ code: "00000", data: {} });
       if (url.endsWith("/answer-panel/answer") && (init?.method ?? "GET").toUpperCase() === "POST") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { flag?: string };
+        postedFlag = body.flag;
         return json({ code: "40001", data: {}, message: "提交flag错误，请重新提交（当前还有49次提交机会）" });
       }
       return new Response("nope", { status: 404 });
@@ -90,6 +107,48 @@ describe("dasctf helpers", () => {
     const r = await adapter.submitFlag("dasctf:pro.dasctf.com:10663", "DASCTF{ni_cai?}");
     expect(r.status).toBe("WRONG");
     expect(r.correct).toBe(false);
+    expect(postedFlag).toBe("ni_cai?");
+  });
+
+  it("downloadAttachment resolves relative /adl-oss against contest origin", async () => {
+    const hits: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      hits.push(url);
+      if (url.endsWith("/match/notice/match-info")) return json({ code: "00000", data: {} });
+      if (url.startsWith("https://pro.dasctf.com/adl-oss/")) {
+        return new Response(Buffer.from("zip-bytes"), { status: 200 });
+      }
+      return new Response("nope", { status: 404 });
+    };
+    const adapter = new DasctfAgentContestAdapter({
+      baseUrl: "https://pro.dasctf.com",
+      accessKey: "ak",
+      fetchImpl,
+    });
+    await adapter.authenticate();
+    const dl = await adapter.downloadAttachment(
+      {
+        remoteId: "dasctf:pro.dasctf.com:10679",
+        title: "0_1_Game",
+        description: "",
+        category: "CRYPTO",
+        score: 200,
+        solveCount: null,
+        createdAt: null,
+        updatedAt: Date.now(),
+        attachments: [],
+      },
+      {
+        remoteId: null,
+        name: "game.zip",
+        url: "/adl-oss/resources/abc?e=1&token=x",
+      },
+    );
+    expect(dl.ok).toBe(true);
+    expect(dl.bytes).toBe(9);
+    expect(hits.some((u) => u.startsWith("https://pro.dasctf.com/adl-oss/resources/abc"))).toBe(true);
+    expect(hits.some((u) => u.includes("/slab-match/api/v1/agent/adl-oss"))).toBe(false);
   });
 
   it("formats endpoints for the challenge brief", () => {
