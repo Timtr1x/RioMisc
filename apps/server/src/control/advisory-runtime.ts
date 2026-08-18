@@ -3,7 +3,7 @@
 import { z, type ZodType } from "zod";
 import type { ModelConfig, ModelProviderConfig } from "@rio/domain";
 import type { Repositories } from "@rio/database";
-import type { RioLogger, SecretStore } from "@rio/shared";
+import { resolveChatEndpoint, type RioLogger, type SecretStore } from "@rio/shared";
 import { isModelUsable, loadModelAssignments } from "./model-assignments.js";
 
 export type AdvisoryTask = "MANAGER" | "REFLECTION";
@@ -272,17 +272,7 @@ export class HttpAdvisoryRuntime implements AdvisoryAgentRuntime {
 }
 
 function chatEndpoint(provider: ModelProviderConfig): string {
-  const base = provider.baseUrl.replace(/\/+$/, "");
-  if (provider.protocol === "ANTHROPIC_MESSAGES") {
-    if (base.endsWith("/v1/messages")) return base;
-    return `${base}/v1/messages`;
-  }
-  if (provider.protocol === "OPENAI_RESPONSES") {
-    if (base.endsWith("/responses")) return base;
-    return `${base}/responses`;
-  }
-  if (base.endsWith("/chat/completions")) return base;
-  return `${base}/chat/completions`;
+  return resolveChatEndpoint(provider.baseUrl, provider.protocol);
 }
 
 export function createCannedAdvisory(opts: {

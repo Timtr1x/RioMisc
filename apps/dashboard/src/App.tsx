@@ -1370,8 +1370,8 @@ function OrchestrationPanel({ refreshKey, onOpenChallenge }: { refreshKey: numbe
 function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: number }) {
   const [data, setData] = useState<{ providers: ProviderRow[]; models: ModelRow[]; assignments?: ModelAssignments } | null>(null);
   const [name, setName] = useState("");
-  const [protocol, setProtocol] = useState("OPENAI_CHAT_COMPLETIONS");
-  const [baseUrl, setBaseUrl] = useState("https://api.openai.com");
+  const [protocol, setProtocol] = useState("ANTHROPIC_MESSAGES");
+  const [baseUrl, setBaseUrl] = useState("https://llm-gateway.dasctf.com/llm-gateway/proxy/e/");
   const [apiKey, setApiKey] = useState("");
   const [drafts, setDrafts] = useState<Record<string, ModelAddDraft>>({});
   const [limitEdits, setLimitEdits] = useState<Record<string, { contextWindow: string; maxOutputTokens: string }>>({});
@@ -1566,6 +1566,12 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
     <>
       <div className="panel">
         <h3>添加 Provider</h3>
+        <p className="muted">
+          DASCTF 正式赛必须把「接口地址」填成控制台的<strong>网关 URL</strong>
+          （形如 <code>https://llm-gateway.dasctf.com/llm-gateway/proxy/e/…</code>），
+          不要填 <code>api.minimaxi.com</code> 直连。API Key 仍是你自己的上游 Key，不是平台 AccessKey。
+          MiniMax Anthropic 兼容选 <code>ANTHROPIC_MESSAGES</code>。
+        </p>
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -1574,22 +1580,27 @@ function Providers({ refresh, refreshKey }: { refresh: () => void; refreshKey: n
         >
           <div className="field">
             <label htmlFor="prov-name">显示名称</label>
-            <input id="prov-name" placeholder="opencode" value={name} onChange={(e) => setName(e.target.value)} />
+            <input id="prov-name" placeholder="DASCTF Gateway (MiniMax)" value={name} onChange={(e) => setName(e.target.value)} />
           </div>
           <div className="field">
             <label htmlFor="prov-protocol">协议</label>
             <select id="prov-protocol" value={protocol} onChange={(e) => setProtocol(e.target.value)}>
+              <option>ANTHROPIC_MESSAGES</option>
               <option>OPENAI_CHAT_COMPLETIONS</option>
               <option>OPENAI_RESPONSES</option>
-              <option>ANTHROPIC_MESSAGES</option>
             </select>
           </div>
           <div className="field">
-            <label htmlFor="prov-url">接口地址</label>
-            <input id="prov-url" placeholder="https://api.openai.com" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+            <label htmlFor="prov-url">接口地址（网关 URL）</label>
+            <input
+              id="prov-url"
+              placeholder="https://llm-gateway.dasctf.com/llm-gateway/proxy/e/…"
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+            />
           </div>
           <div className="field">
-            <label htmlFor="prov-key">API Key</label>
+            <label htmlFor="prov-key">上游 API Key（MiniMax / 厂商 Key）</label>
             <input id="prov-key" placeholder="sk-…" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
           </div>
           <button type="submit" className="primary" disabled={busy}>添加 Provider</button>

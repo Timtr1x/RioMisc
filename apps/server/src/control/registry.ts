@@ -1,9 +1,8 @@
 // Model Provider Registry (Phase 8, §55-59): CRUD + two-phase Test Connection.
 // API keys live in the SecretStore, never in SQLite.
-import type { RioLogger } from "@rio/shared";
+import { resolveChatEndpoint, type RioLogger, type SecretStore } from "@rio/shared";
 import type { Repositories } from "@rio/database";
 import type { ModelProviderConfig, ModelConfig, ProviderProtocol } from "@rio/domain";
-import type { SecretStore } from "@rio/shared";
 import { inferModelCapabilities, loadModelAssignments, mergeCapabilities } from "./model-assignments.js";
 import { buildVisionTestPayload, extractVisionReply, selectVisionTestModel, visionTestPassed } from "./capability-test.js";
 
@@ -231,21 +230,7 @@ export class ModelRegistry {
    * (e.g. https://api.openai.com vs https://opencode.ai/zen/go/v1).
    */
   #endpoint(provider: ModelProviderConfig): string {
-    const base = provider.baseUrl.replace(/\/+$/, "");
-    // Already a full chat/messages endpoint (or a DASCTF gateway that maps 1:1 to one).
-    if (/\/messages$/i.test(base) || /\/chat\/completions$/i.test(base) || /\/responses$/i.test(base)) {
-      return base;
-    }
-    const hasV1 = /\/v\d+$/i.test(base) || /\/v\d+\/[a-z]+$/i.test(base);
-    switch (provider.protocol) {
-      case "ANTHROPIC_MESSAGES":
-        return hasV1 ? `${base}/messages` : `${base}/v1/messages`;
-      case "OPENAI_RESPONSES":
-        return hasV1 ? `${base}/responses` : `${base}/v1/responses`;
-      case "OPENAI_CHAT_COMPLETIONS":
-      default:
-        return hasV1 ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
-    }
+    return resolveChatEndpoint(provider.baseUrl, provider.protocol);
   }
 
   /** Failure bookkeeping (§58): 3 consecutive → DEGRADED, 5 → DOWN. */

@@ -1,7 +1,7 @@
 // ControlPlane — the orchestrator (§3). Decides how the contest is played.
 // Polls → syncs challenges → prepares → triages → schedules → supervises
 // workers → verifies/submits → reacts to hints/feedback/recovery.
-import { hashHex, type RioLogger, type RuntimeConfig, type SecretStore } from "@rio/shared";
+import { adaptProviderBaseUrlForRuntime, hashHex, type RioLogger, type RuntimeConfig, type SecretStore } from "@rio/shared";
 import type { Repositories } from "@rio/database";
 import { SOLVER_CATEGORIES, type Challenge, type SolverType, type ModelRef, type ManagerMode, type ReflectionMode } from "@rio/domain";
 import type { ContestAdapter } from "@rio/contest";
@@ -647,7 +647,8 @@ depended on the previous files.`;
           id: p.id,
           displayName: p.displayName,
           protocol: p.protocol,
-          baseUrl: p.baseUrl,
+          // Anthropic SDK appends /v1/messages; DASCTF gateway roots need a `#` shim.
+          baseUrl: adaptProviderBaseUrlForRuntime(p.baseUrl, p.protocol),
           apiKeyRef: p.apiKeyRef,
           modelId: m.modelName,
           contextWindow: m.contextWindow,

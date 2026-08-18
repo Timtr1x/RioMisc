@@ -88,8 +88,10 @@ function pickVisionAdapter(config: StartConfig, providers: PiProviderSpec[]): Vi
   if (!spec) return null;
   const cacheDir = join(resolve(config.workspaceRoot), "state", "vision-cache");
   const budgetPath = join(resolve(config.workspaceRoot), "state", "vision-budget.json");
+  // Vision HTTP client resolves endpoints itself; strip Anthropic `#` shim if present.
+  const baseUrl = spec.baseUrl.includes("#") ? spec.baseUrl.slice(0, spec.baseUrl.indexOf("#")) : spec.baseUrl;
   return new HttpVisionAdapter({
-    baseUrl: spec.baseUrl,
+    baseUrl,
     apiKey: spec.apiKey,
     modelId: spec.modelId,
     protocol: spec.protocol,

@@ -124,19 +124,32 @@ npx tsx scripts/dasctf-probe.ts
 
 ### 大模型网关（game/gateway_doc.md）
 
-平台「网关 URL」只替换 Provider 的 **baseUrl**；**API Key 仍是你自己的上游 Key**，不要填平台 AccessKey。
+正式赛 **必须** 走平台「网关 URL」，不要直连 `api.minimaxi.com`。凭证边界：
+
+| 填哪里 | 填什么 |
+|---|---|
+| Provider 接口地址 | 控制台 **网关 URL**，如 `https://llm-gateway.dasctf.com/llm-gateway/proxy/e/ROOTaD_VNfr2UJwy` |
+| Provider API Key | 你自己的 MiniMax / 上游 Key（**不是** 平台 AccessKey） |
+| 比赛接入 AccessKey | 只用于拉题/交 flag |
 
 Dashboard → 模型：
 
 1. Add Provider
    - Protocol：`ANTHROPIC_MESSAGES`（MiniMax Anthropic 兼容）
-   - Base URL：控制台复制的网关 URL，例如  
-     `https://llm-gateway.dasctf.com/llm-gateway/proxy/e/<code>`
-   - API Key：MiniMax / 上游 Key（自行持有）
-2. 添加模型名（与厂商一致），点「测试连接」
-3. 分配主解题（及可选反思 / 视觉 / Manager）
+   - Base URL：粘贴控制台网关 URL（整段复制，不要自己拼路径）
+   - API Key：MiniMax Key
+2. 添加模型名（如 `MiniMax-M3`），点「测试连接」
+3. 设为主解题（及可选反思 / Manager）
 
-路径注意：Agent 会对 baseUrl 再拼 `/v1/messages`。若你在控制台登记的「原始 URL」已经带 `/v1/messages`，建议改成 `https://api.minimaxi.com/anthropic` 再生成网关，或把 Provider baseUrl 直接填成「完整 messages 端点」（本仓库会识别并以该 URL 原样请求）。
+路径说明：若控制台「原始 BaseURL」写成了  
+`https://api.minimaxi.com/anthropic/v1/messages`，生成的网关 URL **本身就是** messages 端点；RioMisc 会识别 `/llm-gateway/proxy/`，**不再**追加 `/v1/messages`（否则 404）。  
+更稳妥的登记方式是原始 URL 只写到 `https://api.minimaxi.com/anthropic`，再让 Agent 拼 `/v1/messages`；两种都能用。
+
+一键把现有 MiniMax Key 迁到网关（需 API 已启动）：
+
+```powershell
+npx tsx scripts/setup-dasctf-gateway.ts
+```
 
 有可用 Provider + Model 后，下一道 Solver 自动走 Pi。不要用
 `RIO_AGENT_RUNTIME=mock` 打正式赛。

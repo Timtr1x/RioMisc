@@ -161,6 +161,9 @@ export function visionMessageText(message: { content?: unknown; reasoning_conten
 
 export function chatEndpoint(baseUrl: string, protocol: string): string {
   const base = baseUrl.replace(/\/+$/, "");
+  if (/\/messages$/i.test(base) || /\/chat\/completions$/i.test(base) || /\/responses$/i.test(base)) return base;
+  // DASCTF gateway with full upstream path registered → POST to gateway root.
+  if (/\/llm-gateway\/proxy\//i.test(base)) return base;
   const hasV1 = /\/v\d+$/i.test(base) || /\/v\d+\/[a-z]+$/i.test(base);
   if (protocol === "ANTHROPIC_MESSAGES") return hasV1 ? `${base}/messages` : `${base}/v1/messages`;
   return hasV1 ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
