@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   normalizeDasctfBaseUrl,
+  normalizeDasctfFlagPayload,
   parseDasctfRemoteId,
   assertDasctfOk,
   mapDasctfSubmit,
@@ -28,6 +29,13 @@ describe("dasctf helpers", () => {
     expect(normalizeDasctfBaseUrl("https://pro.dasctf.com/slab-match/api/v1/agent/ctf/exercise-list")).toBe(
       "https://pro.dasctf.com/slab-match/api/v1/agent",
     );
+  });
+
+  it("strips DASCTF{}/flag{} wrappers for API payload", () => {
+    expect(normalizeDasctfFlagPayload("DASCTF{ni_cai?}")).toBe("ni_cai?");
+    expect(normalizeDasctfFlagPayload("flag{abc}")).toBe("abc");
+    expect(normalizeDasctfFlagPayload("plain")).toBe("plain");
+    expect(normalizeDasctfFlagPayload("DASCTF{C7-TD-HB}")).toBe("C7-TD-HB");
   });
 
   it("parses remote ids and maps submit", () => {

@@ -75,6 +75,16 @@ export function isDasctfRateLimitMessage(message: string | undefined, httpStatus
   return /rate|limit|频繁|冷却|稍后重试|too many/.test(msg);
 }
 
+/**
+ * Platform match rules: flags look like DASCTF{...} / flag{...}, but the Agent API
+ * wants only the payload inside the braces. Models often submit the full form.
+ */
+export function normalizeDasctfFlagPayload(flag: string): string {
+  const trimmed = flag.trim();
+  const m = /^(?:DASCTF|flag)\s*\{([\s\S]*)\}\s*$/i.exec(trimmed);
+  return m ? m[1]! : trimmed;
+}
+
 export function mapDasctfSubmit(json: DasctfEnvelope): SubmissionResult {
   if (json.code === "00000") {
     const data = (json.data ?? {}) as { isCorrect?: boolean };
@@ -298,8 +308,13 @@ export class DasctfAgentContestAdapter implements ContestAdapter {
 
   async submitFlag(remoteId: string, flag: string): Promise<SubmissionResult> {
     const id = parseDasctfRemoteId(remoteId);
+    const payload = normalizeDasctfFlagPayload(flag);
     // Wrong flags also come back as code=40001 — parse business body, do not treat as transport error.
-    const json = await this.#postJson("/answer-panel/answer", { exerciseId: id, flag }, { allowBusinessError: true });
+    const json = await this.#postJson(
+      "/answer-panel/answer",
+      { exerciseId: id, flag: payload },
+      { allowBusinessError: true },
+    );
     return mapDasctfSubmit(json);
   }
 
@@ -329,6 +344,8 @@ export class DasctfAgentContestAdapter implements ContestAdapter {
     const d = (json.data ?? {}) as Record<string, unknown>;
     const attachments = parseDasctfAttachments(d.attachment ?? d.file ?? d.files ?? d.attachments, id);
     let description = stripHtml(String(d.description ?? ""));
+    // Platform rules: visible format is DASCTF{}/flag{}, API wants the inner payload.
+    description = `${description}\n\n【提交说明】flag 外形为 DASCTF{...} 或 flag{...}；交到平台时系统会自动只提交大括号内的内容。`.trim();
     const epText = formatDasctfEndpoints(d.endpoints);
     if (epText) description = `${description}\n\n${epText}`.trim();
     const detail: RemoteChallengeDetail = {
