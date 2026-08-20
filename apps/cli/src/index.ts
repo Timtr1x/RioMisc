@@ -16,7 +16,8 @@ async function api(path: string, opts: { method?: string; body?: unknown } = {})
   return res.json();
 }
 
-function table(rows: Record<string, unknown>[]): void {  if (rows.length === 0) {
+function table(rows: Record<string, unknown>[]): void {
+  if (rows.length === 0) {
     console.log("(empty)");
     return;
   }
@@ -30,6 +31,18 @@ function table(rows: Record<string, unknown>[]): void {  if (rows.length === 0) 
 
 function sanitize(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 80) || "challenge";
+}
+
+/** `none` / `-` / empty → null (clear assignment slot). */
+function slotId(raw: string | undefined): string | null | undefined {
+  if (raw === undefined) return undefined;
+  const v = raw.trim();
+  if (!v || v.toLowerCase() === "none" || v === "-") return null;
+  return v;
+}
+
+function printJson(value: unknown, max = 12000): void {
+  console.log(JSON.stringify(value, null, 2).slice(0, max));
 }
 
 export async function main(argv: string[]): Promise<void> {
@@ -170,7 +183,15 @@ export async function main(argv: string[]): Promise<void> {
 
   program.command("providers").description("List model providers").action(async () => {
     const p = (await api("/api/providers")) as { providers: Record<string, unknown>[] };
-    table(p.providers.map((x) => ({ id: x.id, name: x.displayName, protocol: x.protocol, health: x.health, enabled: x.enabled })));
+    table(
+      p.providers.map((x) => ({
+        id: x.id,
+        name: x.displayName,
+        protocol: x.protocol,
+        health: x.health,
+        enabled: x.enabled,
+      })),
+    );
   });
 
   program
@@ -178,7 +199,331 @@ export async function main(argv: string[]): Promise<void> {
     .description("Test a provider connection (chat + tool call)")
     .action(async (id) => {
       const r = (await api(`/api/providers/${id}/test`, { method: "POST" })) as { result: Record<string, unknown> };
-      console.log(JSON.stringify(r.result, null, 2));
+      printJson(r.result);
+    });
+
+  program
+    .command("provider-add")
+    .description("Add a model provider (stores API key in SecretStore)")
+    .requiredOption("--name <name>", "display name")
+    .requiredOption("--protocol <protocol>", "OPENAI_CHAT_COMPLETIONS | OPENAI_RESPONSES | ANTHROPIC_MESSAGES")
+    .requiredOption("--base-url <url>", "provider base URL")
+    .requiredOption("--api-key <key>", "API key (stored encrypted)")
+    .option("--compat <profile>", "AUTO | OPENAI | DEEPSEEK | ZAI | ANTHROPIC")
+    .action(async (opts) => {
+      const body: Record<string, unknown> = {
+        displayName: opts.name,
+        protocol: String(opts.protocol).toUpperCase(),
+        baseUrl: opts.baseUrl,
+        apiKey: opts.apiKey,
+      };
+      if (opts.compat) body.compatProfile = String(opts.compat).toUpperCase();
+      const r = await api("/api/providers", { method: "POST", body });
+      printJson(r);
+    });
+
+  program
+    .command("provider-disable <id>")
+    .description("Disable a provider (soft-delete) and prune unusable assignments")
+    .action(async (id) => {
+      await api(`/api/providers/${id}`, { method: "DELETE" });
+      console.log("provider disabled", id);
+    });
+
+  program.command("models").description("List models").action(async () => {
+    const p = (await api("/api/providers")) as {
+      models: {
+        id: string;
+        providerId: string;
+        modelName: string;
+        role: string;
+        enabled: boolean;
+        capabilities?: { vision?: boolean; toolCalling?: boolean };
+        contextWindow?: number;
+        maxOutputTokens?: number;
+      }[];
+    };
+    table(
+      (p.models ?? []).map((m) => ({
+        id: m.id,
+        provider: m.providerId,
+        name: m.modelName,
+        role: m.role,
+        vision: m.capabilities?.vision ? "yes" : "no",
+        enabled: m.enabled,
+        ctx: m.contextWindow ?? "",
+        out: m.maxOutputTokens ?? "",
+      })),
+    );
+  });
+
+  program
+    .command("model-add")
+    .description("Add a model under a provider")
+    .requiredOption("--provider <id>", "provider id")
+    .requiredOption("--name <modelName>", "upstream model id/name")
+    .requiredOption("--context-window <n>", "context window tokens", (v) => Number(v))
+    .requiredOption("--max-output <n>", "max output tokens", (v) => Number(v))
+    .option("--role <role>", "PRIMARY | FALLBACK | GENERAL", "GENERAL")
+    .option("--vision", "mark capabilities.vision=true (use --no-vision to clear)")
+    .action(async (opts) => {
+      const body: Record<string, unknown> = {
+        providerId: opts.provider,
+        modelName: opts.name,
+        contextWindow: Number(opts.contextWindow),
+        maxOutputTokens: Number(opts.maxOutput),
+        role: String(opts.role).toUpperCase(),
+      };
+      if (typeof opts.vision === "boolean") body.capabilities = { vision: opts.vision };
+      const r = await api("/api/models", { method: "POST", body });
+      printJson(r);
+    });
+
+  program
+    .command("model-patch <id>")
+    .description("Patch model contextWindow / maxOutputTokens")
+    .option("--context-window <n>", "context window", (v) => Number(v))
+    .option("--max-output <n>", "max output tokens", (v) => Number(v))
+    .action(async (id, opts) => {
+      const body: Record<string, unknown> = {};
+      if (opts.contextWindow !== undefined) body.contextWindow = Number(opts.contextWindow);
+      if (opts.maxOutput !== undefined) body.maxOutputTokens = Number(opts.maxOutput);
+      if (!Object.keys(body).length) throw new Error("pass --context-window and/or --max-output");
+      const r = await api(`/api/models/${id}`, { method: "PATCH", body });
+      printJson(r);
+    });
+
+  program
+    .command("model-role <id> <role>")
+    .description("Set model role PRIMARY | FALLBACK | GENERAL")
+    .action(async (id, role) => {
+      await api(`/api/models/${id}/role`, { method: "POST", body: { role: String(role).toUpperCase() } });
+      console.log("model role", id, String(role).toUpperCase());
+    });
+
+  program
+    .command("model-capabilities <id>")
+    .description("Patch model capability flags (--flag / --no-flag)")
+    .option("--vision", "capabilities.vision")
+    .option("--tool-calling", "capabilities.toolCalling")
+    .option("--text", "capabilities.text")
+    .option("--reasoning", "capabilities.reasoning")
+    .option("--structured-output", "capabilities.structuredOutput")
+    .action(async (id, opts) => {
+      const body: Record<string, boolean> = {};
+      if (typeof opts.vision === "boolean") body.vision = opts.vision;
+      if (typeof opts.toolCalling === "boolean") body.toolCalling = opts.toolCalling;
+      if (typeof opts.text === "boolean") body.text = opts.text;
+      if (typeof opts.reasoning === "boolean") body.reasoning = opts.reasoning;
+      if (typeof opts.structuredOutput === "boolean") body.structuredOutput = opts.structuredOutput;
+      if (!Object.keys(body).length) throw new Error("pass at least one of --vision|--tool-calling|--text|--reasoning|--structured-output (or --no-*)");
+      const r = await api(`/api/models/${id}/capabilities`, { method: "POST", body });
+      printJson(r);
+    });
+
+  program
+    .command("model-disable <id>")
+    .description("Disable a model (soft-delete) and prune assignments")
+    .action(async (id) => {
+      await api(`/api/models/${id}`, { method: "DELETE" });
+      console.log("model disabled", id);
+    });
+
+  program.command("assignments").description("Show model slot assignments").action(async () => {
+    const a = await api("/api/models/assignments");
+    printJson(a);
+  });
+
+  program
+    .command("assign")
+    .description("Set model slots (use none/- to clear). At least one --slot required.")
+    .option("--solver <modelId>", "primarySolverModelId")
+    .option("--reflection <modelId>", "reflectionModelId")
+    .option("--vision <modelId>", "visionModelId")
+    .option("--triage <modelId>", "triageModelId")
+    .option("--manager <modelId>", "managerModelId")
+    .action(async (opts) => {
+      const body: Record<string, string | null> = {};
+      const solver = slotId(opts.solver);
+      const reflection = slotId(opts.reflection);
+      const vision = slotId(opts.vision);
+      const triage = slotId(opts.triage);
+      const manager = slotId(opts.manager);
+      if (solver !== undefined) body.primarySolverModelId = solver;
+      if (reflection !== undefined) body.reflectionModelId = reflection;
+      if (vision !== undefined) body.visionModelId = vision;
+      if (triage !== undefined) body.triageModelId = triage;
+      if (manager !== undefined) body.managerModelId = manager;
+      if (!Object.keys(body).length) throw new Error("pass at least one of --solver|--reflection|--vision|--triage|--manager");
+      const r = await api("/api/models/assignments", { method: "PUT", body });
+      printJson(r);
+    });
+
+  const contest = program.command("contest").description("Contest adapter connect / status");
+  contest
+    .command("status", { isDefault: true })
+    .description("Show contest connection status")
+    .action(async () => {
+      printJson(await api("/api/contest"));
+    });
+  contest
+    .command("connect")
+    .description("Connect mock | ctfd | dasctf (token may use env DASCTF_ACCESS_KEY / CTFD_TOKEN)")
+    .option("--kind <kind>", "dasctf | ctfd | mock", "dasctf")
+    .option("--base-url <url>", "contest base URL")
+    .option("--token <token>", "AccessKey / CTFd token")
+    .option("--cookie <cookie>", "CTFd session cookie")
+    .option("--misc-crypto-only", "only ingest misc/crypto challenges")
+    .option("--trusted-origin <origin>", "trusted credential origin (repeatable)", (v, acc: string[]) => {
+      acc.push(v);
+      return acc;
+    }, [])
+    .action(async (opts) => {
+      const body: Record<string, unknown> = { kind: String(opts.kind).toLowerCase() };
+      if (opts.baseUrl) body.baseUrl = opts.baseUrl;
+      if (opts.token) body.token = opts.token;
+      if (opts.cookie) body.cookie = opts.cookie;
+      if (opts.miscCryptoOnly) body.miscCryptoOnly = true;
+      if (opts.trustedOrigin?.length) body.trustedCredentialOrigins = opts.trustedOrigin;
+      const r = await api("/api/contest/connect", { method: "POST", body });
+      printJson(r);
+    });
+  contest
+    .command("disconnect")
+    .description("Disconnect the active contest adapter")
+    .action(async () => {
+      printJson(await api("/api/contest/disconnect", { method: "POST" }));
+    });
+
+  program
+    .command("candidate <id> <flag>")
+    .description("Inject a manual flag candidate")
+    .option("--confidence <n>", "0..1", "0.9")
+    .option("--reason <text>", "justification", "manual candidate from CLI")
+    .action(async (id, flag, opts) => {
+      await api(`/api/challenges/${id}/candidate`, {
+        method: "POST",
+        body: { value: flag, confidence: Number(opts.confidence), reason: opts.reason },
+      });
+      console.log("candidate queued", id, flag);
+    });
+
+  program
+    .command("submit <id> <candidateId>")
+    .description("Manually submit a verified/pending candidate")
+    .action(async (id, candidateId) => {
+      await api(`/api/challenges/${id}/submit`, { method: "POST", body: { candidateId } });
+      console.log("submitted", id, candidateId);
+    });
+
+  program
+    .command("accept <id> <candidateId>")
+    .description("Human-accept a candidate (no official judge / review hold)")
+    .action(async (id, candidateId) => {
+      await api(`/api/challenges/${id}/accept`, { method: "POST", body: { candidateId } });
+      console.log("accepted", id, candidateId);
+    });
+
+  program
+    .command("reject <id> <candidateId>")
+    .description("Human-reject a candidate")
+    .action(async (id, candidateId) => {
+      await api(`/api/challenges/${id}/reject`, { method: "POST", body: { candidateId } });
+      console.log("rejected", id, candidateId);
+    });
+
+  program
+    .command("reverify <id>")
+    .description("Re-run local verify on REJECTED_LOCAL candidates")
+    .action(async (id) => {
+      printJson(await api(`/api/challenges/${id}/reverify`, { method: "POST" }));
+    });
+
+  program
+    .command("retry-submission <id> <submissionId>")
+    .description("Human retry of UNKNOWN / RATE_LIMITED submission")
+    .action(async (id, submissionId) => {
+      await api(`/api/challenges/${id}/retry-submission`, { method: "POST", body: { submissionId } });
+      console.log("retry-submission", id, submissionId);
+    });
+
+  program
+    .command("resume-solving <id>")
+    .description("Resume solving after SUBMISSION_OUTCOME_UNKNOWN")
+    .action(async (id) => {
+      await api(`/api/challenges/${id}/resume-solving`, { method: "POST" });
+      console.log("resume-solving", id);
+    });
+
+  program
+    .command("switch-model <id> <modelId>")
+    .description("Switch the live solver model for a challenge")
+    .action(async (id, modelId) => {
+      await api(`/api/challenges/${id}/model`, { method: "POST", body: { modelId } });
+      console.log("switch-model", id, modelId);
+    });
+
+  program.command("visual-reviews").description("List visual review requests").action(async () => {
+    const r = (await api("/api/visual-reviews")) as {
+      pending: number;
+      items: {
+        id: string;
+        challengeId: string;
+        status: string;
+        sourcePath: string;
+        question: string | null;
+        createdAt: number;
+      }[];
+    };
+    console.log("pending", r.pending);
+    table(
+      (r.items ?? []).map((x) => ({
+        id: x.id,
+        challenge: x.challengeId,
+        status: x.status,
+        path: String(x.sourcePath ?? "").slice(0, 40),
+        question: String(x.question ?? "").slice(0, 40),
+      })),
+    );
+  });
+
+  program
+    .command("visual-answer <id> <observation>")
+    .description("Answer a pending visual review")
+    .option("--useful", "mark useful (default true; use --no-useful to clear)", true)
+    .action(async (id, observation, opts) => {
+      const r = await api(`/api/visual-reviews/${id}/answer`, {
+        method: "POST",
+        body: { observation, useful: opts.useful !== false },
+      });
+      printJson(r);
+    });
+
+  program
+    .command("visual-cancel <id>")
+    .description("Cancel a pending visual review")
+    .action(async (id) => {
+      await api(`/api/visual-reviews/${id}/cancel`, { method: "POST" });
+      console.log("visual-cancel", id);
+    });
+
+  program.command("benchmarks").description("List benchmark manifests and past runs").action(async () => {
+    printJson(await api("/api/benchmarks"), 20000);
+  });
+
+  program
+    .command("benchmark-run [id]")
+    .description("Run eval benchmarks (all, or one manifest id)")
+    .action(async (id) => {
+      const body = id ? { id } : {};
+      printJson(await api("/api/benchmarks/run", { method: "POST", body }), 20000);
+    });
+
+  program
+    .command("task-from-url <url>")
+    .description("Ingest a URL challenge into the running control plane (not headless solve-url)")
+    .action(async (url) => {
+      printJson(await api("/api/tasks/from-url", { method: "POST", body: { url } }));
     });
 
   program
@@ -264,8 +609,10 @@ export async function main(argv: string[]): Promise<void> {
 
   const manager = program.command("manager").description("Contest Manager orchestration");
   manager.command("status").description("Show Manager health and slots").action(async () => {
-    const s = await api("/api/orchestration/status");
-    console.log(JSON.stringify(s, null, 2));
+    printJson(await api("/api/orchestration/status"));
+  });
+  manager.command("settings").description("Show Manager + Reflection config snapshot").action(async () => {
+    printJson(await api("/api/orchestration/settings"), 20000);
   });
   manager.command("enable").description("Enable Manager in SHADOW mode").action(async () => {
     await api("/api/orchestration/settings", { method: "PATCH", body: { managerMode: "SHADOW" } });
@@ -275,6 +622,15 @@ export async function main(argv: string[]): Promise<void> {
     await api("/api/orchestration/settings", { method: "PATCH", body: { managerMode: "OFF" } });
     console.log("manager disabled");
   });
+  manager
+    .command("mode <mode>")
+    .description("Set Manager mode OFF | SHADOW | ACTIVE")
+    .action(async (mode) => {
+      const managerMode = String(mode).toUpperCase();
+      if (!["OFF", "SHADOW", "ACTIVE"].includes(managerMode)) throw new Error("mode must be OFF|SHADOW|ACTIVE");
+      await api("/api/orchestration/settings", { method: "PATCH", body: { managerMode } });
+      console.log("manager mode", managerMode);
+    });
   manager.command("replan").description("Request a Manager replan").action(async () => {
     await api("/api/orchestration/replan", { method: "POST" });
     console.log("replan requested");
@@ -291,6 +647,12 @@ export async function main(argv: string[]): Promise<void> {
       })),
     );
   });
+  manager
+    .command("plan <id>")
+    .description("Show one Manager plan")
+    .action(async (id) => {
+      printJson(await api(`/api/orchestration/plans/${id}`));
+    });
 
   program
     .command("strategy <id> [action]")

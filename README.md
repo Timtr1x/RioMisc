@@ -102,11 +102,20 @@ npm run cli -- <command> …          # 推荐入口
 | `hint <id>` | 强制取 hint |
 | `priority <id> <LOW\|NORMAL\|HIGH\|CRITICAL>` | 优先级 |
 
+### 比赛接入
+
+| 命令 | 作用 |
+|---|---|
+| `contest` / `contest status` | 连接状态 |
+| `contest connect --kind dasctf\|ctfd\|mock [--base-url] [--token] [--cookie] [--misc-crypto-only] [--trusted-origin …]` | 接入比赛（token 也可用 env `DASCTF_ACCESS_KEY` / `CTFD_TOKEN`） |
+| `contest disconnect` | 断开 |
+
 ### Manager / Reflection / 调度
 
 | 命令 | 作用 |
 |---|---|
-| `manager status` / `enable` / `disable` / `replan` / `plans` | Manager（enable = SHADOW） |
+| `manager status` / `settings` / `enable` / `disable` / `mode <OFF\|SHADOW\|ACTIVE>` | Manager |
+| `manager replan` / `plans` / `plan <id>` | 重规划与计划 |
 | `strategy <id> [lock\|unlock]` | 看/锁策略 |
 | `dispatch <id> <auto\|start\|hold>` | 人工派发闸 |
 | `reflection-status` / `reflection-on` / `reflection-off` `<id>` | 题级反思开关 |
@@ -114,49 +123,65 @@ npm run cli -- <command> …          # 推荐入口
 | `reflect <id> [--mode …]` | 强制跑一轮反思 |
 | `reflection <id>` | 触发反思（旧入口） |
 
-### 模型（很薄）
+### 模型 / 槽位
 
 | 命令 | 作用 |
 |---|---|
-| `providers` | 列出 Provider |
-| `provider-test <id>` | 连通性测试（chat + tool） |
+| `providers` / `provider-test <id>` | 列表 / 连通性测试 |
+| `provider-add --name --protocol --base-url --api-key [--compat]` | 新增 Provider |
+| `provider-disable <id>` | 软禁用 Provider |
+| `models` | 列表 |
+| `model-add --provider --name --context-window --max-output [--role] [--vision]` | 新增 Model |
+| `model-patch <id> [--context-window] [--max-output]` | 改窗口参数 |
+| `model-role <id> <PRIMARY\|FALLBACK\|GENERAL>` | 角色 |
+| `model-capabilities <id> [--vision\|--no-vision] …` | 能力位 |
+| `model-disable <id>` | 软禁用 Model |
+| `assignments` | 查看槽位 |
+| `assign [--solver\|--reflection\|--vision\|--triage\|--manager <id\|none>]` | 改槽位（`none`/`-` 清空） |
+| `switch-model <challengeId> <modelId>` | 切换在解题的 Solver 模型 |
 
-### 单题
+### Flag / 提交 / 视觉复核
+
+| 命令 | 作用 |
+|---|---|
+| `candidate <id> <flag> [--confidence] [--reason]` | 人工候选 |
+| `submit` / `accept` / `reject` `<id> <candidateId>` | 提交 / 人审 |
+| `reverify <id>` | 重验 REJECTED_LOCAL |
+| `retry-submission <id> <submissionId>` | 重试 UNKNOWN/限速提交 |
+| `resume-solving <id>` | UNKNOWN 后继续解题 |
+| `visual-reviews` | 列表 |
+| `visual-answer <id> <observation> [--useful\|--no-useful]` | 作答 |
+| `visual-cancel <id>` | 取消 |
+
+### 评测 / URL 任务 / 单题
+
+| 命令 | 作用 |
+|---|---|
+| `benchmarks` / `benchmark-run [id]` | 评测清单 / 跑 |
+| `task-from-url <url>` | 把 URL 题接入**正在跑**的控制平面 |
+| `solve <folder>` / `solve-url <url>` | headless 单题（自启 runtime，不依赖 Dashboard） |
 
 ```bash
 npm run cli -- solve /path/to/challenge --timeout 300
 npm run cli -- solve-url <url> [--out dir] [--timeout 300]
+npm run cli -- assign --vision mdl_xxx
+npm run cli -- contest connect --kind dasctf --base-url https://… --token …
 # 或：
 npm run solve -- /path/to/challenge --timeout 300
 ```
 
-`solve` 会自己拉起 headless runtime（`challenge.json` + `attachments/`，
-`answer.json` 可选），不依赖已在跑的 Dashboard。
-
 ### 覆盖范围：网页不可用时
 
-| 能力 | CLI | 网页挂了怎么办 |
-|---|---|---|
-| 静态默认（`localMaxWrong`、并发、reflection 默认…） | `start --config` + 改 `config/runtime.yaml` | 改 yaml 后重启 |
-| 题目 pause/resume/restart/delete/retry-prepare/hint/priority | ✅ | CLI |
-| Manager / 题级 Reflection / dispatch | ✅ | CLI |
-| Provider 列表与 test | ✅ | CLI |
-| 比赛 connect / disconnect（AccessKey 等） | ❌ | `curl` → `POST /api/contest/connect` 或改配置重启 |
-| 增删改 Provider / Model / capabilities / 槽位分配（视觉等） | ❌ | `curl` → `/api/providers`、`/api/models`、`/api/models/assignments` |
-| 人工 accept/reject flag、补交、视觉复核作答 | ❌ | `curl` → 对应 `/api/challenges/...`、`/api/visual-reviews/...` |
-| 全局 orchestration settings（不止 Manager enable） | 部分 | `curl` → `PATCH /api/orchestration/settings` |
-
-示例（API 仍在、仅网页挂了）：
-
-```bash
-# 查看当前模型槽位
-curl -s "$RIO_API/api/models/assignments" | jq .
-
-# 把视觉槽位指到已有 model id（需该模型 capabilities.vision=true）
-curl -s -X PUT "$RIO_API/api/models/assignments" \
-  -H "content-type: application/json" \
-  -d '{"visionModelId":"mdl_xxx"}'
-```
+| 能力 | CLI |
+|---|---|
+| 静态默认（`localMaxWrong`、并发、reflection **全局**默认…） | 改 `config/runtime.yaml` + `start --config`（进程内 API 不改 yaml 默认） |
+| 题目运维 / Manager / 题级 Reflection / dispatch | ✅ |
+| 比赛 connect / disconnect | ✅ |
+| Provider / Model CRUD、capabilities、槽位分配 | ✅ |
+| 人工 accept/reject、补交、视觉复核 | ✅ |
+| Manager mode OFF/SHADOW/ACTIVE、settings 只读 | ✅ |
+| Benchmark / task-from-url | ✅ |
+| SSE 事件流、workspace 图片预览 | ❌（仍用 Dashboard 或直接打 API） |
 
 完整 API 面见 `apps/server/src/api/routes.ts`；部署与 `RIO_API` /
 `RIO_API_TOKEN` 见 [docs/deploy.md](./docs/deploy.md)。
