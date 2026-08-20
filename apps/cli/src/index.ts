@@ -221,7 +221,7 @@ export async function main(argv: string[]): Promise<void> {
         skipApi: true,
         configOverrides: {
           contest: { adapter: "local", localChallengeDir: resolve(folder), poll: { initialMs: 1000, maxMs: 2000 } },
-          submission: { autoSubmit: true, confidenceThreshold: 0.85, localMaxWrong: 3, defaultCooldownMs: 1000 },
+          submission: { autoSubmit: true, confidenceThreshold: 0.85, localMaxWrong: 10, defaultCooldownMs: 1000 },
           paths: { dataDir: `${resolve(folder)}/.rio-solve`, configDir: resolve(folder) },
         } as never,
       });

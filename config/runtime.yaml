@@ -32,7 +32,7 @@ hint:
 submission:
   autoSubmit: true
   confidenceThreshold: 0.85
-  localMaxWrong: 3         # after 3 wrong: AUTO_SUBMIT_DISABLED → manual review
+  localMaxWrong: 10        # after 10 wrong: AUTO_SUBMIT_DISABLED → manual review
   defaultCooldownMs: 60000
   flagPattern: null        # null = prefix{payload} (flag / cumtctf / DASCTF / …)
 

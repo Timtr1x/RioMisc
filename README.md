@@ -230,7 +230,7 @@ start / resume 再送。
 - **Worker**：每题一个 fork 子进程。SDK 崩溃不影响控制平面。
 - **Lease + 恢复**：心跳 15s / TTL 45s。启动时清过期 lease、ACTIVE 回排队、
   重驱 SUBMITTING（先查提交历史，绝不盲目重交）。进行中的 Reflection 标 FAILED。
-- **提交**：`challenge_id + flag_hash` 唯一；同 Flag 不重交；3 次 Wrong 后
+- **提交**：`challenge_id + flag_hash` 唯一；同 Flag 不重交；10 次 Wrong 后
   `AUTO_SUBMIT_DISABLED`。CTFd / Mock 有裁判才自动交；URL / idle 停在 VERIFIED。
 - **Hint**：`startChallenge() + 10min → ELIGIBLE`，默认 stalled 才取。
 - **限速**：SUBMIT > HINT > DETAIL > POLL > DOWNLOAD，大附件不挡提交。
