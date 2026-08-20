@@ -84,6 +84,8 @@ export interface ToolContext {
   allowNetwork?: boolean;
   networkIsolation?: "NONE";
   vision?: VisionModelAdapter | null;
+  /** When vision is null because the assigned model is not vision-capable (or similar). */
+  visionUnavailableReason?: string | null;
   maxVisionCalls?: number;
   /** Solver domain for empty discover_tools overviews. */
   solverDomain?: "MISC" | "CRYPTO" | "ANY";
@@ -436,15 +438,23 @@ export async function analyzeVisualTool(ctx: ToolContext, params: unknown): Prom
     }
     const artifactDir = join(ctx.workspace.artifacts, "visual");
     mkdirSync(artifactDir, { recursive: true });
-    const runtime = new VisualRuntime({ vision: ctx.vision ?? null });
+    const mode = p.data.mode ?? "AUTO";
+    const unavailable = ctx.visionUnavailableReason ?? null;
+    const runtime = new VisualRuntime({
+      vision: ctx.vision ?? null,
+      unavailableReason: unavailable,
+    });
     const result = await runtime.analyze(
       {
         challengeId: ctx.challengeId,
         path: p.data.path,
         question: p.data.question,
-        mode: p.data.mode ?? "AUTO",
+        mode,
         force: p.data.force,
-        budget: { allowVisionModel: Boolean(ctx.vision), maxDerivedArtifacts: 4 },
+        budget: {
+          allowVisionModel: Boolean(ctx.vision),
+          maxDerivedArtifacts: 4,
+        },
       },
       abs,
       artifactDir,

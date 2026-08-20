@@ -10,7 +10,13 @@ import {
   type ArtifactRef,
 } from "@rio/tool-runtime";
 import { MockAgentRuntime, PiAgentRuntimeAdapter, type AgentRuntimeAdapter, type PiProviderSpec } from "@rio/agent-runtime";
-import { FileVisionCache, HttpVisionAdapter, loadFileBudget, type VisionModelAdapter } from "@rio/visual-runtime";
+import {
+  FileVisionCache,
+  HttpVisionAdapter,
+  loadFileBudget,
+  resolveVisionProvider,
+  type VisionModelAdapter,
+} from "@rio/visual-runtime";
 import { FileSecretStore } from "@rio/shared";
 import type { SolverType } from "@rio/domain";
 
@@ -80,27 +86,35 @@ async function selectRuntime(preferred: "mock" | "pi", config: StartConfig): Pro
   return new MockAgentRuntime();
 }
 
-function pickVisionAdapter(config: StartConfig, providers: PiProviderSpec[]): VisionModelAdapter | null {
-  const named = config.visual?.visionModelId;
-  const spec =
-    (named ? providers.find((p) => p.modelId === named && p.apiKey) : undefined) ??
-    providers.find((p) => p.vision && p.apiKey);
-  if (!spec) return null;
+function pickVisionAdapter(
+  config: StartConfig,
+  providers: PiProviderSpec[],
+): { adapter: VisionModelAdapter | null; unavailableReason: string | null } {
+  const pick = resolveVisionProvider(providers, config.visual?.visionModelId);
+  if (!pick.provider) return { adapter: null, unavailableReason: pick.unavailableReason };
+  const spec = pick.provider;
   const cacheDir = join(resolve(config.workspaceRoot), "state", "vision-cache");
   const budgetPath = join(resolve(config.workspaceRoot), "state", "vision-budget.json");
   // Vision HTTP client resolves endpoints itself; strip Anthropic `#` shim if present.
   const baseUrl = spec.baseUrl.includes("#") ? spec.baseUrl.slice(0, spec.baseUrl.indexOf("#")) : spec.baseUrl;
-  return new HttpVisionAdapter({
-    baseUrl,
-    apiKey: spec.apiKey,
-    modelId: spec.modelId,
-    protocol: spec.protocol,
-    cache: new FileVisionCache(cacheDir),
-    budget: loadFileBudget(budgetPath, config.visual?.maxVisionCalls ?? 40),
-  });
+  return {
+    adapter: new HttpVisionAdapter({
+      baseUrl,
+      apiKey: spec.apiKey,
+      modelId: spec.modelId,
+      protocol: spec.protocol,
+      cache: new FileVisionCache(cacheDir),
+      budget: loadFileBudget(budgetPath, config.visual?.maxVisionCalls ?? 40),
+    }),
+    unavailableReason: null,
+  };
 }
 
-function buildToolContext(config: StartConfig, vision?: VisionModelAdapter | null): ToolContext {
+function buildToolContext(
+  config: StartConfig,
+  vision?: VisionModelAdapter | null,
+  visionUnavailableReason?: string | null,
+): ToolContext {
   const wm = new WorkspaceManager(resolve(config.workspaceRoot, ".."));
   const root = resolve(config.workspaceRoot);
   return {
@@ -145,6 +159,7 @@ function buildToolContext(config: StartConfig, vision?: VisionModelAdapter | nul
     pythonExecutable: config.pythonExecutable || process.env.RIO_PYTHON || "python",
     networkIsolation: "NONE",
     vision: vision ?? null,
+    visionUnavailableReason: visionUnavailableReason ?? null,
     maxVisionCalls: config.visual?.maxVisionCalls ?? 40,
     experiments: (() => {
       const file = join(root, "state", "experiments.json");
@@ -215,6 +230,7 @@ process.on("message", async (msg: { type: string; [k: string]: unknown }) => {
       try {
         runtimeAdapter = await selectRuntime(currentConfig.runtime, currentConfig);
         let vision: VisionModelAdapter | null = null;
+        let visionUnavailableReason: string | null = null;
         if (currentConfig.pi && currentConfig.pi.providers.length > 0) {
           const secrets = new FileSecretStore(currentConfig.pi.secretsFile, process.env.CTF_RUNTIME_MASTER_KEY);
           const decrypted: PiProviderSpec[] = [];
@@ -222,9 +238,11 @@ process.on("message", async (msg: { type: string; [k: string]: unknown }) => {
             const apiKey = await secrets.get(p.apiKeyRef);
             if (apiKey) decrypted.push({ ...p, apiKey });
           }
-          vision = pickVisionAdapter(currentConfig, decrypted);
+          const picked = pickVisionAdapter(currentConfig, decrypted);
+          vision = picked.adapter;
+          visionUnavailableReason = picked.unavailableReason;
         }
-        const ctx = buildToolContext(currentConfig, vision);
+        const ctx = buildToolContext(currentConfig, vision, visionUnavailableReason);
         const tools = listDirectPiTools().map((t) => ({ name: t.name, description: t.summary }));
         const sessionConfig = {
           sessionId: currentConfig.sessionId,

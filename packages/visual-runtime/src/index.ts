@@ -2,6 +2,7 @@ export * from "./types.js";
 export * from "./decode.js";
 export * from "./runtime.js";
 export * from "./vision-ok.js";
+export * from "./pick.js";
 export { computeVisualOverview } from "./local/overview.js";
 export { decodeQr } from "./local/qr.js";
 export { renderChannelsContactSheet } from "./local/channels.js";

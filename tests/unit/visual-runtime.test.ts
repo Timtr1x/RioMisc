@@ -14,6 +14,8 @@ import {
   encodeGif,
   decodeGifFrames,
   renderVisionOkImage,
+  resolveVisionProvider,
+  visionUnavailableAssigned,
   VISION_OK_TEXT,
   VisualRuntime,
 } from "@rio/visual-runtime";
@@ -156,5 +158,59 @@ describe("visual runtime", () => {
     expect(listed).toHaveLength(1);
     expect(listed[0]!.observations.some((o) => o.type === "QR" && o.value === "flag{tool-path}")).toBe(true);
     repos.db.close();
+  });
+
+  it("resolveVisionProvider refuses a non-vision assigned model without falling back", () => {
+    const providers = [
+      { modelId: "text-only", apiKey: "k1", vision: false },
+      { modelId: "vl-capable", apiKey: "k2", vision: true },
+    ];
+    const refused = resolveVisionProvider(providers, "text-only");
+    expect(refused.provider).toBeNull();
+    expect(refused.unavailableReason).toBe(visionUnavailableAssigned("text-only"));
+
+    const ok = resolveVisionProvider(providers, "vl-capable");
+    expect(ok.provider?.modelId).toBe("vl-capable");
+    expect(ok.unavailableReason).toBeNull();
+
+    const fallback = resolveVisionProvider(providers, null);
+    expect(fallback.provider?.modelId).toBe("vl-capable");
+    expect(fallback.unavailableReason).toBeNull();
+  });
+
+  it("VISION_MODEL mode fails clearly when assigned model is not vision-capable", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "rio-vis-nov-"));
+    dirs.push(dir);
+    const glyph = join(dir, "ok.png");
+    writeFileSync(glyph, encodePng(renderVisionOkImage()));
+    const art = join(dir, "art");
+    mkdirSync(art);
+    const reason = visionUnavailableAssigned("deepseek-v4-flash");
+    const runtime = new VisualRuntime({ unavailableReason: reason });
+    const result = await runtime.analyze(
+      { challengeId: "ch1", path: "ok.png", mode: "VISION_MODEL", question: "what text is visible?" },
+      glyph,
+      art,
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("does not support vision");
+    expect(result.evidence.summary).toContain("does not support vision");
+    expect(result.evidence.observations.some((o) => o.description?.includes("does not support vision"))).toBe(true);
+  });
+
+  it("analyze_visual AUTO surfaces unavailable reason when vision slot is text-only", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "rio-av-nov-"));
+    dirs.push(dir);
+    const ctx = makeCtx(dir, "ch_nov");
+    ctx.visionUnavailableReason = visionUnavailableAssigned("text-model");
+    writeFileSync(join(ctx.workspace.input, "ok.png"), encodePng(renderVisionOkImage()));
+    const result = await runTool(ctx, "analyze_visual", {
+      path: "input/ok.png",
+      mode: "AUTO",
+      question: "read any hidden text",
+    });
+    expect(result.ok).toBe(true);
+    const data = result.data as { evidence: { observations: { description?: string }[]; summary: string } };
+    expect(data.evidence.observations.some((o) => o.description?.includes("does not support vision"))).toBe(true);
   });
 });
