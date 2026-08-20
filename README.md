@@ -71,22 +71,95 @@ reflection:
   mode: HYBRID            # OFF | HEURISTIC | LLM | HYBRID
 ```
 
-CLI：
+## CLI
+
+`rio` 通过 Control API 操作运行中的控制平面（默认 `http://127.0.0.1:3000`，可用
+`RIO_API` 覆盖）。**Dashboard 只是前端**；网页挂了但 API 还在时，可用 CLI 或直接
+`curl`。整站（含 API）都挂了时，先 `rio start`，多数子命令才会可用。
 
 ```bash
-npm run cli -- status
-npm run cli -- challenges
-npm run cli -- manager status
-npm run cli -- manager enable          # SHADOW
-npm run cli -- strategy ch_crypto-002
-npm run cli -- reflect ch_crypto-002
+npm run cli -- <command> …          # 推荐入口
+# 等价：tsx apps/cli/src/index.ts …
 ```
 
-本地文件夹单题（`challenge.json` + `attachments/`，`answer.json` 可选）：
+### 进程与总览
+
+| 命令 | 作用 |
+|---|---|
+| `start [--config path]` | 前台启动控制平面 + API |
+| `stop` | 请求关闭正在跑的 server |
+| `status` | 系统状态 JSON |
+
+### 题目运维
+
+| 命令 | 作用 |
+|---|---|
+| `challenges` | 列表 |
+| `challenge <id>` | 详情 |
+| `pause` / `resume` / `park` / `unpark` / `restart` `<id>` | 生命周期 |
+| `delete <id>` | 删题并拉黑 remoteId（poller 不重建） |
+| `retry-prepare <id>` | ERROR → DISCOVERED，重新准备 |
+| `hint <id>` | 强制取 hint |
+| `priority <id> <LOW\|NORMAL\|HIGH\|CRITICAL>` | 优先级 |
+
+### Manager / Reflection / 调度
+
+| 命令 | 作用 |
+|---|---|
+| `manager status` / `enable` / `disable` / `replan` / `plans` | Manager（enable = SHADOW） |
+| `strategy <id> [lock\|unlock]` | 看/锁策略 |
+| `dispatch <id> <auto\|start\|hold>` | 人工派发闸 |
+| `reflection-status` / `reflection-on` / `reflection-off` `<id>` | 题级反思开关 |
+| `reflection-mode <id> <off\|heuristic\|llm\|hybrid>` | 题级反思模式 |
+| `reflect <id> [--mode …]` | 强制跑一轮反思 |
+| `reflection <id>` | 触发反思（旧入口） |
+
+### 模型（很薄）
+
+| 命令 | 作用 |
+|---|---|
+| `providers` | 列出 Provider |
+| `provider-test <id>` | 连通性测试（chat + tool） |
+
+### 单题
 
 ```bash
+npm run cli -- solve /path/to/challenge --timeout 300
+npm run cli -- solve-url <url> [--out dir] [--timeout 300]
+# 或：
 npm run solve -- /path/to/challenge --timeout 300
 ```
+
+`solve` 会自己拉起 headless runtime（`challenge.json` + `attachments/`，
+`answer.json` 可选），不依赖已在跑的 Dashboard。
+
+### 覆盖范围：网页不可用时
+
+| 能力 | CLI | 网页挂了怎么办 |
+|---|---|---|
+| 静态默认（`localMaxWrong`、并发、reflection 默认…） | `start --config` + 改 `config/runtime.yaml` | 改 yaml 后重启 |
+| 题目 pause/resume/restart/delete/retry-prepare/hint/priority | ✅ | CLI |
+| Manager / 题级 Reflection / dispatch | ✅ | CLI |
+| Provider 列表与 test | ✅ | CLI |
+| 比赛 connect / disconnect（AccessKey 等） | ❌ | `curl` → `POST /api/contest/connect` 或改配置重启 |
+| 增删改 Provider / Model / capabilities / 槽位分配（视觉等） | ❌ | `curl` → `/api/providers`、`/api/models`、`/api/models/assignments` |
+| 人工 accept/reject flag、补交、视觉复核作答 | ❌ | `curl` → 对应 `/api/challenges/...`、`/api/visual-reviews/...` |
+| 全局 orchestration settings（不止 Manager enable） | 部分 | `curl` → `PATCH /api/orchestration/settings` |
+
+示例（API 仍在、仅网页挂了）：
+
+```bash
+# 查看当前模型槽位
+curl -s "$RIO_API/api/models/assignments" | jq .
+
+# 把视觉槽位指到已有 model id（需该模型 capabilities.vision=true）
+curl -s -X PUT "$RIO_API/api/models/assignments" \
+  -H "content-type: application/json" \
+  -d '{"visionModelId":"mdl_xxx"}'
+```
+
+完整 API 面见 `apps/server/src/api/routes.ts`；部署与 `RIO_API` /
+`RIO_API_TOKEN` 见 [docs/deploy.md](./docs/deploy.md)。
 
 ## 测试
 
