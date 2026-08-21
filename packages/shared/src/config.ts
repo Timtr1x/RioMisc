@@ -167,7 +167,58 @@ export function resolveConfigPath(filePath?: string): string {
   return join(resolve("./config"), "runtime.yaml");
 }
 
+/**
+ * Load KEY=VALUE pairs from a `.env` file into `process.env` without
+ * overwriting variables that are already set (shell wins).
+ */
+export function loadDotEnvFile(filePath: string): void {
+  if (!existsSync(filePath)) return;
+  const text = readFileSync(filePath, "utf8");
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    if (process.env[key] !== undefined) continue;
+    let value = line.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[key] = value;
+  }
+}
+
+/** Prefer `<repo>/.env` next to runtime.yaml, then cwd `.env`. */
+export function loadRepoDotEnv(configFilePath?: string): void {
+  const cfg = resolveConfigPath(configFilePath);
+  loadDotEnvFile(join(dirname(cfg), "..", ".env"));
+  loadDotEnvFile(resolve(".env"));
+}
+
+/** Apply env overrides that must win over yaml (documented in deploy.md). */
+export function applyEnvConfigOverrides(cfg: RuntimeConfig): RuntimeConfig {
+  const next = { ...cfg, paths: { ...cfg.paths }, server: { ...cfg.server } };
+  const dataDir = process.env.RIO_DATA_DIR?.trim();
+  if (dataDir) next.paths.dataDir = resolve(dataDir);
+  const host = process.env.RIO_HOST?.trim();
+  if (host) next.server.host = host;
+  const portRaw = process.env.RIO_PORT?.trim();
+  if (portRaw) {
+    const port = Number(portRaw);
+    if (Number.isFinite(port) && port >= 1 && port <= 65535) next.server.port = port;
+  }
+  const token = process.env.RIO_API_TOKEN;
+  if (token !== undefined) next.server.apiToken = token || null;
+  return next;
+}
+
 export function loadConfig(filePath?: string): RuntimeConfig {
+  loadRepoDotEnv(filePath);
   const path = resolveConfigPath(filePath);
   let raw: unknown = {};
   try {
@@ -186,7 +237,7 @@ export function loadConfig(filePath?: string): RuntimeConfig {
       .join("; ");
     throw new Error(`Invalid runtime config (${path}): ${issues}`);
   }
-  return result.data;
+  return applyEnvConfigOverrides(result.data);
 }
 
 export type { StartPolicy };

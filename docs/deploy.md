@@ -179,7 +179,7 @@ Master key：环境变量 `CTF_RUNTIME_MASTER_KEY`，否则第一次启动写
 | 变量 | 作用 |
 |---|---|
 | `RIO_PYTHON` | Python 可执行文件（绝对路径最稳） |
-| `RIO_DATA_DIR` | 覆盖 `paths.dataDir` |
+| `RIO_DATA_DIR` | **覆盖** yaml 里的 `paths.dataDir`（可用仓库根 `.env`，已在 `.gitignore`） |
 | `RIO_CONFIG` | 覆盖配置文件路径 |
 | `RIO_HOST` / `RIO_PORT` | API 监听 |
 | `RIO_API_TOKEN` | 非 loopback 监听时必填 |
