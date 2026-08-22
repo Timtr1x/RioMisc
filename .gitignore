@@ -10,3 +10,6 @@ data/
 
 # Local-only development specs — keep on disk, do not publish
 开发指南*.md
+
+# Downloaded cloud solve traces (plaintext workspaces; may be large)
+做题经过/
